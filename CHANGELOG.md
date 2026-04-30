@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added (Phase 2 — object tree view in output)
+- `RoslynRepl.Editor.Core.ReplValueNode`: a row in the result tree (`Name`, `TypeName`, `Preview`, `IsExpandable`, `Children`)
+- `SimpleObjectSerializer.ToTree(value)`: reflection-based converter that walks fields (incl. private + inherited) and readable instance properties, with cycle detection (reference-equality `HashSet`), depth cap (default 6), collection-head cap (default 50), and special handling for `IDictionary` / `IEnumerable`
+- `ValueFormatter`: 1-line previews for primitives, strings (truncated + escaped), Unity types (`Vector2/3/4`, `Color`, `Quaternion`, `Rect`, `Bounds`, `GameObject`, `Component`, `UnityEngine.Object`), collections, and a `ToString` fallback
+- `TypeFormatter`: short type names with C# keyword aliases, generic argument formatting, array rank, and `Nullable<T>` → `T?`
+- Window output now renders complex results with a `MultiColumnTreeView` (Name / Type / Value columns), auto-expanding the root level. Leaf results (`int`, `string`, `Vector3`, etc.) keep the inline `=> X` rendering from Phase 1 to avoid one-row trees
+- Compiler-generated `<...>k__BackingField` entries are filtered out so auto-property values appear only once via the property itself
+
 ### Added (Phase 1 — MVP REPL)
 - `RoslynRepl.Editor.Core.ReplEngine`: Roslyn-based one-shot compile + execute pipeline (`CSharpCompilation` → `Emit` → `Assembly.Load` → invoke)
 - `ReplCodeWrapper`: wraps user statements in a generated class/method with line-offset tracking so compiler diagnostics map back to user lines
