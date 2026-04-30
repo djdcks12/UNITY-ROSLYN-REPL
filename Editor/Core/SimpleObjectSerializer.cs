@@ -166,19 +166,7 @@ namespace RoslynRepl.Editor.Core
                 }
             }
 
-            // Skip properties on UnityEngine.Object subclasses entirely.
-            // Many of their accessors (Image.mainTexture, Material.color,
-            // Renderer.bounds, Canvas.worldCamera, …) read internal native
-            // state which fires "Assertion failed: 'ValidTRS()'" and similar
-            // native asserts when matrices are degenerate. Those asserts
-            // bypass managed try/catch and spam the Editor Console — even a
-            // single ToTree() can produce 140+ entries on a real UI hierarchy.
-            // Fields alone surface the SerializeField references users care
-            // about. For specific computed values, users can `return foo.bar;`.
-            bool includeProperties = opt.IncludeProperties
-                && !typeof(UnityEngine.Object).IsAssignableFrom(type);
-
-            if (includeProperties)
+            if (opt.IncludeProperties)
             {
                 // Only the most-derived declaration of each property to avoid
                 // duplicates from `new` shadowing or virtual overrides.
@@ -193,6 +181,16 @@ namespace RoslynRepl.Editor.Core
                     var getter = p.GetMethod;
                     if (getter == null || getter.IsStatic) continue;
                     if (!seenPropNames.Add(p.Name)) continue;
+
+                    // Skip properties whose *declaring type* lives in a
+                    // Unity-shipped assembly. Unity's accessors (Image.color,
+                    // Renderer.bounds, Canvas.worldCamera, Transform.position…)
+                    // commonly call into native code; degenerate state fires
+                    // "Assertion failed" entries that bypass managed try/catch
+                    // and spam the Console. Properties declared on user types
+                    // (MonoBehaviour / ScriptableObject subclasses, etc.) are
+                    // walked normally — that's where user intent lives.
+                    if (IsUnityFrameworkType(p.DeclaringType)) continue;
 
                     object v;
                     try { v = p.GetValue(obj); }
@@ -244,22 +242,37 @@ namespace RoslynRepl.Editor.Core
         {
             var children = new List<ReplValueNode>();
             int idx = 0;
-            foreach (DictionaryEntry e in dict)
+            // Mirror BuildEnumerableChildren: a custom IDictionary whose
+            // GetEnumerator() (or MoveNext / Current) throws must not abort
+            // the whole ToTree call. Surface as an error leaf and keep any
+            // entries already produced.
+            try
             {
-                if (idx >= opt.CollectionHeadCount)
+                foreach (DictionaryEntry e in dict)
                 {
-                    children.Add(new ReplValueNode
+                    if (idx >= opt.CollectionHeadCount)
                     {
-                        Name = "...",
-                        TypeName = "",
-                        Preview = $"(remaining {dict.Count - idx} entries truncated)",
-                        IsExpandable = false
-                    });
-                    break;
+                        int remaining = -1;
+                        try { remaining = dict.Count - idx; } catch { /* swallow */ }
+                        children.Add(new ReplValueNode
+                        {
+                            Name = "...",
+                            TypeName = "",
+                            Preview = remaining >= 0
+                                ? $"(remaining {remaining} entries truncated)"
+                                : "(remaining entries truncated)",
+                            IsExpandable = false
+                        });
+                        break;
+                    }
+                    var keyPreview = ValueFormatter.Format(e.Key);
+                    children.Add(BuildNode($"[{keyPreview}]", e.Value, opt, depth + 1, visited));
+                    idx++;
                 }
-                var keyPreview = ValueFormatter.Format(e.Key);
-                children.Add(BuildNode($"[{keyPreview}]", e.Value, opt, depth + 1, visited));
-                idx++;
+            }
+            catch (Exception ex)
+            {
+                children.Add(ErrorNode("<enumeration>", ex));
             }
             return children;
         }
@@ -284,6 +297,18 @@ namespace RoslynRepl.Editor.Core
             typeof(Rect), typeof(RectInt),
             typeof(Bounds), typeof(BoundsInt),
         };
+
+        private static bool IsUnityFrameworkType(Type t)
+        {
+            if (t == null) return false;
+            var asmName = t.Assembly.GetName().Name;
+            if (string.IsNullOrEmpty(asmName)) return false;
+            return asmName == "UnityEngine"
+                || asmName.StartsWith("UnityEngine.", StringComparison.Ordinal)
+                || asmName == "UnityEditor"
+                || asmName.StartsWith("UnityEditor.", StringComparison.Ordinal)
+                || asmName.StartsWith("Unity.", StringComparison.Ordinal);
+        }
 
         private static bool IsLeafType(Type t)
         {
