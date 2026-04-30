@@ -179,11 +179,19 @@ namespace RoslynRepl.Editor.Core
         }
 
         // Looks for any *static* public member (property or field) on `t`
-        // whose value type is `t` itself (or a base of `t`). Standard
-        // singleton patterns expose themselves like this regardless of name —
-        // "Instance", "it", "I", "Self", "Current", etc. Property is preferred
-        // when a standard-named one exists (so "Instance" beats "Default" when
-        // both happen to match), otherwise the first match wins.
+        // whose value type is related to `t`. Two acceptance shapes:
+        //  (a) member type is `t` itself or a derived type — always a singleton
+        //      candidate regardless of name (covers the canonical
+        //      `public static Foo Instance;` declared on `Foo`).
+        //  (b) member type is a base class or interface that `t` implements —
+        //      accepted only when the name is a standard singleton accessor
+        //      ("Instance", "it", "Current", …). This avoids false positives
+        //      such as `public static IDisposable s_dispose` on unrelated
+        //      classes while still catching `public static IService Current
+        //      => _instance` and `public static BaseThing Instance = new
+        //      DerivedThing()` declared on the derived class.
+        // Property is preferred when a standard-named match exists; otherwise
+        // the first match wins. Fields are searched only if no property hit.
         private static MemberInfo FindSelfReturningStaticMember(Type t)
         {
             const BindingFlags bf = BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly;
@@ -194,9 +202,10 @@ namespace RoslynRepl.Editor.Core
             {
                 if (p.GetMethod == null) continue;
                 if (p.GetIndexParameters().Length > 0) continue;
-                if (!t.IsAssignableFrom(p.PropertyType)) continue;
+                bool nameStandard = IsStandardSingletonName(p.Name);
+                if (!IsSingletonShape(p.PropertyType, t, nameStandard)) continue;
                 firstProp ??= p;
-                if (IsStandardSingletonName(p.Name)) { standardNamedProp = p; break; }
+                if (nameStandard) { standardNamedProp = p; break; }
             }
             if (standardNamedProp != null) return standardNamedProp;
             if (firstProp != null) return firstProp;
@@ -205,11 +214,26 @@ namespace RoslynRepl.Editor.Core
             FieldInfo firstField = null;
             foreach (var f in t.GetFields(bf))
             {
-                if (!t.IsAssignableFrom(f.FieldType)) continue;
+                bool nameStandard = IsStandardSingletonName(f.Name);
+                if (!IsSingletonShape(f.FieldType, t, nameStandard)) continue;
                 firstField ??= f;
-                if (IsStandardSingletonName(f.Name)) { standardNamedField = f; break; }
+                if (nameStandard) { standardNamedField = f; break; }
             }
             return standardNamedField ?? firstField;
+        }
+
+        // Decides whether a static member of `memberType` declared on
+        // `declaringType` is shaped like a singleton accessor. See
+        // FindSelfReturningStaticMember for the two accepted shapes.
+        private static bool IsSingletonShape(Type memberType, Type declaringType, bool nameIsStandard)
+        {
+            if (memberType == null) return false;
+            // Shape (a): member type ≡ declaring type or a subclass.
+            if (declaringType.IsAssignableFrom(memberType)) return true;
+            // Shape (b): member type is a base / interface of declaring type —
+            // only accept with a standard singleton name to keep noise out.
+            if (nameIsStandard && memberType.IsAssignableFrom(declaringType)) return true;
+            return false;
         }
 
         private static bool IsStandardSingletonName(string name)
