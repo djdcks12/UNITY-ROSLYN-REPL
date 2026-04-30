@@ -2,6 +2,8 @@ using System;
 using UnityEditor;
 using UnityEngine;
 using UnityEngine.UIElements;
+using RoslynRepl.Editor.Core;
+using RoslynRepl.Editor.Diagnostics;
 
 namespace RoslynRepl.Editor.UI
 {
@@ -10,6 +12,20 @@ namespace RoslynRepl.Editor.UI
         private const string PackageRoot = "Packages/com.roslyn-repl";
         private const string UxmlPath = PackageRoot + "/Editor/UI/Layouts/RoslynReplWindow.uxml";
         private const string UssPath  = PackageRoot + "/Editor/UI/Layouts/RoslynReplWindow.uss";
+
+        private const string SessionKey_CodeText = "RoslynRepl.CodeText";
+
+        private const string DefaultCode =
+@"// Roslyn REPL — write C# below, F5 or Ctrl+Enter to run.
+// Use 'return X;' to surface a value. Debug.Log() output is captured.
+return UnityEngine.Application.unityVersion;";
+
+        private TextField _codeInput;
+        private VisualElement _outputContent;
+        private ScrollView _outputScroll;
+        private Label _durationLabel;
+        private Label _modeLabel;
+        private Label _outputSummary;
 
         [MenuItem("Tools/Roslyn REPL/Open", priority = 10)]
         public static void Open()
@@ -41,36 +57,167 @@ namespace RoslynRepl.Editor.UI
 
         private void BindControls(VisualElement root)
         {
-            var version = ReadPackageVersion();
-            var versionLabel = root.Q<Label>("version-label");
-            if (versionLabel != null) versionLabel.text = $"v{version}";
+            _codeInput     = root.Q<TextField>("code-input");
+            _outputContent = root.Q<VisualElement>("output-content");
+            _outputScroll  = root.Q<ScrollView>("output-scroll");
+            _durationLabel = root.Q<Label>("duration-label");
+            _modeLabel     = root.Q<Label>("mode-label");
+            _outputSummary = root.Q<Label>("output-summary-label");
 
-            var modeLabel = root.Q<Label>("mode-label");
-            if (modeLabel != null)
+            // Code input: restore from session and persist on change
+            if (_codeInput != null)
             {
-                UpdateModeLabel(modeLabel);
-                EditorApplication.playModeStateChanged += _ => UpdateModeLabel(modeLabel);
+                var saved = SessionState.GetString(SessionKey_CodeText, null);
+                _codeInput.value = string.IsNullOrEmpty(saved) ? DefaultCode : saved;
+                _codeInput.RegisterValueChangedCallback(evt =>
+                    SessionState.SetString(SessionKey_CodeText, evt.newValue));
             }
+
+            var runBtn = root.Q<Button>("run-btn");
+            if (runBtn != null) runBtn.clicked += Run;
+
+            var clearBtn = root.Q<Button>("clear-btn");
+            if (clearBtn != null) clearBtn.clicked += ClearOutput;
 
             var verifyBtn = root.Q<Button>("verify-btn");
-            if (verifyBtn != null)
-            {
-                verifyBtn.clicked += () => Diagnostics.SetupVerifier.Verify();
-            }
+            if (verifyBtn != null) verifyBtn.clicked += () => SetupVerifier.Verify();
 
-            var statusLabel = root.Q<Label>("status-label");
-            if (statusLabel != null)
+            UpdateModeLabel();
+            EditorApplication.playModeStateChanged += _ => UpdateModeLabel();
+
+            var versionLabel = root.Q<Label>("version-label");
+            if (versionLabel != null) versionLabel.text = $"v{ReadPackageVersion()}";
+
+            // F5 / Ctrl+Enter to run; intercept on TrickleDown so TextField
+            // doesn't swallow the key first.
+            root.RegisterCallback<KeyDownEvent>(OnKeyDown, TrickleDown.TrickleDown);
+
+            ShowReadyMessage();
+        }
+
+        private void OnKeyDown(KeyDownEvent evt)
+        {
+            bool isF5         = evt.keyCode == KeyCode.F5;
+            bool isCtrlReturn = evt.ctrlKey && (evt.keyCode == KeyCode.Return || evt.keyCode == KeyCode.KeypadEnter);
+            if (isF5 || isCtrlReturn)
             {
-                statusLabel.text = "Phase 0 skeleton loaded. Phase 1 will add the code editor and execution engine.";
+                Run();
+                evt.StopPropagation();
             }
         }
 
-        private static void UpdateModeLabel(Label label)
+        private void Run()
         {
-            label.text = EditorApplication.isPlayingOrWillChangePlaymode ? "PLAY" : "EDIT";
-            label.RemoveFromClassList("rr-badge--play");
-            label.RemoveFromClassList("rr-badge--edit");
-            label.AddToClassList(EditorApplication.isPlayingOrWillChangePlaymode ? "rr-badge--play" : "rr-badge--edit");
+            if (_codeInput == null || _outputContent == null) return;
+
+            var code = _codeInput.value ?? string.Empty;
+            ClearOutput();
+            AppendOutput($"▶ Running ({code.Length} chars)…", "info");
+
+            var result = ReplEngine.Execute(code);
+            RenderResult(result);
+        }
+
+        private void RenderResult(ReplResult result)
+        {
+            ClearOutput();
+
+            // Captured logs first
+            foreach (var log in result.Logs)
+            {
+                var sev = log.Type switch
+                {
+                    LogType.Error or LogType.Exception or LogType.Assert => "error",
+                    LogType.Warning => "warning",
+                    _ => "log"
+                };
+                AppendOutput($"[{log.Type}] {log.Message}", sev);
+            }
+
+            // Then the result, error, or diagnostics
+            switch (result.Kind)
+            {
+                case ReplResultKind.Success:
+                    AppendOutput($"=> {result.ValueDisplay}", "result");
+                    break;
+
+                case ReplResultKind.CompileError:
+                    AppendOutput("Compilation failed:", "error");
+                    foreach (var d in result.Diagnostics)
+                    {
+                        var prefix = d.IsInUserCode ? $"line {d.Line}, col {d.Column}" : "(internal)";
+                        AppendOutput($"  {prefix}: {d.Code} — {d.Message}", "diagnostic");
+                    }
+                    break;
+
+                case ReplResultKind.RuntimeError:
+                    AppendOutput($"Runtime error: {result.ErrorMessage}", "error");
+                    if (!string.IsNullOrEmpty(result.StackTrace))
+                        AppendOutput(result.StackTrace, "diagnostic");
+                    break;
+            }
+
+            UpdateStatusLabels(result);
+            ScrollOutputToBottom();
+        }
+
+        private void UpdateStatusLabels(ReplResult result)
+        {
+            if (_durationLabel != null)
+                _durationLabel.text = $"{result.Duration.TotalMilliseconds:0} ms";
+
+            if (_outputSummary != null)
+            {
+                _outputSummary.text = result.Kind switch
+                {
+                    ReplResultKind.Success      => "OK",
+                    ReplResultKind.CompileError => $"Compile error ({result.Diagnostics.Count})",
+                    ReplResultKind.RuntimeError => "Runtime error",
+                    _ => string.Empty
+                };
+            }
+        }
+
+        private void ClearOutput()
+        {
+            if (_outputContent != null) _outputContent.Clear();
+            if (_outputSummary != null) _outputSummary.text = string.Empty;
+        }
+
+        private void AppendOutput(string text, string severity)
+        {
+            if (_outputContent == null) return;
+            var label = new Label(text);
+            label.AddToClassList("rr-output-line");
+            label.AddToClassList($"rr-output-line--{severity}");
+            label.style.whiteSpace = WhiteSpace.Normal;
+            _outputContent.Add(label);
+        }
+
+        private void ScrollOutputToBottom()
+        {
+            if (_outputScroll == null) return;
+            EditorApplication.delayCall += () =>
+            {
+                if (_outputScroll == null) return;
+                _outputScroll.verticalScroller.value = _outputScroll.verticalScroller.highValue;
+            };
+        }
+
+        private void ShowReadyMessage()
+        {
+            ClearOutput();
+            AppendOutput("Roslyn REPL ready. Press F5 or Ctrl+Enter to run.", "info");
+        }
+
+        private void UpdateModeLabel()
+        {
+            if (_modeLabel == null) return;
+            bool playing = EditorApplication.isPlayingOrWillChangePlaymode;
+            _modeLabel.text = playing ? "PLAY" : "EDIT";
+            _modeLabel.RemoveFromClassList("rr-badge--play");
+            _modeLabel.RemoveFromClassList("rr-badge--edit");
+            _modeLabel.AddToClassList(playing ? "rr-badge--play" : "rr-badge--edit");
         }
 
         private static string ReadPackageVersion()

@@ -1,16 +1,36 @@
 <ui:UXML xmlns:ui="UnityEngine.UIElements" xmlns:uie="UnityEditor.UIElements" editor-extension-mode="True">
     <ui:VisualElement class="rr-root">
         <uie:Toolbar class="rr-toolbar">
+            <uie:ToolbarButton name="run-btn" text="▶ Run" class="rr-run-btn" />
+            <uie:ToolbarButton name="clear-btn" text="Clear" />
             <ui:Label text="Roslyn REPL" class="rr-title" />
             <ui:VisualElement style="flex-grow: 1;" />
+            <ui:Label name="duration-label" text="" class="rr-duration" />
             <ui:Label name="mode-label" text="EDIT" class="rr-badge rr-badge--edit" />
             <ui:Label name="version-label" text="v?" class="rr-version" />
             <uie:ToolbarButton name="verify-btn" text="Verify Setup" />
         </uie:Toolbar>
-        <ui:VisualElement class="rr-body">
-            <ui:Label text="Phase 0 — package skeleton" class="rr-heading" />
-            <ui:Label name="status-label" text="Loading…" class="rr-status" />
-            <ui:Label class="rr-hint" text="Next phases will add: code editor, output panel, instance inspector, watch expressions, snippet library." />
-        </ui:VisualElement>
+
+        <ui:TwoPaneSplitView orientation="Vertical" fixed-pane-initial-dimension="240" fixed-pane-index="1">
+            <ui:VisualElement name="code-pane" class="rr-pane">
+                <ui:VisualElement class="rr-pane-header">
+                    <ui:Label text="Code" class="rr-pane-title" />
+                    <ui:VisualElement style="flex-grow: 1;" />
+                    <ui:Label text="F5 / Ctrl+Enter to run" class="rr-pane-meta" />
+                </ui:VisualElement>
+                <ui:TextField name="code-input" multiline="true" class="rr-code-input" />
+            </ui:VisualElement>
+
+            <ui:VisualElement name="output-pane" class="rr-pane">
+                <ui:VisualElement class="rr-pane-header">
+                    <ui:Label text="Output" class="rr-pane-title" />
+                    <ui:VisualElement style="flex-grow: 1;" />
+                    <ui:Label name="output-summary-label" text="" class="rr-pane-meta" />
+                </ui:VisualElement>
+                <ui:ScrollView name="output-scroll" mode="Vertical" class="rr-output-scroll">
+                    <ui:VisualElement name="output-content" class="rr-output-content" />
+                </ui:ScrollView>
+            </ui:VisualElement>
+        </ui:TwoPaneSplitView>
     </ui:VisualElement>
 </ui:UXML>
