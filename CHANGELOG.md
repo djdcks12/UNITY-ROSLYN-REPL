@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added (Phase 3 — instance browser side panel)
+- New `RoslynRepl.Editor.Core.InstanceLocator` enumerates user-visible runtime instances by category (`MonoBehaviour`, `ScriptableObject`, `Singleton`, `All`) with substring filtering on type/display name. Hides Unity-shipped types, Editor framework objects, and the package's own assembly so the list stays focused on the user's project.
+- `SingletonScanner` (`[InitializeOnLoad]`) reflects over user assemblies for static `Instance` properties / fields. Member discovery is cached for the domain lifetime (invalidated on `AssemblyLoad`); values are read fresh each call so destroyed singletons drop out.
+- `RoslynRepl.Editor.UI.ObjectBrowserView` is a UI Toolkit side panel: title row + refresh button, `EnumField` category drop-down, `ToolbarSearchField`, and a virtualizing `ListView` of results. Each row shows display name (bold), short type name (italic teal), and a sub-label (scene / "ScriptableObject" / "Singleton"); inactive rows render dimmer.
+- The window now lays out as `[toolbar] / [browser | code+output]` via an outer horizontal `TwoPaneSplitView` (browser fixed at 280px) wrapping the existing vertical split.
+- Double-clicking (or Enter on) a browser row renders that instance into the output panel through `SimpleObjectSerializer.ToTree`, equivalent to typing `return X;` — but no code required.
+
 ### Added (Phase 2 — object tree view in output)
 - `RoslynRepl.Editor.Core.ReplValueNode`: a row in the result tree (`Name`, `TypeName`, `Preview`, `IsExpandable`, `Children`)
 - `SimpleObjectSerializer.ToTree(value)`: reflection-based converter that walks fields (incl. private + inherited) and readable instance properties, with cycle detection (reference-equality `HashSet`), depth cap (default 6), collection-head cap (default 50), and special handling for `IDictionary` / `IEnumerable`
