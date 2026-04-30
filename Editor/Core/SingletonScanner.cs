@@ -98,10 +98,23 @@ namespace RoslynRepl.Editor.Core
                     try { value = f.GetValue(null); }
                     catch { continue; }
                 }
+                else if (m is PropertyInfo p)
+                {
+                    // Plain C# property — getter may lazy-init with arbitrary
+                    // side effects, so we never invoke it. Try the canonical
+                    // pattern of reading a sibling static backing field of the
+                    // same type. If the user singleton has been touched once
+                    // already, the field is non-null and we surface it.
+                    var backing = FindBackingField(ownerType, p.PropertyType);
+                    if (backing != null)
+                    {
+                        try { value = backing.GetValue(null); }
+                        catch { continue; }
+                    }
+                    if (value == null) continue;
+                }
                 else
                 {
-                    // Plain C# property — we can't tell if the getter triggers
-                    // initialization side effects. Skip.
                     continue;
                 }
 
@@ -110,9 +123,9 @@ namespace RoslynRepl.Editor.Core
 
                 yield return new InstanceEntry
                 {
-                    Object = value as UnityEngine.Object,
+                    Value = value,
                     DeclaredType = ownerType,
-                    DisplayName = ownerType.Name + ".Instance",
+                    DisplayName = ownerType.Name + "." + m.Name,
                     TypeName = TypeFormatter.Short(ownerType),
                     SubLabel = "Singleton",
                     Category = InstanceCategory.Singleton,
@@ -153,21 +166,88 @@ namespace RoslynRepl.Editor.Core
                     if (t == null) continue;
                     if (!t.IsClass || t.IsAbstract) continue;
                     if (t.IsGenericTypeDefinition) continue;
+                    // Skip compiler-generated types (lambda caches "<>c",
+                    // closures "<…>d__N", anon types) — they self-return their
+                    // own cache instance and would flood the list as noise.
+                    if (t.Name.Length > 0 && t.Name[0] == '<') continue;
 
-                    var prop = t.GetProperty("Instance",
-                        BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly);
-                    if (prop != null && prop.GetMethod != null && prop.GetIndexParameters().Length == 0)
-                    {
-                        found.Add(prop);
-                        continue;
-                    }
-
-                    var field = t.GetField("Instance",
-                        BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly);
-                    if (field != null) found.Add(field);
+                    var member = FindSelfReturningStaticMember(t);
+                    if (member != null) found.Add(member);
                 }
             }
             return found;
+        }
+
+        // Looks for any *static* public member (property or field) on `t`
+        // whose value type is `t` itself (or a base of `t`). Standard
+        // singleton patterns expose themselves like this regardless of name —
+        // "Instance", "it", "I", "Self", "Current", etc. Property is preferred
+        // when a standard-named one exists (so "Instance" beats "Default" when
+        // both happen to match), otherwise the first match wins.
+        private static MemberInfo FindSelfReturningStaticMember(Type t)
+        {
+            const BindingFlags bf = BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly;
+
+            PropertyInfo standardNamedProp = null;
+            PropertyInfo firstProp = null;
+            foreach (var p in t.GetProperties(bf))
+            {
+                if (p.GetMethod == null) continue;
+                if (p.GetIndexParameters().Length > 0) continue;
+                if (!t.IsAssignableFrom(p.PropertyType)) continue;
+                firstProp ??= p;
+                if (IsStandardSingletonName(p.Name)) { standardNamedProp = p; break; }
+            }
+            if (standardNamedProp != null) return standardNamedProp;
+            if (firstProp != null) return firstProp;
+
+            FieldInfo standardNamedField = null;
+            FieldInfo firstField = null;
+            foreach (var f in t.GetFields(bf))
+            {
+                if (!t.IsAssignableFrom(f.FieldType)) continue;
+                firstField ??= f;
+                if (IsStandardSingletonName(f.Name)) { standardNamedField = f; break; }
+            }
+            return standardNamedField ?? firstField;
+        }
+
+        private static bool IsStandardSingletonName(string name)
+        {
+            return name == "Instance" || name == "instance"
+                || name == "it"       || name == "It"
+                || name == "I"
+                || name == "Self"     || name == "self"
+                || name == "Current"  || name == "current"
+                || name == "Singleton";
+        }
+
+        // Standard lazy-singleton pattern stores the live value in a static
+        // backing field of the same type ("private static T _instance;").
+        // We never invoke the user property getter (could lazy-init with
+        // arbitrary side effects); instead we read the matching field. Returns
+        // null if no matching static field is declared, in which case the
+        // singleton is silently skipped.
+        private static FieldInfo FindBackingField(Type owner, Type valueType)
+        {
+            const BindingFlags bf = BindingFlags.Public | BindingFlags.NonPublic
+                                  | BindingFlags.Static | BindingFlags.DeclaredOnly;
+            FieldInfo first = null;
+            foreach (var f in owner.GetFields(bf))
+            {
+                if (!valueType.IsAssignableFrom(f.FieldType)) continue;
+                if (IsStandardBackingFieldName(f.Name)) return f;
+                first ??= f;
+            }
+            return first;
+        }
+
+        private static bool IsStandardBackingFieldName(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return false;
+            return name == "_instance" || name == "s_instance" || name == "m_instance"
+                || name == "instance"  || name == "_Instance" || name == "Instance"
+                || name == "_it"        || name == "_self"     || name == "_current";
         }
 
         private static Type[] SafeTypes(ReflectionTypeLoadException rtle)

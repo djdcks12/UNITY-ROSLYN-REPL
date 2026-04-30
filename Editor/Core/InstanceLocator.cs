@@ -15,13 +15,16 @@ namespace RoslynRepl.Editor.Core
 
     public class InstanceEntry
     {
-        public UnityEngine.Object Object;     // null only for non-Unity singletons
+        public object Value;                  // the live instance — Unity Object or plain C# object
         public Type DeclaredType;             // C# type of the entry
         public string DisplayName;            // GO/asset/instance name
         public string TypeName;               // short type name (e.g. "PopupMinimap")
         public string SubLabel;               // scene name / "asset" / "Singleton"
         public InstanceCategory Category;
         public bool IsActive;                 // active in hierarchy (MB) / true otherwise
+
+        // Convenience for Unity-Object-typed entries.
+        public UnityEngine.Object UnityObject => Value as UnityEngine.Object;
     }
 
     /// <summary>
@@ -37,14 +40,18 @@ namespace RoslynRepl.Editor.Core
             string filter,
             int maxResults = 200)
         {
+            // "All" intentionally excludes Singleton scanning — that path does
+            // a domain-wide reflection sweep for self-returning static members,
+            // which can be expensive and (depending on the project) read user
+            // backing fields whose graphs are heavy. The user must opt in by
+            // selecting the Singleton category explicitly.
             IEnumerable<InstanceEntry> pool = category switch
             {
                 InstanceCategory.MonoBehaviour    => FindMonoBehaviours(),
                 InstanceCategory.ScriptableObject => FindScriptableObjects(),
                 InstanceCategory.Singleton        => SingletonScanner.Find(),
                 _                                 => FindMonoBehaviours()
-                                                       .Concat(FindScriptableObjects())
-                                                       .Concat(SingletonScanner.Find()),
+                                                       .Concat(FindScriptableObjects()),
             };
 
             if (!string.IsNullOrEmpty(filter))
@@ -89,7 +96,7 @@ namespace RoslynRepl.Editor.Core
 
                 yield return new InstanceEntry
                 {
-                    Object = mb,
+                    Value = mb,
                     DeclaredType = t,
                     DisplayName = mb.name,
                     TypeName = TypeFormatter.Short(t),
@@ -111,7 +118,7 @@ namespace RoslynRepl.Editor.Core
 
                 yield return new InstanceEntry
                 {
-                    Object = so,
+                    Value = so,
                     DeclaredType = t,
                     DisplayName = string.IsNullOrEmpty(so.name) ? t.Name : so.name,
                     TypeName = TypeFormatter.Short(t),

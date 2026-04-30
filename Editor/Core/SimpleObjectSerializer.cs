@@ -18,22 +18,52 @@ namespace RoslynRepl.Editor.Core
     {
         public class Options
         {
-            public int MaxDepth { get; set; } = 6;
+            public int MaxDepth { get; set; } = 4;
             public int CollectionHeadCount { get; set; } = 50;
             public bool IncludeNonPublic { get; set; } = true;
             public bool IncludeProperties { get; set; } = true;
+            // Hard cap on the total node count produced by a single ToTree call.
+            // Plain C# managers often hold Action events whose invocation lists
+            // reach view-side MonoBehaviours, exploding the graph. Even with
+            // depth caps, fan-out can produce tens of thousands of nodes and
+            // freeze the Editor. The cap aborts cleanly with a marker leaf.
+            public int MaxTotalNodes { get; set; } = 2000;
+        }
+
+        private class BuildState
+        {
+            public Options Options;
+            public HashSet<object> Visited;
+            public int NodeCount;
         }
 
         public static ReplValueNode ToTree(object value, Options options = null)
         {
             options ??= new Options();
-            var visited = new HashSet<object>(ReferenceEqualityComparer.Instance);
-            return BuildNode("(result)", value, options, depth: 0, visited);
+            var state = new BuildState
+            {
+                Options = options,
+                Visited = new HashSet<object>(ReferenceEqualityComparer.Instance),
+                NodeCount = 0,
+            };
+            return BuildNode("(result)", value, depth: 0, state);
         }
 
         private static ReplValueNode BuildNode(
-            string name, object value, Options opt, int depth, HashSet<object> visited)
+            string name, object value, int depth, BuildState state)
         {
+            state.NodeCount++;
+            if (state.NodeCount > state.Options.MaxTotalNodes)
+            {
+                return new ReplValueNode
+                {
+                    Name = name,
+                    TypeName = "",
+                    Preview = $"(node cap reached at {state.Options.MaxTotalNodes}; subtree truncated)",
+                    IsExpandable = false
+                };
+            }
+
             if (value == null)
             {
                 return new ReplValueNode
@@ -48,11 +78,6 @@ namespace RoslynRepl.Editor.Core
             var type = value.GetType();
             var typeName = TypeFormatter.Short(type);
 
-            // Unity "fake null": the C# wrapper survives after the native side
-            // is destroyed or was never assigned. value != null is true (C#),
-            // but Unity's == overload returns true for null. Walking such an
-            // object's fields will throw NullReferenceException from native
-            // accessors. Surface as a leaf with a destroyed/missing marker.
             if (value is UnityEngine.Object uo && uo == null)
             {
                 return new ReplValueNode
@@ -75,9 +100,7 @@ namespace RoslynRepl.Editor.Core
                 };
             }
 
-            // Reference-typed objects: detect cycles. Value types skip this
-            // (each reading produces a fresh box, never recurses on identity).
-            if (!type.IsValueType && visited.Contains(value))
+            if (!type.IsValueType && state.Visited.Contains(value))
             {
                 return new ReplValueNode
                 {
@@ -88,7 +111,7 @@ namespace RoslynRepl.Editor.Core
                 };
             }
 
-            if (depth >= opt.MaxDepth)
+            if (depth >= state.Options.MaxDepth)
             {
                 return new ReplValueNode
                 {
@@ -102,7 +125,7 @@ namespace RoslynRepl.Editor.Core
             bool added = false;
             if (!type.IsValueType)
             {
-                visited.Add(value);
+                state.Visited.Add(value);
                 added = true;
             }
 
@@ -118,15 +141,15 @@ namespace RoslynRepl.Editor.Core
 
                 if (value is IDictionary dict)
                 {
-                    node.Children = BuildDictChildren(dict, opt, depth, visited);
+                    node.Children = BuildDictChildren(dict, depth, state);
                 }
                 else if (value is IEnumerable enumerable && !(value is string))
                 {
-                    node.Children = BuildEnumerableChildren(enumerable, opt, depth, visited);
+                    node.Children = BuildEnumerableChildren(enumerable, depth, state);
                 }
                 else
                 {
-                    node.Children = BuildMemberChildren(value, type, opt, depth, visited);
+                    node.Children = BuildMemberChildren(value, type, depth, state);
                 }
 
                 if (node.Children.Count == 0)
@@ -136,16 +159,16 @@ namespace RoslynRepl.Editor.Core
             }
             finally
             {
-                if (added) visited.Remove(value);
+                if (added) state.Visited.Remove(value);
             }
         }
 
         private static List<ReplValueNode> BuildMemberChildren(
-            object obj, Type type, Options opt, int depth, HashSet<object> visited)
+            object obj, Type type, int depth, BuildState state)
         {
             var children = new List<ReplValueNode>();
             var bf = BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly;
-            if (opt.IncludeNonPublic) bf |= BindingFlags.NonPublic;
+            if (state.Options.IncludeNonPublic) bf |= BindingFlags.NonPublic;
 
             // Walk type hierarchy so base-class fields are visible too.
             var seenFieldNames = new HashSet<string>();
@@ -162,17 +185,18 @@ namespace RoslynRepl.Editor.Core
                     try { v = f.GetValue(obj); }
                     catch (Exception ex) { children.Add(ErrorNode(f.Name, ex)); continue; }
 
-                    children.Add(BuildNode(f.Name, v, opt, depth + 1, visited));
+                    children.Add(BuildNode(f.Name, v, depth + 1, state));
+                    if (state.NodeCount > state.Options.MaxTotalNodes) return children;
                 }
             }
 
-            if (opt.IncludeProperties)
+            if (state.Options.IncludeProperties)
             {
                 // Only the most-derived declaration of each property to avoid
                 // duplicates from `new` shadowing or virtual overrides.
                 var seenPropNames = new HashSet<string>();
                 var pbf = BindingFlags.Public | BindingFlags.Instance;
-                if (opt.IncludeNonPublic) pbf |= BindingFlags.NonPublic;
+                if (state.Options.IncludeNonPublic) pbf |= BindingFlags.NonPublic;
 
                 foreach (var p in type.GetProperties(pbf).OrderBy(p => p.Name))
                 {
@@ -199,7 +223,8 @@ namespace RoslynRepl.Editor.Core
                     catch (Exception ex)
                     { children.Add(ErrorNode(p.Name, ex)); continue; }
 
-                    children.Add(BuildNode(p.Name, v, opt, depth + 1, visited));
+                    children.Add(BuildNode(p.Name, v, depth + 1, state));
+                    if (state.NodeCount > state.Options.MaxTotalNodes) return children;
                 }
             }
 
@@ -207,7 +232,7 @@ namespace RoslynRepl.Editor.Core
         }
 
         private static List<ReplValueNode> BuildEnumerableChildren(
-            IEnumerable enumerable, Options opt, int depth, HashSet<object> visited)
+            IEnumerable enumerable, int depth, BuildState state)
         {
             var children = new List<ReplValueNode>();
             int idx = 0;
@@ -215,19 +240,20 @@ namespace RoslynRepl.Editor.Core
             {
                 foreach (var item in enumerable)
                 {
-                    if (idx >= opt.CollectionHeadCount)
+                    if (idx >= state.Options.CollectionHeadCount)
                     {
                         children.Add(new ReplValueNode
                         {
                             Name = "...",
                             TypeName = "",
-                            Preview = $"(remaining items truncated at {opt.CollectionHeadCount})",
+                            Preview = $"(remaining items truncated at {state.Options.CollectionHeadCount})",
                             IsExpandable = false
                         });
                         break;
                     }
-                    children.Add(BuildNode($"[{idx}]", item, opt, depth + 1, visited));
+                    children.Add(BuildNode($"[{idx}]", item, depth + 1, state));
                     idx++;
+                    if (state.NodeCount > state.Options.MaxTotalNodes) break;
                 }
             }
             catch (Exception ex)
@@ -238,19 +264,15 @@ namespace RoslynRepl.Editor.Core
         }
 
         private static List<ReplValueNode> BuildDictChildren(
-            IDictionary dict, Options opt, int depth, HashSet<object> visited)
+            IDictionary dict, int depth, BuildState state)
         {
             var children = new List<ReplValueNode>();
             int idx = 0;
-            // Mirror BuildEnumerableChildren: a custom IDictionary whose
-            // GetEnumerator() (or MoveNext / Current) throws must not abort
-            // the whole ToTree call. Surface as an error leaf and keep any
-            // entries already produced.
             try
             {
                 foreach (DictionaryEntry e in dict)
                 {
-                    if (idx >= opt.CollectionHeadCount)
+                    if (idx >= state.Options.CollectionHeadCount)
                     {
                         int remaining = -1;
                         try { remaining = dict.Count - idx; } catch { /* swallow */ }
@@ -266,8 +288,9 @@ namespace RoslynRepl.Editor.Core
                         break;
                     }
                     var keyPreview = ValueFormatter.Format(e.Key);
-                    children.Add(BuildNode($"[{keyPreview}]", e.Value, opt, depth + 1, visited));
+                    children.Add(BuildNode($"[{keyPreview}]", e.Value, depth + 1, state));
                     idx++;
+                    if (state.NodeCount > state.Options.MaxTotalNodes) break;
                 }
             }
             catch (Exception ex)
@@ -315,15 +338,13 @@ namespace RoslynRepl.Editor.Core
             if (t.IsPrimitive) return true;
             if (t.IsEnum) return true;
             if (_leafLikeTypes.Contains(t)) return true;
-            // UnityEngine.Transform (incl. RectTransform) has many computed
-            // properties (position, lossyScale, eulerAngles, …) that read from
-            // an internal matrix and fire a native ValidTRS() assertion when
-            // the underlying TRS is degenerate (NaN, zero scale, etc.). Those
-            // asserts log to the Console even when the managed call returns
-            // normally — try/catch can't suppress them. Treat as a leaf so we
-            // never recurse into them. Users can `return someRect.localPosition`
-            // directly when they need spatial details.
             if (typeof(UnityEngine.Transform).IsAssignableFrom(t)) return true;
+            // Treat any Delegate / Action / Func / Event as a leaf. Following
+            // their internal _invocationList field walks into every subscribed
+            // receiver — typically views and managers across the whole scene —
+            // and explodes the graph. Preview shows handler count + first
+            // target instead.
+            if (typeof(System.Delegate).IsAssignableFrom(t)) return true;
             return false;
         }
 

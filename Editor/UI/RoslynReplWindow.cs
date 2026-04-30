@@ -153,7 +153,9 @@ return UnityEngine.Application.unityVersion;";
             ClearOutput();
             AppendOutput($"▼ Browse: {entry.TypeName} \"{entry.DisplayName}\" ({entry.SubLabel})", "info");
 
-            object value = entry.Object;
+            object value = entry.Value;
+            // Unity fake-null: wrapper alive but native side gone.
+            if (value is UnityEngine.Object uo && uo == null) value = null;
             if (value == null)
             {
                 AppendOutput("(instance is null or destroyed)", "warning");

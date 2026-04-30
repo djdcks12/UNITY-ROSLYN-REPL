@@ -32,7 +32,14 @@ namespace RoslynRepl.Editor.UI
             _root.AddToClassList("rr-browser");
             host.Add(_root);
             BuildUI();
-            Refresh();
+            // Don't auto-Refresh on construction. The first scan can be heavy
+            // (especially with the Singleton category, which sweeps the whole
+            // app domain) and we don't want to freeze the Editor whenever the
+            // window opens or a domain reload completes. The user triggers it
+            // by changing category, typing in search, or pressing the refresh
+            // button.
+            if (_statusLabel != null)
+                _statusLabel.text = "Press ↻ or change filter to populate.";
         }
 
         public void Refresh()
