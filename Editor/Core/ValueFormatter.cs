@@ -41,12 +41,29 @@ namespace RoslynRepl.Editor.Core
                 case Bounds     b: return $"Bounds(center={Format(b.center)}, size={Format(b.size)})";
             }
 
+            // Note: pattern-match `is UnityEngine.Object` returns true even
+            // when the native side is destroyed (Unity's "fake null"), so
+            // accessing .name / .gameObject would throw a NullReferenceException
+            // from native bindings. Compare via the Unity == overload first.
             if (value is GameObject go)
+            {
+                if (go == null) return "GameObject (destroyed)";
                 return $"GameObject \"{go.name}\" (id={go.GetInstanceID()})";
+            }
             if (value is Component comp)
-                return $"{comp.GetType().Name} on \"{(comp.gameObject != null ? comp.gameObject.name : "<destroyed>")}\"";
+            {
+                var compTypeName = comp.GetType().Name;
+                if (comp == null) return $"{compTypeName} (destroyed)";
+                var goRef = comp.gameObject;
+                var ownerName = (goRef != null) ? goRef.name : "<destroyed>";
+                return $"{compTypeName} on \"{ownerName}\"";
+            }
             if (value is UnityEngine.Object uo)
-                return $"{uo.GetType().Name}: \"{uo.name}\"";
+            {
+                var uoTypeName = uo.GetType().Name;
+                if (uo == null) return $"{uoTypeName} (destroyed)";
+                return $"{uoTypeName}: \"{uo.name}\"";
+            }
 
             // Collections
             if (value is IDictionary dict)

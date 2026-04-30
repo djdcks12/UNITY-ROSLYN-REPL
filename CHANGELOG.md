@@ -14,6 +14,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Window output now renders complex results with a `MultiColumnTreeView` (Name / Type / Value columns), auto-expanding the root level. Leaf results (`int`, `string`, `Vector3`, etc.) keep the inline `=> X` rendering from Phase 1 to avoid one-row trees
 - Compiler-generated `<...>k__BackingField` entries are filtered out so auto-property values appear only once via the property itself
 
+### Fixed (Phase 2 — surfaced while inspecting real Unity scene objects)
+- `ValueFormatter.Format` no longer throws `NullReferenceException` when the value is a Unity "fake-null" reference (a wrapper whose native side is destroyed or was never assigned). Each `UnityEngine.Object` / `Component` / `GameObject` branch now compares against null using Unity's overload first and returns a `(destroyed)` marker.
+- `SimpleObjectSerializer.BuildNode` short-circuits on fake-null `UnityEngine.Object` values, emitting a `(missing/destroyed)` leaf instead of attempting to walk a destroyed object's fields.
+- `UnityEngine.Transform` (and `RectTransform`) is now treated as a leaf type. Its computed accessors (`position`, `lossyScale`, `eulerAngles`, …) read from internal matrices and fire a native `Assertion failed: 'ValidTRS()'` when the matrix is degenerate; those asserts bypass managed `try/catch` and spam the Console.
+- Properties on `UnityEngine.Object` subclasses are no longer walked. Many accessors (`Image.mainTexture`, `Material.color`, `Renderer.bounds`, `Canvas.worldCamera`, …) read native state and trigger the same class of native asserts. Fields still surface SerializeField references; users wanting a specific computed value can call it directly (e.g. `return rect.localPosition;`).
+
 ### Added (Phase 1 — MVP REPL)
 - `RoslynRepl.Editor.Core.ReplEngine`: Roslyn-based one-shot compile + execute pipeline (`CSharpCompilation` → `Emit` → `Assembly.Load` → invoke)
 - `ReplCodeWrapper`: wraps user statements in a generated class/method with line-offset tracking so compiler diagnostics map back to user lines

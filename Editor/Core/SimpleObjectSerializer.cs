@@ -48,6 +48,22 @@ namespace RoslynRepl.Editor.Core
             var type = value.GetType();
             var typeName = TypeFormatter.Short(type);
 
+            // Unity "fake null": the C# wrapper survives after the native side
+            // is destroyed or was never assigned. value != null is true (C#),
+            // but Unity's == overload returns true for null. Walking such an
+            // object's fields will throw NullReferenceException from native
+            // accessors. Surface as a leaf with a destroyed/missing marker.
+            if (value is UnityEngine.Object uo && uo == null)
+            {
+                return new ReplValueNode
+                {
+                    Name = name,
+                    TypeName = typeName,
+                    Preview = $"{typeName} (missing/destroyed)",
+                    IsExpandable = false
+                };
+            }
+
             if (IsLeafType(type))
             {
                 return new ReplValueNode
@@ -150,7 +166,19 @@ namespace RoslynRepl.Editor.Core
                 }
             }
 
-            if (opt.IncludeProperties)
+            // Skip properties on UnityEngine.Object subclasses entirely.
+            // Many of their accessors (Image.mainTexture, Material.color,
+            // Renderer.bounds, Canvas.worldCamera, …) read internal native
+            // state which fires "Assertion failed: 'ValidTRS()'" and similar
+            // native asserts when matrices are degenerate. Those asserts
+            // bypass managed try/catch and spam the Editor Console — even a
+            // single ToTree() can produce 140+ entries on a real UI hierarchy.
+            // Fields alone surface the SerializeField references users care
+            // about. For specific computed values, users can `return foo.bar;`.
+            bool includeProperties = opt.IncludeProperties
+                && !typeof(UnityEngine.Object).IsAssignableFrom(type);
+
+            if (includeProperties)
             {
                 // Only the most-derived declaration of each property to avoid
                 // duplicates from `new` shadowing or virtual overrides.
@@ -262,6 +290,15 @@ namespace RoslynRepl.Editor.Core
             if (t.IsPrimitive) return true;
             if (t.IsEnum) return true;
             if (_leafLikeTypes.Contains(t)) return true;
+            // UnityEngine.Transform (incl. RectTransform) has many computed
+            // properties (position, lossyScale, eulerAngles, …) that read from
+            // an internal matrix and fire a native ValidTRS() assertion when
+            // the underlying TRS is degenerate (NaN, zero scale, etc.). Those
+            // asserts log to the Console even when the managed call returns
+            // normally — try/catch can't suppress them. Treat as a leaf so we
+            // never recurse into them. Users can `return someRect.localPosition`
+            // directly when they need spatial details.
+            if (typeof(UnityEngine.Transform).IsAssignableFrom(t)) return true;
             return false;
         }
 
