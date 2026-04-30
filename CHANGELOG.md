@@ -18,6 +18,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Keyboard shortcuts: F5 and Ctrl+Enter to run
 - Code input persists across domain reloads via `SessionState`
 
+### Fixed (Phase 1 — PR review feedback)
+- Background Play Mode logs (server callbacks, ad SDK, gameplay updates) emitted during compile / emit / load no longer leak into REPL output. `ReplLogCapture` now starts only around the `MethodInfo.Invoke` window, and `ReplEngine` tags each captured log with `LogEntry.FromSnippet` based on whether the generated `__ReplScript` class appears in the stack trace; the UI shows only snippet-originated logs.
+- F5 / Ctrl+Enter no longer triggers Run multiple times after a CreateGUI rebuild. The window now unregisters the `KeyDownEvent` handler before re-registering, uses a named `OnPlayModeChanged` method (so subscriptions can be removed), and unsubscribes `EditorApplication.playModeStateChanged` in `OnDisable`.
+- Snippets that don't return a value no longer display a synthetic `=> null`. The output panel checks `ReplResult.HasReturnValue` and skips the result line when the wrapper's fallback `return null;` was used.
+
 ### Phase 1 limitations (deferred to later phases)
 - No variable persistence between runs (each Execute() is isolated) — Phase 4
 - No async/await support — Phase 6

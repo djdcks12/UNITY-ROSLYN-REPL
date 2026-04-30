@@ -67,6 +67,9 @@ namespace RoslynRepl.Editor.Core
         public LogType Type { get; set; }
         public string Message { get; set; }
         public string StackTrace { get; set; }
+        // True when StackTrace contains the generated wrapper class name
+        // (i.e. the log originated from inside the user's snippet).
+        public bool FromSnippet { get; set; }
     }
 
     public class DiagnosticInfo

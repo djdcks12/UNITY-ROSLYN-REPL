@@ -83,16 +83,30 @@ return UnityEngine.Application.unityVersion;";
             if (verifyBtn != null) verifyBtn.clicked += () => SetupVerifier.Verify();
 
             UpdateModeLabel();
-            EditorApplication.playModeStateChanged += _ => UpdateModeLabel();
+            // Dedupe: CreateGUI may be called multiple times (domain reload,
+            // explicit rebuild). root.Clear() removes children but keeps
+            // callbacks on root itself, and EditorApplication.playModeStateChanged
+            // is a static event — both will accumulate without explicit unregister.
+            EditorApplication.playModeStateChanged -= OnPlayModeChanged;
+            EditorApplication.playModeStateChanged += OnPlayModeChanged;
 
             var versionLabel = root.Q<Label>("version-label");
             if (versionLabel != null) versionLabel.text = $"v{ReadPackageVersion()}";
 
             // F5 / Ctrl+Enter to run; intercept on TrickleDown so TextField
-            // doesn't swallow the key first.
+            // doesn't swallow the key first. Unregister first to avoid stacking
+            // when CreateGUI rebuilds — otherwise one keypress triggers Run N times.
+            root.UnregisterCallback<KeyDownEvent>(OnKeyDown, TrickleDown.TrickleDown);
             root.RegisterCallback<KeyDownEvent>(OnKeyDown, TrickleDown.TrickleDown);
 
             ShowReadyMessage();
+        }
+
+        private void OnPlayModeChanged(PlayModeStateChange _) => UpdateModeLabel();
+
+        private void OnDisable()
+        {
+            EditorApplication.playModeStateChanged -= OnPlayModeChanged;
         }
 
         private void OnKeyDown(KeyDownEvent evt)
@@ -122,9 +136,13 @@ return UnityEngine.Application.unityVersion;";
         {
             ClearOutput();
 
-            // Captured logs first
+            // Captured logs first — but filter out background noise from other
+            // Play Mode systems (server, ad SDK, etc.) that fired during the
+            // Invoke window. ClassifyLogs in ReplEngine flags only logs whose
+            // stack trace contains the generated wrapper class.
             foreach (var log in result.Logs)
             {
+                if (!log.FromSnippet) continue;
                 var sev = log.Type switch
                 {
                     LogType.Error or LogType.Exception or LogType.Assert => "error",
@@ -138,7 +156,14 @@ return UnityEngine.Application.unityVersion;";
             switch (result.Kind)
             {
                 case ReplResultKind.Success:
-                    AppendOutput($"=> {result.ValueDisplay}", "result");
+                    // Suppress the synthetic "=> null" caused by the wrapper's
+                    // fallback `return null;` for snippets that don't return a
+                    // value. HasReturnValue is true only when Value != null, so
+                    // an explicit `return null;` from user code is also hidden —
+                    // a small acceptable false-negative; users wanting to see a
+                    // null can `return "null"` or `return (object)null`.
+                    if (result.HasReturnValue)
+                        AppendOutput($"=> {result.ValueDisplay}", "result");
                     break;
 
                 case ReplResultKind.CompileError:

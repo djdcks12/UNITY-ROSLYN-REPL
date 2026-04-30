@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -30,7 +31,6 @@ namespace RoslynRepl.Editor.Core
             try
             {
                 var wrapped = ReplCodeWrapper.Wrap(userCode, options.Usings);
-                capture.Begin();
 
                 var tree = CSharpSyntaxTree.ParseText(wrapped.Source);
                 var compilation = CSharpCompilation.Create(
@@ -48,7 +48,7 @@ namespace RoslynRepl.Editor.Core
                         .Where(d => d.Severity == DiagnosticSeverity.Error)
                         .Select(d => ToDiagnosticInfo(d, wrapped.UserCodeLineOffset))
                         .ToList();
-                    return ReplResult.CompileError(diagnostics, capture.End(), sw.Elapsed);
+                    return ReplResult.CompileError(diagnostics, ClassifyLogs(capture.End()), sw.Elapsed);
                 }
 
                 ms.Seek(0, SeekOrigin.Begin);
@@ -59,7 +59,7 @@ namespace RoslynRepl.Editor.Core
                     return ReplResult.RuntimeError(
                         new InvalidOperationException(
                             $"Internal error: class '{ReplCodeWrapper.ClassName}' not found in compiled assembly."),
-                        capture.End(), sw.Elapsed);
+                        ClassifyLogs(capture.End()), sw.Elapsed);
                 }
 
                 var method = type.GetMethod(ReplCodeWrapper.MethodName,
@@ -69,25 +69,51 @@ namespace RoslynRepl.Editor.Core
                     return ReplResult.RuntimeError(
                         new InvalidOperationException(
                             $"Internal error: method '{ReplCodeWrapper.MethodName}' not found."),
-                        capture.End(), sw.Elapsed);
+                        ClassifyLogs(capture.End()), sw.Elapsed);
                 }
 
+                // Begin capture as late as possible — only the Invoke window — so
+                // background logs emitted during Wrap / Parse / Compile / Emit /
+                // Load do not contaminate the snippet's output.
                 object value;
+                capture.Begin();
                 try
                 {
                     value = method.Invoke(null, null);
                 }
                 catch (TargetInvocationException tie)
                 {
-                    return ReplResult.RuntimeError(tie.InnerException ?? tie, capture.End(), sw.Elapsed);
+                    return ReplResult.RuntimeError(tie.InnerException ?? tie, ClassifyLogs(capture.End()), sw.Elapsed);
                 }
 
-                return ReplResult.Success(value, FormatValue(value), capture.End(), sw.Elapsed);
+                return ReplResult.Success(value, FormatValue(value), ClassifyLogs(capture.End()), sw.Elapsed);
             }
             catch (Exception ex)
             {
-                return ReplResult.RuntimeError(ex, capture.End(), sw.Elapsed);
+                return ReplResult.RuntimeError(ex, ClassifyLogs(capture.End()), sw.Elapsed);
             }
+        }
+
+        // Tags each captured log with whether it likely originated from inside the
+        // user's snippet, by checking whether the generated wrapper class name
+        // appears anywhere in the stack trace. Logs without any stack trace are
+        // treated as snippet-originated to be safe (Unity may suppress traces for
+        // some log levels via the Stack Trace Logging editor preference).
+        private static List<LogEntry> ClassifyLogs(List<LogEntry> logs)
+        {
+            if (logs == null || logs.Count == 0) return logs ?? new List<LogEntry>();
+            foreach (var log in logs)
+            {
+                if (string.IsNullOrEmpty(log.StackTrace))
+                {
+                    log.FromSnippet = true;
+                }
+                else
+                {
+                    log.FromSnippet = log.StackTrace.Contains(ReplCodeWrapper.ClassName);
+                }
+            }
+            return logs;
         }
 
         private static DiagnosticInfo ToDiagnosticInfo(Diagnostic d, int userCodeLineOffset)
