@@ -1,0 +1,21 @@
+# IDE
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.userprefs
+*.csproj
+*.sln
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Unity (this folder is a UPM package, not a Unity project; these dirs
+# only appear if someone accidentally opens the package as a project)
+Library/
+Temp/
+Obj/
+Logs/

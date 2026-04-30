@@ -1,0 +1,21 @@
+{
+  "name": "com.roslyn-repl",
+  "version": "0.1.0",
+  "displayName": "Roslyn REPL",
+  "description": "In-editor C# REPL with runtime instance inspector. Roslyn-powered, zero project dependencies. Compile and execute C# on the fly during Play Mode and inspect any MonoBehaviour, ScriptableObject, or singleton in memory.",
+  "unity": "2022.3",
+  "type": "tool",
+  "keywords": [
+    "editor",
+    "tool",
+    "repl",
+    "roslyn",
+    "debug",
+    "inspector",
+    "runtime"
+  ],
+  "author": {
+    "name": "youngchan.seo"
+  },
+  "license": "MIT"
+}

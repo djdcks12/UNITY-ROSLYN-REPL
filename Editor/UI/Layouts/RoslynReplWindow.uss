@@ -1,0 +1,71 @@
+.rr-root {
+    flex-grow: 1;
+    flex-direction: column;
+    background-color: rgb(48, 48, 48);
+}
+
+.rr-toolbar {
+    flex-direction: row;
+    align-items: center;
+    height: 24px;
+    padding-left: 6px;
+    padding-right: 6px;
+    border-bottom-width: 1px;
+    border-bottom-color: rgb(28, 28, 28);
+}
+
+.rr-title {
+    -unity-font-style: bold;
+    color: rgb(220, 220, 220);
+    margin-right: 12px;
+}
+
+.rr-version {
+    color: rgb(140, 140, 140);
+    font-size: 10px;
+    margin-right: 8px;
+}
+
+.rr-badge {
+    font-size: 10px;
+    -unity-font-style: bold;
+    padding-left: 6px;
+    padding-right: 6px;
+    margin-right: 6px;
+    border-radius: 3px;
+    color: rgb(20, 20, 20);
+}
+
+.rr-badge--edit {
+    background-color: rgb(160, 160, 160);
+}
+
+.rr-badge--play {
+    background-color: rgb(120, 200, 120);
+}
+
+.rr-body {
+    flex-grow: 1;
+    flex-direction: column;
+    padding: 16px;
+}
+
+.rr-heading {
+    font-size: 16px;
+    -unity-font-style: bold;
+    color: rgb(220, 220, 220);
+    margin-bottom: 8px;
+}
+
+.rr-status {
+    color: rgb(180, 220, 180);
+    font-size: 12px;
+    margin-bottom: 8px;
+    white-space: normal;
+}
+
+.rr-hint {
+    color: rgb(140, 140, 140);
+    font-size: 11px;
+    white-space: normal;
+}

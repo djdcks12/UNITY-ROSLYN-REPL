@@ -1,0 +1,16 @@
+<ui:UXML xmlns:ui="UnityEngine.UIElements" xmlns:uie="UnityEditor.UIElements" editor-extension-mode="True">
+    <ui:VisualElement class="rr-root">
+        <uie:Toolbar class="rr-toolbar">
+            <ui:Label text="Roslyn REPL" class="rr-title" />
+            <ui:VisualElement style="flex-grow: 1;" />
+            <ui:Label name="mode-label" text="EDIT" class="rr-badge rr-badge--edit" />
+            <ui:Label name="version-label" text="v?" class="rr-version" />
+            <uie:ToolbarButton name="verify-btn" text="Verify Setup" />
+        </uie:Toolbar>
+        <ui:VisualElement class="rr-body">
+            <ui:Label text="Phase 0 — package skeleton" class="rr-heading" />
+            <ui:Label name="status-label" text="Loading…" class="rr-status" />
+            <ui:Label class="rr-hint" text="Next phases will add: code editor, output panel, instance inspector, watch expressions, snippet library." />
+        </ui:VisualElement>
+    </ui:VisualElement>
+</ui:UXML>
