@@ -28,6 +28,15 @@ After import, run **Tools / Roslyn REPL / Install Roslyn DLLs** once (or run `To
 
 If another package (e.g. `com.ivanmurzak.unity.mcp`, `com.unity.code-analysis`, or a future Unity 6.5 built-in Roslyn) already ships `Microsoft.CodeAnalysis.dll`, Unity's `Validate References` will surface a duplicate-assembly error. Resolve by disabling one of the duplicate Plugin Importers (Inspector → uncheck Editor for the copy you want excluded). Run `Tools / Roslyn REPL / Verify Setup` to see exactly which copies are loaded and from where.
 
+## Roadmap
+
+Planned phases (deferred from the current release):
+
+- **Phase 4 — UX polish**: C# syntax highlighting in the code editor, line numbers + caret position indicator, compile-error inline markers (red squiggles + gutter), UI for editing `ReplOptions.Usings`.
+- **Phase 5 — Persistence + variable continuity**: snippet library (save / load named snippets), run history, `_` variable carrying the previous result between runs, persisted Roslyn options.
+- **Phase 6 — Watch panel + async**: live-re-evaluating watch expressions with change highlight, `async` / `await` support in snippet bodies, soft timeout / cancellation.
+- **Phase 7 — Distribution**: `Samples~` default snippet library, README polish + screenshots, OpenUPM submission.
+
 ## License
 
 MIT for this package. Bundled Roslyn DLLs are MIT-licensed by Microsoft (see `Editor/Plugins/Roslyn/THIRD_PARTY_NOTICES.md` after install).
