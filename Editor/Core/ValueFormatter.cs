@@ -60,6 +60,19 @@ namespace RoslynRepl.Editor.Core
             // when the native side is destroyed (Unity's "fake null"), so
             // accessing .name / .gameObject would throw a NullReferenceException
             // from native bindings. Compare via the Unity == overload first.
+            if (value is System.Delegate del)
+            {
+                var inv = del.GetInvocationList();
+                if (inv == null || inv.Length == 0)
+                    return $"{TypeFormatter.Short(type)} (no targets)";
+                var first = inv[0];
+                var target = first.Method?.DeclaringType?.Name ?? "?";
+                var name   = first.Method?.Name ?? "?";
+                return inv.Length == 1
+                    ? $"{TypeFormatter.Short(type)} → {target}.{name}"
+                    : $"{TypeFormatter.Short(type)} ({inv.Length} targets, first: {target}.{name})";
+            }
+
             if (value is GameObject go)
             {
                 if (go == null) return "GameObject (destroyed)";

@@ -11,26 +11,30 @@
             <uie:ToolbarButton name="verify-btn" text="Verify Setup" />
         </uie:Toolbar>
 
-        <ui:TwoPaneSplitView orientation="Vertical" fixed-pane-initial-dimension="240" fixed-pane-index="1">
-            <ui:VisualElement name="code-pane" class="rr-pane">
-                <ui:VisualElement class="rr-pane-header">
-                    <ui:Label text="Code" class="rr-pane-title" />
-                    <ui:VisualElement style="flex-grow: 1;" />
-                    <ui:Label text="F5 / Ctrl+Enter to run" class="rr-pane-meta" />
-                </ui:VisualElement>
-                <ui:TextField name="code-input" multiline="true" class="rr-code-input" />
-            </ui:VisualElement>
+        <ui:TwoPaneSplitView orientation="Horizontal" fixed-pane-initial-dimension="280" fixed-pane-index="0">
+            <ui:VisualElement name="browser-host" class="rr-pane rr-pane--browser" />
 
-            <ui:VisualElement name="output-pane" class="rr-pane">
-                <ui:VisualElement class="rr-pane-header">
-                    <ui:Label text="Output" class="rr-pane-title" />
-                    <ui:VisualElement style="flex-grow: 1;" />
-                    <ui:Label name="output-summary-label" text="" class="rr-pane-meta" />
+            <ui:TwoPaneSplitView orientation="Vertical" fixed-pane-initial-dimension="240" fixed-pane-index="1">
+                <ui:VisualElement name="code-pane" class="rr-pane">
+                    <ui:VisualElement class="rr-pane-header">
+                        <ui:Label text="Code" class="rr-pane-title" />
+                        <ui:VisualElement style="flex-grow: 1;" />
+                        <ui:Label text="F5 / Ctrl+Enter to run" class="rr-pane-meta" />
+                    </ui:VisualElement>
+                    <ui:TextField name="code-input" multiline="true" class="rr-code-input" />
                 </ui:VisualElement>
-                <ui:ScrollView name="output-scroll" mode="Vertical" class="rr-output-scroll">
-                    <ui:VisualElement name="output-content" class="rr-output-content" />
-                </ui:ScrollView>
-            </ui:VisualElement>
+
+                <ui:VisualElement name="output-pane" class="rr-pane">
+                    <ui:VisualElement class="rr-pane-header">
+                        <ui:Label text="Output" class="rr-pane-title" />
+                        <ui:VisualElement style="flex-grow: 1;" />
+                        <ui:Label name="output-summary-label" text="" class="rr-pane-meta" />
+                    </ui:VisualElement>
+                    <ui:ScrollView name="output-scroll" mode="Vertical" class="rr-output-scroll">
+                        <ui:VisualElement name="output-content" class="rr-output-content" />
+                    </ui:ScrollView>
+                </ui:VisualElement>
+            </ui:TwoPaneSplitView>
         </ui:TwoPaneSplitView>
     </ui:VisualElement>
 </ui:UXML>

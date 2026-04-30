@@ -180,3 +180,99 @@
 .rr-treecell--value {
     color: rgb(180, 220, 255);
 }
+
+/* Browser side panel (Phase 3) */
+.rr-pane--browser {
+    background-color: rgb(40, 40, 40);
+}
+
+.rr-browser {
+    flex-grow: 1;
+    flex-direction: column;
+}
+
+.rr-browser-header {
+    flex-direction: row;
+    align-items: center;
+    height: 18px;
+    padding-left: 6px;
+    padding-right: 6px;
+    background-color: rgb(56, 56, 56);
+    border-bottom-width: 1px;
+    border-bottom-color: rgb(28, 28, 28);
+}
+
+.rr-browser-title {
+    font-size: 10px;
+    -unity-font-style: bold;
+    color: rgb(180, 180, 180);
+    -unity-text-align: middle-left;
+}
+
+.rr-browser-refresh {
+    height: 16px;
+    min-width: 22px;
+    padding-left: 4px;
+    padding-right: 4px;
+}
+
+.rr-browser-category {
+    margin: 4px 6px 2px 6px;
+    font-size: 11px;
+}
+
+.rr-browser-search {
+    margin: 2px 6px 4px 6px;
+}
+
+.rr-browser-list {
+    flex-grow: 1;
+    border-top-width: 1px;
+    border-top-color: rgb(28, 28, 28);
+}
+
+.rr-browser-row {
+    flex-direction: column;
+    padding: 4px 6px;
+    border-bottom-width: 1px;
+    border-bottom-color: rgb(28, 28, 28);
+}
+
+.rr-browser-row-name {
+    color: rgb(220, 220, 220);
+    -unity-font-style: bold;
+    font-size: 11px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.rr-browser-row-type {
+    color: rgb(140, 200, 220);
+    font-size: 10px;
+    -unity-font-style: italic;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.rr-browser-row-sub {
+    color: rgb(140, 140, 140);
+    font-size: 9px;
+}
+
+.rr-browser-row--inactive .rr-browser-row-name {
+    color: rgb(150, 150, 150);
+}
+
+.rr-browser-row--inactive .rr-browser-row-type {
+    color: rgb(110, 150, 165);
+}
+
+.rr-browser-status {
+    font-size: 10px;
+    color: rgb(140, 140, 140);
+    padding: 3px 6px;
+    border-top-width: 1px;
+    border-top-color: rgb(28, 28, 28);
+}

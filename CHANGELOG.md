@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added (Phase 3 — instance browser side panel)
+- New `RoslynRepl.Editor.Core.InstanceLocator` enumerates user-visible runtime instances by category (`MonoBehaviour`, `ScriptableObject`, `Singleton`, `All`) with substring filtering on type/display name. Hides Unity-shipped types, Editor framework objects, and the package's own assembly so the list stays focused on the user's project.
+- `SingletonScanner` (`[InitializeOnLoad]`) reflects over user assemblies for static `Instance` properties / fields. Member discovery is cached for the domain lifetime (invalidated on `AssemblyLoad`); values are read fresh each call so destroyed singletons drop out.
+- `RoslynRepl.Editor.UI.ObjectBrowserView` is a UI Toolkit side panel: title row + refresh button, `EnumField` category drop-down, `ToolbarSearchField`, and a virtualizing `ListView` of results. Each row shows display name (bold), short type name (italic teal), and a sub-label (scene / "ScriptableObject" / "Singleton"); inactive rows render dimmer.
+- The window now lays out as `[toolbar] / [browser | code+output]` via an outer horizontal `TwoPaneSplitView` (browser fixed at 280px) wrapping the existing vertical split.
+- Double-clicking (or Enter on) a browser row renders that instance into the output panel through `SimpleObjectSerializer.ToTree`, equivalent to typing `return X;` — but no code required.
+
+### Fixed (Phase 3 — Play Mode safety, surfaced while browsing real managers)
+- `SingletonScanner` now detects **any** self-returning public static member regardless of name (`Instance`, `it`, `I`, `Self`, `Current`, `Singleton`, etc.), so plain C# managers like `LobbyFriendManager.it` are surfaced. Member-type matching accepts both directions: the canonical exact / derived case (`public static Foo Instance` declared on `Foo`) is taken regardless of name, and the base / interface case (`public static IService Current => _instance;` on a class that implements `IService`, or `public static BaseThing Instance = new DerivedThing();` declared on the derived class) is taken when the name is in the standard singleton accessor set — guarding against false positives like `public static IDisposable s_dispose;` on unrelated classes. Compiler-generated closure / lambda-cache types (names starting with `<`) are filtered out so they don't flood the list.
+- For plain C# *property* singletons whose getter we still won't invoke (lazy-init side effects), a sibling private static **backing field** of the same type is read directly when present — covering the canonical `private static T _instance; public static T it => _instance ??= new T();` pattern.
+- `InstanceEntry.Object` (UnityEngine.Object) → `InstanceEntry.Value` (object). Plain C# instances now flow through the browser and into `ToTree` on double-click.
+- `InstanceCategory.All` no longer includes the Singleton sweep — that path scans every loaded user assembly and is too heavy to run automatically. Users opt in by selecting the Singleton category.
+- `ObjectBrowserView` no longer auto-`Refresh()`s on construction; the first scan happens only when the user changes category, types in search, or presses ↻. Avoids freezing the Editor on window open or domain reload.
+- `SimpleObjectSerializer` hardened against runaway graphs:
+  * `System.Delegate` (Action / Func / event) is treated as a leaf — walking the invocation list reaches every subscribed view and explodes the graph. Preview shows handler count and first target.
+  * `BuildNode` now threads a `BuildState` (replacing the loose `Options` + `visited` pair) so a per-call **total node cap** (default 2000) can abort cleanly with a `(node cap reached)` leaf.
+  * Default `MaxDepth` lowered 6 → 4.
+- `ValueFormatter` renders delegate previews like `Action → ClassName.Handler` or `Action (3 targets, first: …)`.
+
 ### Added (Phase 2 — object tree view in output)
 - `RoslynRepl.Editor.Core.ReplValueNode`: a row in the result tree (`Name`, `TypeName`, `Preview`, `IsExpandable`, `Children`)
 - `SimpleObjectSerializer.ToTree(value)`: reflection-based converter that walks fields (incl. private + inherited) and readable instance properties, with cycle detection (reference-equality `HashSet`), depth cap (default 6), collection-head cap (default 50), and special handling for `IDictionary` / `IEnumerable`

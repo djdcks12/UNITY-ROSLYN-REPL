@@ -27,6 +27,7 @@ return UnityEngine.Application.unityVersion;";
         private Label _durationLabel;
         private Label _modeLabel;
         private Label _outputSummary;
+        private ObjectBrowserView _browser;
 
         [MenuItem("Tools/Roslyn REPL/Open", priority = 10)]
         public static void Open()
@@ -64,6 +65,15 @@ return UnityEngine.Application.unityVersion;";
             _durationLabel = root.Q<Label>("duration-label");
             _modeLabel     = root.Q<Label>("mode-label");
             _outputSummary = root.Q<Label>("output-summary-label");
+
+            // Mount the object browser into its host
+            var browserHost = root.Q<VisualElement>("browser-host");
+            if (browserHost != null)
+            {
+                browserHost.Clear();
+                _browser = new ObjectBrowserView(browserHost);
+                _browser.OnInstanceChosen += OnBrowserInstanceChosen;
+            }
 
             // Code input: restore from session and persist on change
             if (_codeInput != null)
@@ -131,6 +141,32 @@ return UnityEngine.Application.unityVersion;";
 
             var result = ReplEngine.Execute(code);
             RenderResult(result);
+        }
+
+        // Double-click on a browser row renders that instance into the output
+        // panel as if the user wrote `return X;` themselves. No code typed.
+        private void OnBrowserInstanceChosen(InstanceEntry entry)
+        {
+            if (_outputContent == null) return;
+            if (entry == null) return;
+
+            ClearOutput();
+            AppendOutput($"▼ Browse: {entry.TypeName} \"{entry.DisplayName}\" ({entry.SubLabel})", "info");
+
+            object value = entry.Value;
+            // Unity fake-null: wrapper alive but native side gone.
+            if (value is UnityEngine.Object uo && uo == null) value = null;
+            if (value == null)
+            {
+                AppendOutput("(instance is null or destroyed)", "warning");
+                if (_outputSummary != null) _outputSummary.text = "null";
+                return;
+            }
+
+            AppendResult(SimpleObjectSerializer.ToTree(value));
+            if (_durationLabel != null) _durationLabel.text = string.Empty;
+            if (_outputSummary != null) _outputSummary.text = "Browsed";
+            ScrollOutputToBottom();
         }
 
         private void RenderResult(ReplResult result)
