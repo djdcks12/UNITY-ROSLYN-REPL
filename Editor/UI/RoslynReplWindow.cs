@@ -160,8 +160,8 @@ return UnityEngine.Application.unityVersion;";
                     // fallback `return null;` for snippets that don't return a
                     // value. HasReturnValue is true only when Value != null, so
                     // an explicit `return null;` from user code is also hidden —
-                    // a small acceptable false-negative; users wanting to see a
-                    // null can `return "null"` or `return (object)null`.
+                    // a small acceptable false-negative; users wanting to surface
+                    // a null indicator can `return "null"` (a non-null string).
                     if (result.HasReturnValue)
                         AppendOutput($"=> {result.ValueDisplay}", "result");
                     break;
