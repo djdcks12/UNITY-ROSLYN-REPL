@@ -12,6 +12,21 @@ namespace RoslynRepl.Editor.Core
     {
         public static string Format(object value)
         {
+            // Format() is the ToTree pipeline's "always-safe" preview producer.
+            // Anything throwing in here aborts the entire tree build, so wrap
+            // unconditionally and surface a marker instead. Specific known
+            // hazards (collection Count getters, ToString) have their own
+            // narrower try/catch inside FormatCore for nicer messages.
+            try { return FormatCore(value); }
+            catch (Exception ex)
+            {
+                var typeName = value != null ? TypeFormatter.Short(value.GetType()) : "?";
+                return $"{typeName} <preview error: {ex.GetBaseException().Message}>";
+            }
+        }
+
+        private static string FormatCore(object value)
+        {
             if (value == null) return "null";
 
             var type = value.GetType();
@@ -65,11 +80,24 @@ namespace RoslynRepl.Editor.Core
                 return $"{uoTypeName}: \"{uo.name}\"";
             }
 
-            // Collections
+            // Collections — Count is a user-overridable getter, so it can
+            // throw on custom IDictionary / ICollection implementations.
+            // Without this guard, Format would surface the exception out of
+            // BuildNode before BuildDictChildren's try/catch ever runs.
             if (value is IDictionary dict)
-                return $"{TypeFormatter.Short(type)}(count={dict.Count})";
+            {
+                int dictCount;
+                try { dictCount = dict.Count; }
+                catch { return $"{TypeFormatter.Short(type)}(IDictionary, count unavailable)"; }
+                return $"{TypeFormatter.Short(type)}(count={dictCount})";
+            }
             if (value is ICollection coll)
-                return $"{TypeFormatter.Short(type)}(count={coll.Count})";
+            {
+                int collCount;
+                try { collCount = coll.Count; }
+                catch { return $"{TypeFormatter.Short(type)}(ICollection, count unavailable)"; }
+                return $"{TypeFormatter.Short(type)}(count={collCount})";
+            }
             if (value is IEnumerable && !(value is string))
                 return $"{TypeFormatter.Short(type)}(IEnumerable)";
 
