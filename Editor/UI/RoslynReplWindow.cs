@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using UnityEditor;
 using UnityEngine;
 using UnityEngine.UIElements;
@@ -163,7 +164,7 @@ return UnityEngine.Application.unityVersion;";
                     // a small acceptable false-negative; users wanting to surface
                     // a null indicator can `return "null"` (a non-null string).
                     if (result.HasReturnValue)
-                        AppendOutput($"=> {result.ValueDisplay}", "result");
+                        AppendResult(SimpleObjectSerializer.ToTree(result.Value));
                     break;
 
                 case ReplResultKind.CompileError:
@@ -217,6 +218,93 @@ return UnityEngine.Application.unityVersion;";
             label.AddToClassList($"rr-output-line--{severity}");
             label.style.whiteSpace = WhiteSpace.Normal;
             _outputContent.Add(label);
+        }
+
+        private void AppendResult(ReplValueNode root)
+        {
+            if (_outputContent == null || root == null) return;
+
+            // Leaf result (primitive, string, Vector3, etc.) — render inline,
+            // identical look to Phase 1.
+            if (!root.IsExpandable || root.Children.Count == 0)
+            {
+                AppendOutput($"=> {root.Preview}", "result");
+                return;
+            }
+
+            // Header above the tree
+            var header = new Label($"=> {root.Preview}");
+            header.AddToClassList("rr-output-line");
+            header.AddToClassList("rr-output-line--result");
+            _outputContent.Add(header);
+
+            var tv = BuildResultTree(root);
+            tv.AddToClassList("rr-result-tree");
+            _outputContent.Add(tv);
+        }
+
+        private static MultiColumnTreeView BuildResultTree(ReplValueNode root)
+        {
+            var tv = new MultiColumnTreeView();
+            tv.style.maxHeight = 360;
+            tv.style.minHeight = 80;
+            tv.style.flexGrow = 0;
+
+            // --- columns ---
+            tv.columns.Add(MakeColumn("name",  "Name",  220, n => n?.Name     ?? string.Empty, "rr-treecell--name", tv));
+            tv.columns.Add(MakeColumn("type",  "Type",  160, n => n?.TypeName ?? string.Empty, "rr-treecell--type", tv));
+            tv.columns.Add(MakeColumn("value", "Value", 320, n => n?.Preview  ?? string.Empty, "rr-treecell--value", tv));
+
+            // --- data ---
+            int nextId = 0;
+            var rootItems = new List<TreeViewItemData<ReplValueNode>>
+            {
+                ToItemData(root, ref nextId)
+            };
+            tv.SetRootItems(rootItems);
+            tv.Rebuild();
+            tv.ExpandRootItems();
+            return tv;
+        }
+
+        private static Column MakeColumn(
+            string name, string title, float width,
+            System.Func<ReplValueNode, string> getter,
+            string extraClass,
+            MultiColumnTreeView tv)
+        {
+            var col = new Column
+            {
+                name = name,
+                title = title,
+                width = width,
+                minWidth = 80,
+                stretchable = true
+            };
+            col.makeCell = () =>
+            {
+                var lbl = new Label();
+                lbl.AddToClassList("rr-treecell");
+                if (!string.IsNullOrEmpty(extraClass)) lbl.AddToClassList(extraClass);
+                return lbl;
+            };
+            col.bindCell = (ve, idx) =>
+            {
+                var node = tv.GetItemDataForIndex<ReplValueNode>(idx);
+                ((Label)ve).text = getter(node);
+            };
+            return col;
+        }
+
+        private static TreeViewItemData<ReplValueNode> ToItemData(ReplValueNode node, ref int nextId)
+        {
+            var children = new List<TreeViewItemData<ReplValueNode>>();
+            if (node.Children != null)
+            {
+                foreach (var c in node.Children)
+                    children.Add(ToItemData(c, ref nextId));
+            }
+            return new TreeViewItemData<ReplValueNode>(nextId++, node, children);
         }
 
         private void ScrollOutputToBottom()

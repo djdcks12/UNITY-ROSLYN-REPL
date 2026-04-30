@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added (Phase 2 — object tree view in output)
+- `RoslynRepl.Editor.Core.ReplValueNode`: a row in the result tree (`Name`, `TypeName`, `Preview`, `IsExpandable`, `Children`)
+- `SimpleObjectSerializer.ToTree(value)`: reflection-based converter that walks fields (incl. private + inherited) and readable instance properties, with cycle detection (reference-equality `HashSet`), depth cap (default 6), collection-head cap (default 50), and special handling for `IDictionary` / `IEnumerable`
+- `ValueFormatter`: 1-line previews for primitives, strings (truncated + escaped), Unity types (`Vector2/3/4`, `Color`, `Quaternion`, `Rect`, `Bounds`, `GameObject`, `Component`, `UnityEngine.Object`), collections, and a `ToString` fallback
+- `TypeFormatter`: short type names with C# keyword aliases, generic argument formatting, array rank, and `Nullable<T>` → `T?`
+- Window output now renders complex results with a `MultiColumnTreeView` (Name / Type / Value columns), auto-expanding the root level. Leaf results (`int`, `string`, `Vector3`, etc.) keep the inline `=> X` rendering from Phase 1 to avoid one-row trees
+- Compiler-generated `<...>k__BackingField` entries are filtered out so auto-property values appear only once via the property itself
+
+### Fixed (Phase 2 — surfaced while inspecting real Unity scene objects)
+- `ValueFormatter.Format` no longer throws `NullReferenceException` when the value is a Unity "fake-null" reference (a wrapper whose native side is destroyed or was never assigned). Each `UnityEngine.Object` / `Component` / `GameObject` branch now compares against null using Unity's overload first and returns a `(destroyed)` marker.
+- `SimpleObjectSerializer.BuildNode` short-circuits on fake-null `UnityEngine.Object` values, emitting a `(missing/destroyed)` leaf instead of attempting to walk a destroyed object's fields.
+- `UnityEngine.Transform` (and `RectTransform`) is now treated as a leaf type. Its computed accessors (`position`, `lossyScale`, `eulerAngles`, …) read from internal matrices and fire a native `Assertion failed: 'ValidTRS()'` when the matrix is degenerate; those asserts bypass managed `try/catch` and spam the Console.
+- Properties whose **declaring type** lives in a Unity-shipped assembly (`UnityEngine.*`, `UnityEditor.*`, `Unity.*`) are skipped. Many of those accessors (`Image.mainTexture`, `Material.color`, `Renderer.bounds`, `Canvas.worldCamera`, …) read native state and trigger the same class of native asserts. Properties declared on **user types** (MonoBehaviour / ScriptableObject subclasses, etc.) are walked normally, so user-defined `Computed => …` accessors stay visible. Users wanting a specific Unity-shipped computed value can call it directly (e.g. `return rect.localPosition;`).
+- `BuildDictChildren` now mirrors `BuildEnumerableChildren`'s try/catch: a custom `IDictionary` whose `GetEnumerator()` / `MoveNext` / `Current` throws no longer aborts the whole `ToTree`; partially-collected entries plus a `<enumeration>` error leaf are returned.
+- `ValueFormatter.Format` is now guaranteed not to throw. The dict / collection preview branches read `Count` inside their own `try/catch` and fall back to `(IDictionary, count unavailable)` / `(ICollection, count unavailable)`; an outer `try/catch` around the whole formatter returns `<TypeName> <preview error: …>` for any other escape. This closes a hole where `BuildNode` called `Format(value)` *before* `BuildDictChildren`'s guard could run, so a dict with a throwing `Count` getter still aborted the whole `ToTree`.
+
 ### Added (Phase 1 — MVP REPL)
 - `RoslynRepl.Editor.Core.ReplEngine`: Roslyn-based one-shot compile + execute pipeline (`CSharpCompilation` → `Emit` → `Assembly.Load` → invoke)
 - `ReplCodeWrapper`: wraps user statements in a generated class/method with line-offset tracking so compiler diagnostics map back to user lines
