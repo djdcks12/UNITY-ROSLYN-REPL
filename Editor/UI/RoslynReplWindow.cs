@@ -75,7 +75,16 @@ return UnityEngine.Application.unityVersion;";
                 _browser.OnInstanceChosen += OnBrowserInstanceChosen;
             }
 
-            // Mount the watch panel below output
+            // Mount the watch panel below output. CreateGUI can fire
+            // again on domain reload or panel rebuild; the previous view
+            // — if any — has already subscribed to the static
+            // WatchStore.Changed event, so we must dispose it first or
+            // every rebuild leaves a stale handler subscribed forever.
+            // After enough rebuilds an Add/Remove fires the panel
+            // refresh N times, causing each watch to evaluate N times
+            // and `_` to update N times against the same row.
+            _watch?.Dispose();
+            _watch = null;
             var watchHost = root.Q<VisualElement>("watch-pane-host");
             if (watchHost != null)
             {
@@ -154,6 +163,12 @@ return UnityEngine.Application.unityVersion;";
             RunHistoryWindow.OnSnippetChosen -= LoadSnippetIntoEditor;
             SnippetLibraryWindow.OnSnippetChosen -= LoadSnippetIntoEditor;
             SnippetLibraryWindow.OnSaveRequested -= SaveCurrentEditorAsSnippet;
+            // Drop the watch panel's WatchStore subscription so this
+            // window's instance doesn't keep refreshing in the
+            // background after it's closed (or before it's rebuilt by
+            // the next CreateGUI).
+            _watch?.Dispose();
+            _watch = null;
         }
 
         private void LoadSnippetIntoEditor(string code)
