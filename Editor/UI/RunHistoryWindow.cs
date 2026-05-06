@@ -37,6 +37,18 @@ namespace RoslynRepl.Editor.UI
         private List<string> _entries = new();
         private ListView _list;
 
+        private void OnEnable()
+        {
+            // Subscribe at the EditorWindow lifecycle level (not in
+            // CreateGUI) so the live ListView refreshes on every push
+            // even when CreateGUI doesn't fire — e.g. when the popup is
+            // already mounted and the user runs a snippet from the host
+            // window. Without this the popup snapshots once at mount
+            // and silently goes stale.
+            RunHistoryStore.Changed -= OnHistoryChanged;
+            RunHistoryStore.Changed += OnHistoryChanged;
+        }
+
         public void CreateGUI()
         {
             _entries = RunHistoryStore.Load();
@@ -110,9 +122,28 @@ namespace RoslynRepl.Editor.UI
             RebuildListView();
         }
 
+        private void OnDisable()
+        {
+            RunHistoryStore.Changed -= OnHistoryChanged;
+        }
+
         private void OnDestroy()
         {
             _instance = null;
+        }
+
+        private void OnHistoryChanged()
+        {
+            // Reload from the store and rebuild the visible list. This runs
+            // on whichever thread fired Changed; EditorPrefs writes happen
+            // from the main thread today, so no marshal is needed — but if
+            // that ever changes, route through EditorApplication.delayCall.
+            _entries = RunHistoryStore.Load();
+            if (_list != null)
+            {
+                _list.itemsSource = _entries;
+                _list.RefreshItems();
+            }
         }
 
         private void RebuildListView()
