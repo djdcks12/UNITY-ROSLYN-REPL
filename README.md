@@ -32,11 +32,11 @@ If another package (e.g. `com.ivanmurzak.unity.mcp`, `com.unity.code-analysis`, 
 
 Shipped:
 
-- **Phase 4 — UX polish (in this release)**: line-number gutter + caret position indicator, compile-error gutter markers with hover tooltips, `Usings…` editor popup that persists user-added namespaces via `EditorPrefs`. *Inline syntax highlighting is intentionally not shipped — see "Known limitations" below.*
+- **Phase 4 — UX polish**: line-number gutter + caret position indicator, compile-error gutter markers with hover tooltips, `Usings…` editor popup that persists user-added namespaces via `EditorPrefs`. *Inline syntax highlighting is intentionally not shipped — see "Known limitations" below.*
+- **Phase 5 — Persistence + variable continuity (in this release)**: `_` carries the previous successful non-null result into the next snippet (`return _ + 1;`); auto-saved run history (`History…`) — last 50 entries, double-click to reload; named snippet library (`Snippets…`) with save / load / rename / delete and overwrite confirmation. All persistence is project-scoped via a shared `ProjectScopedPrefs` helper so different Unity projects don't share state.
 
 Planned (deferred):
 
-- **Phase 5 — Persistence + variable continuity**: snippet library (save / load named snippets), run history, `_` variable carrying the previous result between runs, persisted Roslyn options.
 - **Phase 6 — Watch panel + async**: live-re-evaluating watch expressions with change highlight, `async` / `await` support in snippet bodies, soft timeout / cancellation.
 - **Phase 7 — Distribution**: `Samples~` default snippet library, README polish + screenshots, OpenUPM submission.
 
