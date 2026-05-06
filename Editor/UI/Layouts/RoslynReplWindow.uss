@@ -86,7 +86,62 @@
     -unity-text-align: middle-right;
 }
 
-/* Code input */
+/* Code editor (Phase 4: gutter + caret indicator) */
+.rr-code-editor-host {
+    flex-grow: 1;
+    flex-direction: column;
+}
+
+.rr-code-editor {
+    flex-grow: 1;
+    flex-direction: column;
+}
+
+.rr-code-row {
+    flex-grow: 1;
+    flex-direction: row;
+    background-color: rgb(36, 36, 36);
+}
+
+.rr-code-gutter {
+    flex-direction: column;
+    min-width: 38px;
+    background-color: rgb(30, 30, 30);
+    border-right-width: 1px;
+    border-right-color: rgb(20, 20, 20);
+    padding-top: 6px;
+    padding-bottom: 6px;
+}
+
+/* Row height + font size deliberately match the TextField's natural
+   12px line height so each gutter row aligns 1:1 with the input. */
+.rr-code-gutter-row {
+    flex-direction: row;
+    height: 16px;
+    align-items: center;
+    padding-right: 4px;
+}
+
+.rr-code-gutter-row--error {
+    background-color: rgba(180, 50, 50, 0.18);
+}
+
+.rr-code-gutter-marker {
+    width: 8px;
+    height: 8px;
+    margin-left: 4px;
+    margin-right: 4px;
+    border-radius: 4px;
+    background-color: rgb(220, 70, 70);
+}
+
+.rr-code-gutter-number {
+    flex-grow: 1;
+    -unity-text-align: middle-right;
+    color: rgb(120, 120, 120);
+    font-size: 11px;
+}
+
 .rr-code-input {
     flex-grow: 1;
 }
@@ -99,6 +154,18 @@
     border-width: 0;
     -unity-text-align: upper-left;
     white-space: nowrap;
+}
+
+.rr-code-caret {
+    height: 16px;
+    padding-left: 8px;
+    padding-right: 8px;
+    background-color: rgb(46, 46, 46);
+    border-top-width: 1px;
+    border-top-color: rgb(28, 28, 28);
+    color: rgb(150, 150, 150);
+    font-size: 10px;
+    -unity-text-align: middle-left;
 }
 
 /* Output */

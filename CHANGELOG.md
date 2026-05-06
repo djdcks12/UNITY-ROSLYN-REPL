@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added (Phase 4 — editor UX polish)
+- `RoslynRepl.Editor.UI.CodeEditorView`: composite VisualElement that wraps the multiline `TextField` with a sibling line-number gutter and a footer caret-position indicator (`Ln N, Col M`). Replaces the bare `TextField` previously bound to `code-input`.
+- The gutter pools its row VisualElements: existing rows are reused on every keystroke and only the delta of new / removed lines is added or removed, so typing in long buffers doesn't churn the UI tree.
+- Caret indicator updates on `KeyUpEvent`, `MouseUpEvent`, and `FocusInEvent` — sufficient for a status display without polling the cursor every frame.
+- New USS classes (`rr-code-editor`, `rr-code-row`, `rr-code-gutter`, `rr-code-gutter-row`, `rr-code-gutter-marker`, `rr-code-gutter-number`, `rr-code-input`, `rr-code-caret`) styled to match the existing dark theme. Gutter row height (16px) matches the TextField's natural 12px line height for one-to-one alignment.
+- `CodeEditorView.SetErrorMarkers` / `ClearErrorMarkers` API present (gutter marker rendering + tooltip) — wired up in Phase 4b.
+
 ### Added (Phase 3 — instance browser side panel)
 - New `RoslynRepl.Editor.Core.InstanceLocator` enumerates user-visible runtime instances by category (`MonoBehaviour`, `ScriptableObject`, `Singleton`, `All`) with substring filtering on type/display name. Hides Unity-shipped types, Editor framework objects, and the package's own assembly so the list stays focused on the user's project.
 - `SingletonScanner` (`[InitializeOnLoad]`) reflects over user assemblies for static `Instance` properties / fields. Member discovery is cached for the domain lifetime (invalidated on `AssemblyLoad`); values are read fresh each call so destroyed singletons drop out.

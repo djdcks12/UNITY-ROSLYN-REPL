@@ -21,7 +21,7 @@ namespace RoslynRepl.Editor.UI
 // Use 'return X;' to surface a value. Debug.Log() output is captured.
 return UnityEngine.Application.unityVersion;";
 
-        private TextField _codeInput;
+        private CodeEditorView _codeEditor;
         private VisualElement _outputContent;
         private ScrollView _outputScroll;
         private Label _durationLabel;
@@ -59,7 +59,6 @@ return UnityEngine.Application.unityVersion;";
 
         private void BindControls(VisualElement root)
         {
-            _codeInput     = root.Q<TextField>("code-input");
             _outputContent = root.Q<VisualElement>("output-content");
             _outputScroll  = root.Q<ScrollView>("output-scroll");
             _durationLabel = root.Q<Label>("duration-label");
@@ -75,13 +74,20 @@ return UnityEngine.Application.unityVersion;";
                 _browser.OnInstanceChosen += OnBrowserInstanceChosen;
             }
 
-            // Code input: restore from session and persist on change
-            if (_codeInput != null)
+            // Code editor: restore from session and persist on change.
+            // Phase 4 lifts the bare TextField into a composite view that
+            // owns the gutter + caret indicator.
+            var editorHost = root.Q<VisualElement>("code-editor-host");
+            if (editorHost != null)
             {
+                editorHost.Clear();
+                _codeEditor = new CodeEditorView();
+                editorHost.Add(_codeEditor);
+
                 var saved = SessionState.GetString(SessionKey_CodeText, null);
-                _codeInput.value = string.IsNullOrEmpty(saved) ? DefaultCode : saved;
-                _codeInput.RegisterValueChangedCallback(evt =>
-                    SessionState.SetString(SessionKey_CodeText, evt.newValue));
+                _codeEditor.value = string.IsNullOrEmpty(saved) ? DefaultCode : saved;
+                _codeEditor.TextChanged += newText =>
+                    SessionState.SetString(SessionKey_CodeText, newText);
             }
 
             var runBtn = root.Q<Button>("run-btn");
@@ -133,9 +139,9 @@ return UnityEngine.Application.unityVersion;";
 
         private void Run()
         {
-            if (_codeInput == null || _outputContent == null) return;
+            if (_codeEditor == null || _outputContent == null) return;
 
-            var code = _codeInput.value ?? string.Empty;
+            var code = _codeEditor.value ?? string.Empty;
             ClearOutput();
             AppendOutput($"▶ Running ({code.Length} chars)…", "info");
 

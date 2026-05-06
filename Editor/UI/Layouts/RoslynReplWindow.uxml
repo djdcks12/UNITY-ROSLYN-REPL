@@ -21,7 +21,7 @@
                         <ui:VisualElement style="flex-grow: 1;" />
                         <ui:Label text="F5 / Ctrl+Enter to run" class="rr-pane-meta" />
                     </ui:VisualElement>
-                    <ui:TextField name="code-input" multiline="true" class="rr-code-input" />
+                    <ui:VisualElement name="code-editor-host" class="rr-code-editor-host" />
                 </ui:VisualElement>
 
                 <ui:VisualElement name="output-pane" class="rr-pane">
