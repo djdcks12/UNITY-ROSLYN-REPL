@@ -99,6 +99,9 @@ return UnityEngine.Application.unityVersion;";
             var verifyBtn = root.Q<Button>("verify-btn");
             if (verifyBtn != null) verifyBtn.clicked += () => SetupVerifier.Verify();
 
+            var usingsBtn = root.Q<Button>("usings-btn");
+            if (usingsBtn != null) usingsBtn.clicked += UsingsEditorWindow.Open;
+
             UpdateModeLabel();
             // Dedupe: CreateGUI may be called multiple times (domain reload,
             // explicit rebuild). root.Clear() removes children but keeps
@@ -145,7 +148,11 @@ return UnityEngine.Application.unityVersion;";
             ClearOutput();
             AppendOutput($"▶ Running ({code.Length} chars)…", "info");
 
-            var result = ReplEngine.Execute(code);
+            // Pull defaults + user-added usings on every run so changes made
+            // in the Usings editor (which writes EditorPrefs synchronously)
+            // take effect immediately, no window restart required.
+            var options = new ReplOptions { Usings = UsingsStore.EffectiveUsings() };
+            var result = ReplEngine.Execute(code, options);
             RenderResult(result);
         }
 
