@@ -16,6 +16,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `RoslynRepl.Editor.UI.UsingsEditorWindow`: utility popup (`ShowUtility`) listing the read-only defaults at top, then an editable list of the user's additions with a per-row `✕` remove button, then a single text field + `+ Add` button (Enter also submits). Pasted entries are normalized — `using Foo;` and `Foo` both end up as `Foo`. Saves on every mutation; new entries take effect on the next Run because `RoslynReplWindow.Run` always fetches `UsingsStore.EffectiveUsings()` fresh per call.
 - Toolbar: new `Usings…` button between the existing `Verify Setup` and the rest of the row.
 
+### Phase 4 limitations (intentionally not shipped)
+- Inline C# syntax highlighting in the code editor. UI Toolkit `TextField` paints text with a single foreground color and has no per-token color API; the workarounds (RichText overlay or parallel non-editable highlight surface kept in sync on every keystroke) add substantial complexity for a quality-of-life nicety in a snippet REPL. Diagnostics are already surfaced via the gutter markers added above and in the output panel. See README "Known limitations" for revisit conditions.
+
 ### Added (Phase 3 — instance browser side panel)
 - New `RoslynRepl.Editor.Core.InstanceLocator` enumerates user-visible runtime instances by category (`MonoBehaviour`, `ScriptableObject`, `Singleton`, `All`) with substring filtering on type/display name. Hides Unity-shipped types, Editor framework objects, and the package's own assembly so the list stays focused on the user's project.
 - `SingletonScanner` (`[InitializeOnLoad]`) reflects over user assemblies for static `Instance` properties / fields. Member discovery is cached for the domain lifetime (invalidated on `AssemblyLoad`); values are read fresh each call so destroyed singletons drop out.
