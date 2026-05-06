@@ -8,6 +8,7 @@
             <ui:Label name="duration-label" text="" class="rr-duration" />
             <ui:Label name="mode-label" text="EDIT" class="rr-badge rr-badge--edit" />
             <ui:Label name="version-label" text="v?" class="rr-version" />
+            <uie:ToolbarButton name="usings-btn" text="Usings…" />
             <uie:ToolbarButton name="verify-btn" text="Verify Setup" />
         </uie:Toolbar>
 
@@ -21,7 +22,7 @@
                         <ui:VisualElement style="flex-grow: 1;" />
                         <ui:Label text="F5 / Ctrl+Enter to run" class="rr-pane-meta" />
                     </ui:VisualElement>
-                    <ui:TextField name="code-input" multiline="true" class="rr-code-input" />
+                    <ui:VisualElement name="code-editor-host" class="rr-code-editor-host" />
                 </ui:VisualElement>
 
                 <ui:VisualElement name="output-pane" class="rr-pane">

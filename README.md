@@ -30,12 +30,19 @@ If another package (e.g. `com.ivanmurzak.unity.mcp`, `com.unity.code-analysis`, 
 
 ## Roadmap
 
-Planned phases (deferred from the current release):
+Shipped:
 
-- **Phase 4 — UX polish**: C# syntax highlighting in the code editor, line numbers + caret position indicator, compile-error inline markers (red squiggles + gutter), UI for editing `ReplOptions.Usings`.
+- **Phase 4 — UX polish (in this release)**: line-number gutter + caret position indicator, compile-error gutter markers with hover tooltips, `Usings…` editor popup that persists user-added namespaces via `EditorPrefs`. *Inline syntax highlighting is intentionally not shipped — see "Known limitations" below.*
+
+Planned (deferred):
+
 - **Phase 5 — Persistence + variable continuity**: snippet library (save / load named snippets), run history, `_` variable carrying the previous result between runs, persisted Roslyn options.
 - **Phase 6 — Watch panel + async**: live-re-evaluating watch expressions with change highlight, `async` / `await` support in snippet bodies, soft timeout / cancellation.
 - **Phase 7 — Distribution**: `Samples~` default snippet library, README polish + screenshots, OpenUPM submission.
+
+## Known limitations
+
+- **No inline C# syntax highlighting in the code editor.** UI Toolkit's `TextField` renders its content with a single foreground color and offers no per-token color API; the only options are (a) lose editability by replacing the input with a `RichText`-rendered `Label` overlay, or (b) maintain a parallel non-editable highlight surface and keep it in sync with the live `TextField` on every keystroke. Both add substantial complexity for what amounts to a quality-of-life nicety in a snippet REPL — Roslyn diagnostics are already surfaced in the gutter (Phase 4) and in the output panel — so true highlighting stays out for now. If a future Unity release exposes a richer text-input element, this can be revisited.
 
 ## License
 

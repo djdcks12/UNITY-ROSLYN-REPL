@@ -21,7 +21,7 @@ namespace RoslynRepl.Editor.UI
 // Use 'return X;' to surface a value. Debug.Log() output is captured.
 return UnityEngine.Application.unityVersion;";
 
-        private TextField _codeInput;
+        private CodeEditorView _codeEditor;
         private VisualElement _outputContent;
         private ScrollView _outputScroll;
         private Label _durationLabel;
@@ -59,7 +59,6 @@ return UnityEngine.Application.unityVersion;";
 
         private void BindControls(VisualElement root)
         {
-            _codeInput     = root.Q<TextField>("code-input");
             _outputContent = root.Q<VisualElement>("output-content");
             _outputScroll  = root.Q<ScrollView>("output-scroll");
             _durationLabel = root.Q<Label>("duration-label");
@@ -75,13 +74,20 @@ return UnityEngine.Application.unityVersion;";
                 _browser.OnInstanceChosen += OnBrowserInstanceChosen;
             }
 
-            // Code input: restore from session and persist on change
-            if (_codeInput != null)
+            // Code editor: restore from session and persist on change.
+            // Phase 4 lifts the bare TextField into a composite view that
+            // owns the gutter + caret indicator.
+            var editorHost = root.Q<VisualElement>("code-editor-host");
+            if (editorHost != null)
             {
+                editorHost.Clear();
+                _codeEditor = new CodeEditorView();
+                editorHost.Add(_codeEditor);
+
                 var saved = SessionState.GetString(SessionKey_CodeText, null);
-                _codeInput.value = string.IsNullOrEmpty(saved) ? DefaultCode : saved;
-                _codeInput.RegisterValueChangedCallback(evt =>
-                    SessionState.SetString(SessionKey_CodeText, evt.newValue));
+                _codeEditor.value = string.IsNullOrEmpty(saved) ? DefaultCode : saved;
+                _codeEditor.TextChanged += newText =>
+                    SessionState.SetString(SessionKey_CodeText, newText);
             }
 
             var runBtn = root.Q<Button>("run-btn");
@@ -92,6 +98,9 @@ return UnityEngine.Application.unityVersion;";
 
             var verifyBtn = root.Q<Button>("verify-btn");
             if (verifyBtn != null) verifyBtn.clicked += () => SetupVerifier.Verify();
+
+            var usingsBtn = root.Q<Button>("usings-btn");
+            if (usingsBtn != null) usingsBtn.clicked += UsingsEditorWindow.Open;
 
             UpdateModeLabel();
             // Dedupe: CreateGUI may be called multiple times (domain reload,
@@ -133,13 +142,17 @@ return UnityEngine.Application.unityVersion;";
 
         private void Run()
         {
-            if (_codeInput == null || _outputContent == null) return;
+            if (_codeEditor == null || _outputContent == null) return;
 
-            var code = _codeInput.value ?? string.Empty;
+            var code = _codeEditor.value ?? string.Empty;
             ClearOutput();
             AppendOutput($"▶ Running ({code.Length} chars)…", "info");
 
-            var result = ReplEngine.Execute(code);
+            // Pull defaults + user-added usings on every run so changes made
+            // in the Usings editor (which writes EditorPrefs synchronously)
+            // take effect immediately, no window restart required.
+            var options = new ReplOptions { Usings = UsingsStore.EffectiveUsings() };
+            var result = ReplEngine.Execute(code, options);
             RenderResult(result);
         }
 
@@ -172,6 +185,9 @@ return UnityEngine.Application.unityVersion;";
         private void RenderResult(ReplResult result)
         {
             ClearOutput();
+            // Drop any markers from a previous compile before laying down new
+            // ones — a successful run should leave the gutter clean.
+            _codeEditor?.ClearErrorMarkers();
 
             // Captured logs first — but filter out background noise from other
             // Play Mode systems (server, ad SDK, etc.) that fired during the
@@ -210,6 +226,18 @@ return UnityEngine.Application.unityVersion;";
                         var prefix = d.IsInUserCode ? $"line {d.Line}, col {d.Column}" : "(internal)";
                         AppendOutput($"  {prefix}: {d.Code} — {d.Message}", "diagnostic");
                     }
+                    // Surface the same diagnostics inline against the code:
+                    // every user-code diagnostic gets a red gutter dot whose
+                    // tooltip shows the message. Internal (wrapper-region)
+                    // diagnostics are omitted — they have no meaningful line
+                    // in what the user actually typed.
+                    var markers = new List<(int line, string message)>(result.Diagnostics.Count);
+                    foreach (var d in result.Diagnostics)
+                    {
+                        if (!d.IsInUserCode) continue;
+                        markers.Add((d.Line, $"{d.Code}: {d.Message}"));
+                    }
+                    _codeEditor?.SetErrorMarkers(markers);
                     break;
 
                 case ReplResultKind.RuntimeError:
