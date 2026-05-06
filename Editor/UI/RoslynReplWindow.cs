@@ -105,11 +105,18 @@ return UnityEngine.Application.unityVersion;";
             var historyBtn = root.Q<Button>("history-btn");
             if (historyBtn != null) historyBtn.clicked += RunHistoryWindow.Open;
 
+            var snippetsBtn = root.Q<Button>("snippets-btn");
+            if (snippetsBtn != null) snippetsBtn.clicked += SnippetLibraryWindow.Open;
+
             // Subscribe once: re-binding on every CreateGUI would stack
             // handlers across domain reloads. Plain `-= +=` covers both the
             // first mount and rebuilds.
             RunHistoryWindow.OnSnippetChosen -= LoadSnippetIntoEditor;
             RunHistoryWindow.OnSnippetChosen += LoadSnippetIntoEditor;
+            SnippetLibraryWindow.OnSnippetChosen -= LoadSnippetIntoEditor;
+            SnippetLibraryWindow.OnSnippetChosen += LoadSnippetIntoEditor;
+            SnippetLibraryWindow.OnSaveRequested -= SaveCurrentEditorAsSnippet;
+            SnippetLibraryWindow.OnSaveRequested += SaveCurrentEditorAsSnippet;
 
             UpdateModeLabel();
             // Dedupe: CreateGUI may be called multiple times (domain reload,
@@ -137,12 +144,24 @@ return UnityEngine.Application.unityVersion;";
         {
             EditorApplication.playModeStateChanged -= OnPlayModeChanged;
             RunHistoryWindow.OnSnippetChosen -= LoadSnippetIntoEditor;
+            SnippetLibraryWindow.OnSnippetChosen -= LoadSnippetIntoEditor;
+            SnippetLibraryWindow.OnSaveRequested -= SaveCurrentEditorAsSnippet;
         }
 
         private void LoadSnippetIntoEditor(string code)
         {
             if (_codeEditor == null || code == null) return;
             _codeEditor.value = code;
+        }
+
+        private void SaveCurrentEditorAsSnippet(string name)
+        {
+            if (_codeEditor == null || string.IsNullOrWhiteSpace(name)) return;
+            // Pull live code at commit time — the popup stays passive about
+            // the buffer state, so it can't go stale if the user kept
+            // typing after opening it.
+            SnippetStore.Save(name, _codeEditor.value ?? string.Empty);
+            SnippetLibraryWindow.NotifyChanged();
         }
 
         private void OnKeyDown(KeyDownEvent evt)
