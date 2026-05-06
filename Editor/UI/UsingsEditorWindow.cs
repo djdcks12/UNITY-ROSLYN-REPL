@@ -42,6 +42,13 @@ namespace RoslynRepl.Editor.UI
             _customUsings = UsingsStore.LoadCustom();
 
             var root = rootVisualElement;
+            // CreateGUI is not a one-shot hook: panel rebuilds and domain
+            // reload recovery can fire it again on the same window. Without
+            // this clear, the second call appends a duplicate control tree
+            // on top of the first — visible duplicate sections plus stale
+            // refs in the stale rows because _customList only points at the
+            // most recently constructed list element.
+            root.Clear();
             root.style.paddingLeft = 8;
             root.style.paddingRight = 8;
             root.style.paddingTop = 8;
