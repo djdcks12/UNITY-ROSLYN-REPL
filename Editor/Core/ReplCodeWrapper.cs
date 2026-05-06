@@ -63,6 +63,13 @@ namespace RoslynRepl.Editor.Core
             // a CallSite under the hood; AssemblyReferenceCache force-
             // loads Microsoft.CSharp so the runtime binder is reachable.
             sb.Append("    public static dynamic _ => RoslynRepl.Editor.Core.ReplEngine.LastResult;\n"); line++;
+            // Cooperative cancellation token. Snippets call
+            // `ct.ThrowIfCancellationRequested()` inside long loops so the
+            // engine's CancelAfter timer (default 5s) or an external
+            // Cancel button can interrupt them. Snippets that don't check
+            // `ct` still hang the Editor — there's no hard kill on the
+            // main thread (Thread.Abort is unavailable on Mono / .NET 6+).
+            sb.Append("    public static System.Threading.CancellationToken ct => RoslynRepl.Editor.Core.ReplEngine.CurrentCancellation;\n"); line++;
             sb.Append("    public static object ").Append(MethodName).Append("()\n");  line++;
             sb.Append("    {\n");                              line++;
 

@@ -28,6 +28,7 @@ return UnityEngine.Application.unityVersion;";
         private Label _modeLabel;
         private Label _outputSummary;
         private ObjectBrowserView _browser;
+        private WatchPanelView _watch;
 
         [MenuItem("Tools/Roslyn REPL/Open", priority = 10)]
         public static void Open()
@@ -72,6 +73,22 @@ return UnityEngine.Application.unityVersion;";
                 browserHost.Clear();
                 _browser = new ObjectBrowserView(browserHost);
                 _browser.OnInstanceChosen += OnBrowserInstanceChosen;
+            }
+
+            // Mount the watch panel below output. CreateGUI can fire
+            // again on domain reload or panel rebuild; the previous view
+            // — if any — has already subscribed to the static
+            // WatchStore.Changed event, so we must dispose it first or
+            // every rebuild leaves a stale handler subscribed forever.
+            // After enough rebuilds an Add/Remove fires the panel
+            // refresh N times, causing each watch to evaluate N times
+            // and `_` to update N times against the same row.
+            _watch?.Dispose();
+            _watch = null;
+            var watchHost = root.Q<VisualElement>("watch-pane-host");
+            if (watchHost != null)
+            {
+                _watch = new WatchPanelView(watchHost);
             }
 
             // Code editor: restore from session and persist on change.
@@ -146,6 +163,12 @@ return UnityEngine.Application.unityVersion;";
             RunHistoryWindow.OnSnippetChosen -= LoadSnippetIntoEditor;
             SnippetLibraryWindow.OnSnippetChosen -= LoadSnippetIntoEditor;
             SnippetLibraryWindow.OnSaveRequested -= SaveCurrentEditorAsSnippet;
+            // Drop the watch panel's WatchStore subscription so this
+            // window's instance doesn't keep refreshing in the
+            // background after it's closed (or before it's rebuilt by
+            // the next CreateGUI).
+            _watch?.Dispose();
+            _watch = null;
         }
 
         private void LoadSnippetIntoEditor(string code)
@@ -195,6 +218,11 @@ return UnityEngine.Application.unityVersion;";
             // doesn't churn the ring.
             RunHistoryStore.Push(code);
             RenderResult(result);
+            // Re-evaluate every watched expression after the user's
+            // run lands, so values reflect any side effects the snippet
+            // produced (e.g. mutating a manager state visible to a
+            // watch).
+            _watch?.Refresh();
         }
 
         // Double-click on a browser row renders that instance into the output
@@ -286,6 +314,12 @@ return UnityEngine.Application.unityVersion;";
                     if (!string.IsNullOrEmpty(result.StackTrace))
                         AppendOutput(result.StackTrace, "diagnostic");
                     break;
+
+                case ReplResultKind.Cancelled:
+                    // Cancellation isn't a bug — render as a warning so
+                    // it stands apart from compile / runtime errors.
+                    AppendOutput($"⏹ {result.ErrorMessage}", "warning");
+                    break;
             }
 
             UpdateStatusLabels(result);
@@ -304,6 +338,7 @@ return UnityEngine.Application.unityVersion;";
                     ReplResultKind.Success      => "OK",
                     ReplResultKind.CompileError => $"Compile error ({result.Diagnostics.Count})",
                     ReplResultKind.RuntimeError => "Runtime error",
+                    ReplResultKind.Cancelled    => "Cancelled",
                     _ => string.Empty
                 };
             }

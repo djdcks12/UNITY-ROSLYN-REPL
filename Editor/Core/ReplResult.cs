@@ -9,7 +9,15 @@ namespace RoslynRepl.Editor.Core
     {
         Success,
         CompileError,
-        RuntimeError
+        RuntimeError,
+        /// <summary>
+        /// Snippet observed the cancellation token (or hit
+        /// <see cref="ReplOptions.TimeoutMs"/>) and bailed out.
+        /// Distinct from <see cref="RuntimeError"/> so the UI can show
+        /// it differently — a cancellation isn't a bug, it's the safety
+        /// net the user opted into.
+        /// </summary>
+        Cancelled
     }
 
     public class ReplResult
@@ -56,6 +64,17 @@ namespace RoslynRepl.Editor.Core
                 Kind = ReplResultKind.RuntimeError,
                 ErrorMessage = exception?.Message ?? "(unknown)",
                 StackTrace = exception?.StackTrace,
+                Logs = logs ?? new List<LogEntry>(),
+                Duration = duration
+            };
+        }
+
+        public static ReplResult Cancelled(string reason, List<LogEntry> logs, TimeSpan duration)
+        {
+            return new ReplResult
+            {
+                Kind = ReplResultKind.Cancelled,
+                ErrorMessage = reason ?? "Snippet cancelled",
                 Logs = logs ?? new List<LogEntry>(),
                 Duration = duration
             };

@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Threading;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 
@@ -17,9 +18,19 @@ namespace RoslynRepl.Editor.Core
     /// Phase 5 introduces a single piece of carry-over state: the most recent
     /// non-null returned value is stored in <see cref="LastResult"/> and
     /// surfaced inside snippets as the static property <c>_</c> on the
-    /// generated wrapper class. Other locals still don't survive between runs;
-    /// see Phase 6 for async/await and timeout/cancellation, which remain
-    /// deferred.
+    /// generated wrapper class. Other locals still don't survive between runs.
+    ///
+    /// Phase 6 adds soft timeout / cancellation. Each Execute call links a
+    /// new <see cref="CancellationTokenSource"/> with the optional external
+    /// token from <see cref="ReplOptions.ExternalCancellation"/> and (when
+    /// enabled) <c>CancelAfter(TimeoutMs)</c>. The combined token is exposed
+    /// to user snippets as the static property <c>ct</c> on the wrapper
+    /// class, so cooperative loops can call <c>ct.ThrowIfCancellationRequested()</c>
+    /// to bail out cleanly. Hard kill of a synchronous snippet that ignores
+    /// the token isn't supported on Editor's main thread (Thread.Abort is
+    /// unavailable); see README "Known limitations".
+    ///
+    /// async/await inside snippets is deferred — see README.
     /// </summary>
     public static class ReplEngine
     {
@@ -32,6 +43,13 @@ namespace RoslynRepl.Editor.Core
 
         /// <summary>Clears the carry-over <c>_</c> value.</summary>
         public static void ResetLastResult() => LastResult = null;
+
+        /// <summary>
+        /// Cancellation token for the snippet currently executing. Read inside
+        /// snippets as <c>ct</c>. <c>CancellationToken.None</c> when no Execute
+        /// call is in flight (e.g. between runs or during compilation).
+        /// </summary>
+        public static CancellationToken CurrentCancellation { get; private set; } = CancellationToken.None;
 
         public static ReplResult Execute(string userCode, ReplOptions options = null)
         {
@@ -88,14 +106,34 @@ namespace RoslynRepl.Editor.Core
                 // background logs emitted during Wrap / Parse / Compile / Emit /
                 // Load do not contaminate the snippet's output.
                 object value;
+                using var cts = CancellationTokenSource.CreateLinkedTokenSource(options.ExternalCancellation);
+                if (options.TimeoutMs > 0) cts.CancelAfter(options.TimeoutMs);
+                CurrentCancellation = cts.Token;
                 capture.Begin();
                 try
                 {
                     value = method.Invoke(null, null);
                 }
+                catch (TargetInvocationException tie) when (IsCancellation(tie.InnerException, cts.Token))
+                {
+                    // Cooperative cancel from inside the snippet
+                    // (ct.ThrowIfCancellationRequested() or similar).
+                    // Distinguish the timeout-driven cancel from an
+                    // external one via cts.IsCancellationRequested vs the
+                    // external token's state — the message helps the user
+                    // tell "I hit Cancel" from "snippet ran past 5s".
+                    var reason = BuildCancelReason(options, cts.Token);
+                    return ReplResult.Cancelled(reason, ClassifyLogs(capture.End()), sw.Elapsed);
+                }
                 catch (TargetInvocationException tie)
                 {
                     return ReplResult.RuntimeError(tie.InnerException ?? tie, ClassifyLogs(capture.End()), sw.Elapsed);
+                }
+                finally
+                {
+                    // Whatever happens, the next call shouldn't see this
+                    // call's token if it's been disposed.
+                    CurrentCancellation = CancellationToken.None;
                 }
 
                 // Carry-over: record only meaningful values. The wrapper
@@ -104,7 +142,14 @@ namespace RoslynRepl.Editor.Core
                 // LastResult with that synthetic null would defeat the
                 // purpose of `_` — we'd erase the previous useful value
                 // every time the user ran a Debug.Log-only line.
-                if (value != null)
+                //
+                // Background callers (the Watch panel) opt out via
+                // ReplOptions.UpdateLastResult so passive observation
+                // doesn't quietly mutate the user-visible carry-over —
+                // running ten watches between two user runs would
+                // otherwise leave `_` pointing at the last watch result
+                // instead of the user's actual previous value.
+                if (value != null && options.UpdateLastResult)
                 {
                     LastResult = value;
                 }
@@ -161,6 +206,34 @@ namespace RoslynRepl.Editor.Core
             if (value is char c)   return $"'{c}'";
             try { return value.ToString(); }
             catch (Exception ex) { return $"<Error in ToString(): {ex.Message}>"; }
+        }
+
+        private static bool IsCancellation(Exception ex, CancellationToken token)
+        {
+            // Either the framework's OperationCanceledException matched the
+            // token we issued, or some user code threw OCE for any reason
+            // and the token is also signalled — in the latter case treat it
+            // as a cancel too, since the user almost certainly wired their
+            // own check off `ct`. Matching tokens is the strict-correct
+            // signal; relaxing to "token signalled" catches the common
+            // pattern `if (ct.IsCancellationRequested) throw new OperationCanceledException();`.
+            if (ex is OperationCanceledException oce)
+            {
+                if (oce.CancellationToken == token) return true;
+                if (token.IsCancellationRequested) return true;
+            }
+            return false;
+        }
+
+        private static string BuildCancelReason(ReplOptions options, CancellationToken token)
+        {
+            // External token wins in the message — if the user hit a Cancel
+            // button somewhere, "timeout" would be misleading.
+            if (options.ExternalCancellation.IsCancellationRequested)
+                return "Snippet cancelled by external request";
+            if (options.TimeoutMs > 0 && token.IsCancellationRequested)
+                return $"Snippet cancelled after {options.TimeoutMs} ms timeout";
+            return "Snippet cancelled";
         }
     }
 }
