@@ -178,6 +178,9 @@ return UnityEngine.Application.unityVersion;";
         private void RenderResult(ReplResult result)
         {
             ClearOutput();
+            // Drop any markers from a previous compile before laying down new
+            // ones — a successful run should leave the gutter clean.
+            _codeEditor?.ClearErrorMarkers();
 
             // Captured logs first — but filter out background noise from other
             // Play Mode systems (server, ad SDK, etc.) that fired during the
@@ -216,6 +219,18 @@ return UnityEngine.Application.unityVersion;";
                         var prefix = d.IsInUserCode ? $"line {d.Line}, col {d.Column}" : "(internal)";
                         AppendOutput($"  {prefix}: {d.Code} — {d.Message}", "diagnostic");
                     }
+                    // Surface the same diagnostics inline against the code:
+                    // every user-code diagnostic gets a red gutter dot whose
+                    // tooltip shows the message. Internal (wrapper-region)
+                    // diagnostics are omitted — they have no meaningful line
+                    // in what the user actually typed.
+                    var markers = new List<(int line, string message)>(result.Diagnostics.Count);
+                    foreach (var d in result.Diagnostics)
+                    {
+                        if (!d.IsInUserCode) continue;
+                        markers.Add((d.Line, $"{d.Code}: {d.Message}"));
+                    }
+                    _codeEditor?.SetErrorMarkers(markers);
                     break;
 
                 case ReplResultKind.RuntimeError:
