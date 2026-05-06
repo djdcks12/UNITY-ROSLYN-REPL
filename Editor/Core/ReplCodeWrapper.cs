@@ -46,6 +46,23 @@ namespace RoslynRepl.Editor.Core
             sb.Append('\n');                                  line++;
             sb.Append("public static class ").Append(ClassName).Append("\n");  line++;
             sb.Append("{\n");                                  line++;
+            // Carry-over `_` exposed as a static property of the wrapper
+            // class so snippets can reference it unqualified
+            // (`return _ + 1;`). A property — rather than a local inside
+            // __Run — avoids the CS0219 "declared but never used"
+            // diagnostic when the user doesn't reference it, and lets a
+            // user-introduced local `_` shadow it cleanly inside its own
+            // scope (e.g. `int _ = 5;`). Reads pull through to
+            // ReplEngine.LastResult, so the same instance reflects the
+            // most recent non-null result on every invocation.
+            //
+            // Property type is `dynamic` rather than `object` so operators
+            // and member access bind at runtime against the actual stored
+            // value: `return _ + 1;` works after `return 41;`, no
+            // user-side `(int)` cast needed. The C# compiler synthesizes
+            // a CallSite under the hood; AssemblyReferenceCache force-
+            // loads Microsoft.CSharp so the runtime binder is reachable.
+            sb.Append("    public static dynamic _ => RoslynRepl.Editor.Core.ReplEngine.LastResult;\n"); line++;
             sb.Append("    public static object ").Append(MethodName).Append("()\n");  line++;
             sb.Append("    {\n");                              line++;
 

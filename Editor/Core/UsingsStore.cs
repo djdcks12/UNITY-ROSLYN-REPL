@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using UnityEditor;
-using UnityEngine;
 
 namespace RoslynRepl.Editor.Core
 {
@@ -67,32 +66,9 @@ namespace RoslynRepl.Editor.Core
             return combined;
         }
 
-        // EditorPrefs is shared across every Unity project on the machine,
-        // so the key has to discriminate by project. Hash dataPath rather
-        // than embedding it raw — registry/plist key length limits, plus
-        // the path can contain characters some backends don't love.
-        private static string PrefsKey =>
-            "RoslynRepl.CustomUsings." + ComputeProjectHash().ToString("x8");
-
-        // FNV-1a 32-bit. We deliberately avoid string.GetHashCode here —
-        // modern .NET runtimes randomize string hashes per process, so its
-        // output is unstable across editor sessions and would shuffle the
-        // user's saved usings out from under them on every restart.
-        private static int ComputeProjectHash()
-        {
-            var path = Application.dataPath ?? string.Empty;
-            unchecked
-            {
-                const int prime = 16777619;
-                int hash = unchecked((int)2166136261u);
-                for (int i = 0; i < path.Length; i++)
-                {
-                    hash ^= path[i];
-                    hash *= prime;
-                }
-                return hash;
-            }
-        }
+        // Per-project bucket — see ProjectScopedPrefs for why a hashed
+        // path discriminator is required.
+        private static string PrefsKey => ProjectScopedPrefs.BuildKey("RoslynRepl.CustomUsings");
 
         private static bool _legacyMigrationChecked;
         private static void MigrateLegacyKeyIfNeeded()

@@ -102,6 +102,22 @@ return UnityEngine.Application.unityVersion;";
             var usingsBtn = root.Q<Button>("usings-btn");
             if (usingsBtn != null) usingsBtn.clicked += UsingsEditorWindow.Open;
 
+            var historyBtn = root.Q<Button>("history-btn");
+            if (historyBtn != null) historyBtn.clicked += RunHistoryWindow.Open;
+
+            var snippetsBtn = root.Q<Button>("snippets-btn");
+            if (snippetsBtn != null) snippetsBtn.clicked += SnippetLibraryWindow.Open;
+
+            // Subscribe once: re-binding on every CreateGUI would stack
+            // handlers across domain reloads. Plain `-= +=` covers both the
+            // first mount and rebuilds.
+            RunHistoryWindow.OnSnippetChosen -= LoadSnippetIntoEditor;
+            RunHistoryWindow.OnSnippetChosen += LoadSnippetIntoEditor;
+            SnippetLibraryWindow.OnSnippetChosen -= LoadSnippetIntoEditor;
+            SnippetLibraryWindow.OnSnippetChosen += LoadSnippetIntoEditor;
+            SnippetLibraryWindow.OnSaveRequested -= SaveCurrentEditorAsSnippet;
+            SnippetLibraryWindow.OnSaveRequested += SaveCurrentEditorAsSnippet;
+
             UpdateModeLabel();
             // Dedupe: CreateGUI may be called multiple times (domain reload,
             // explicit rebuild). root.Clear() removes children but keeps
@@ -127,6 +143,25 @@ return UnityEngine.Application.unityVersion;";
         private void OnDisable()
         {
             EditorApplication.playModeStateChanged -= OnPlayModeChanged;
+            RunHistoryWindow.OnSnippetChosen -= LoadSnippetIntoEditor;
+            SnippetLibraryWindow.OnSnippetChosen -= LoadSnippetIntoEditor;
+            SnippetLibraryWindow.OnSaveRequested -= SaveCurrentEditorAsSnippet;
+        }
+
+        private void LoadSnippetIntoEditor(string code)
+        {
+            if (_codeEditor == null || code == null) return;
+            _codeEditor.value = code;
+        }
+
+        private void SaveCurrentEditorAsSnippet(string name)
+        {
+            if (_codeEditor == null || string.IsNullOrWhiteSpace(name)) return;
+            // Pull live code at commit time — the popup stays passive about
+            // the buffer state, so it can't go stale if the user kept
+            // typing after opening it.
+            SnippetStore.Save(name, _codeEditor.value ?? string.Empty);
+            SnippetLibraryWindow.NotifyChanged();
         }
 
         private void OnKeyDown(KeyDownEvent evt)
@@ -153,6 +188,12 @@ return UnityEngine.Application.unityVersion;";
             // take effect immediately, no window restart required.
             var options = new ReplOptions { Usings = UsingsStore.EffectiveUsings() };
             var result = ReplEngine.Execute(code, options);
+            // Record the snippet whenever Execute returns — including
+            // failures, since users often want to scroll back to a broken
+            // run, fix the error, and try again. RunHistoryStore de-dupes
+            // identical consecutive entries so re-running the same code
+            // doesn't churn the ring.
+            RunHistoryStore.Push(code);
             RenderResult(result);
         }
 
