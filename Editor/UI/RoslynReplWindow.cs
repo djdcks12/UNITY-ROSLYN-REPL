@@ -286,6 +286,12 @@ return UnityEngine.Application.unityVersion;";
                     if (!string.IsNullOrEmpty(result.StackTrace))
                         AppendOutput(result.StackTrace, "diagnostic");
                     break;
+
+                case ReplResultKind.Cancelled:
+                    // Cancellation isn't a bug — render as a warning so
+                    // it stands apart from compile / runtime errors.
+                    AppendOutput($"⏹ {result.ErrorMessage}", "warning");
+                    break;
             }
 
             UpdateStatusLabels(result);
@@ -304,6 +310,7 @@ return UnityEngine.Application.unityVersion;";
                     ReplResultKind.Success      => "OK",
                     ReplResultKind.CompileError => $"Compile error ({result.Diagnostics.Count})",
                     ReplResultKind.RuntimeError => "Runtime error",
+                    ReplResultKind.Cancelled    => "Cancelled",
                     _ => string.Empty
                 };
             }
