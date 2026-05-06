@@ -25,6 +25,17 @@ namespace RoslynRepl.Editor.Core
         /// </summary>
         public CancellationToken ExternalCancellation { get; set; } = CancellationToken.None;
 
+        /// <summary>
+        /// When <c>true</c> (the default), a successful non-null return
+        /// value is recorded into <see cref="ReplEngine.LastResult"/> so
+        /// the next snippet can read it as <c>_</c>. Background callers
+        /// that observe values without "running" the user's REPL — most
+        /// notably the Watch panel — set this to <c>false</c> so a
+        /// passive evaluation can't quietly mutate the user's
+        /// previous-result state.
+        /// </summary>
+        public bool UpdateLastResult { get; set; } = true;
+
         public static IReadOnlyList<string> DefaultUsings { get; } = new[]
         {
             "System",

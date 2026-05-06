@@ -88,6 +88,12 @@ namespace RoslynRepl.Editor.Core
                 {
                     Usings = UsingsStore.EffectiveUsings(),
                     TimeoutMs = WatchTimeoutMs,
+                    // Watch evaluations are passive — they must not
+                    // overwrite the user-visible `_` carry-over. Without
+                    // this opt-out, a watch like `Manager.Count` would
+                    // leave `_` pointing at the count instead of the
+                    // user's actual previous run result.
+                    UpdateLastResult = false,
                 };
                 r = ReplEngine.Execute(snippet, opts);
             }

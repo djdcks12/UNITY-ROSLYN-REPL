@@ -142,7 +142,14 @@ namespace RoslynRepl.Editor.Core
                 // LastResult with that synthetic null would defeat the
                 // purpose of `_` — we'd erase the previous useful value
                 // every time the user ran a Debug.Log-only line.
-                if (value != null)
+                //
+                // Background callers (the Watch panel) opt out via
+                // ReplOptions.UpdateLastResult so passive observation
+                // doesn't quietly mutate the user-visible carry-over —
+                // running ten watches between two user runs would
+                // otherwise leave `_` pointing at the last watch result
+                // instead of the user's actual previous value.
+                if (value != null && options.UpdateLastResult)
                 {
                     LastResult = value;
                 }
