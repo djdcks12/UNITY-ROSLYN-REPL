@@ -248,6 +248,105 @@
     color: rgb(180, 220, 255);
 }
 
+/* Watch panel (Phase 6) */
+.rr-watch-pane {
+    flex-grow: 1;
+    flex-direction: column;
+    background-color: rgb(40, 40, 40);
+}
+
+.rr-watch-header {
+    flex-direction: row;
+    align-items: center;
+    height: 22px;
+    padding-left: 6px;
+    padding-right: 6px;
+    background-color: rgb(56, 56, 56);
+    border-bottom-width: 1px;
+    border-bottom-color: rgb(28, 28, 28);
+}
+
+.rr-watch-add-field {
+    height: 16px;
+    margin-right: 4px;
+}
+
+.rr-watch-add-btn {
+    height: 16px;
+    -unity-font-style: bold;
+    color: rgb(180, 220, 180);
+}
+
+.rr-watch-scroll {
+    flex-grow: 1;
+}
+
+.rr-watch-rows {
+    flex-direction: column;
+    padding: 2px 0;
+}
+
+.rr-watch-row {
+    flex-direction: row;
+    align-items: center;
+    padding: 2px 6px;
+    border-bottom-width: 1px;
+    border-bottom-color: rgb(34, 34, 34);
+}
+
+/* Brief flash when a watched value changes between runs */
+.rr-watch-row--changed {
+    background-color: rgba(120, 200, 120, 0.18);
+}
+
+.rr-watch-row--failed .rr-watch-cell-value {
+    color: rgb(255, 140, 140);
+    -unity-font-style: italic;
+}
+
+.rr-watch-cell-expr {
+    width: 200px;
+    color: rgb(220, 220, 220);
+    -unity-text-align: middle-left;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 11px;
+}
+
+.rr-watch-cell-value {
+    flex-grow: 1;
+    color: rgb(180, 220, 255);
+    -unity-text-align: middle-left;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 11px;
+}
+
+.rr-watch-cell-type {
+    width: 110px;
+    color: rgb(140, 200, 220);
+    -unity-text-align: middle-left;
+    -unity-font-style: italic;
+    font-size: 10px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.rr-watch-cell-remove {
+    min-width: 22px;
+    height: 16px;
+}
+
+.rr-watch-empty {
+    color: rgb(120, 120, 120);
+    padding: 8px 12px;
+    font-size: 11px;
+    -unity-font-style: italic;
+}
+
 /* Browser side panel (Phase 3) */
 .rr-pane--browser {
     background-color: rgb(40, 40, 40);

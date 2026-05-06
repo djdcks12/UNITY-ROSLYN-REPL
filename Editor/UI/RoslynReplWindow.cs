@@ -28,6 +28,7 @@ return UnityEngine.Application.unityVersion;";
         private Label _modeLabel;
         private Label _outputSummary;
         private ObjectBrowserView _browser;
+        private WatchPanelView _watch;
 
         [MenuItem("Tools/Roslyn REPL/Open", priority = 10)]
         public static void Open()
@@ -72,6 +73,13 @@ return UnityEngine.Application.unityVersion;";
                 browserHost.Clear();
                 _browser = new ObjectBrowserView(browserHost);
                 _browser.OnInstanceChosen += OnBrowserInstanceChosen;
+            }
+
+            // Mount the watch panel below output
+            var watchHost = root.Q<VisualElement>("watch-pane-host");
+            if (watchHost != null)
+            {
+                _watch = new WatchPanelView(watchHost);
             }
 
             // Code editor: restore from session and persist on change.
@@ -195,6 +203,11 @@ return UnityEngine.Application.unityVersion;";
             // doesn't churn the ring.
             RunHistoryStore.Push(code);
             RenderResult(result);
+            // Re-evaluate every watched expression after the user's
+            // run lands, so values reflect any side effects the snippet
+            // produced (e.g. mutating a manager state visible to a
+            // watch).
+            _watch?.Refresh();
         }
 
         // Double-click on a browser row renders that instance into the output

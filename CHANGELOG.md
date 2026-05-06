@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added (Phase 6 — watch panel)
+- `RoslynRepl.Editor.Core.WatchStore`: project-scoped, `EditorPrefs`-backed list of watch expressions. Same base64-per-entry storage as `RunHistoryStore` so any character a user types is safe. De-dupes exact duplicates so accidental double-Enter doesn't add the same row twice.
+- `RoslynRepl.Editor.Core.WatchEvaluator` re-evaluates every saved expression independently. Each watch runs through `ReplEngine.Execute` with its own short timeout (`1000ms`) and the host's effective `Usings`, so a slow or hanging watch can't drag the whole panel down. The evaluator keeps a per-expression preview snapshot and flags rows whose preview just changed via `JustChanged`; the first evaluation after an expression is added doesn't flash (no prior snapshot). `WatchResult` carries `Expression`, `Preview`, `TypeName`, `Failed`, `ErrorMessage`, and the change flag — the view layer's full input contract.
+- The user input is wrapped as `return <expr>;` automatically, so users type bare expressions like `Manager.Instance.Count`. Snippets that already start with `return` (or include trailing `;`) are kept as-is for users who want full statements.
+- `RoslynRepl.Editor.UI.WatchPanelView`: in-window panel mounted under Output (vertical split). Shows expression / value / type per row, plus a `✕` remove and a `+ Add` field (Enter submits) in the header. Rows that just changed get the `rr-watch-row--changed` class for 1.5 seconds, driven by `VisualElement.schedule.Execute` rather than a coroutine. Failed watches render in italic red.
+- Layout: the existing `[code | output]` vertical split is now `[code | [output | watch]]`, with the watch pane at 120px fixed and the inner lower-region at 320px fixed (up from 240px) to keep both visible.
+- `RoslynReplWindow.Run` calls `_watch?.Refresh()` after `RenderResult`, so every Run reflects fresh values for any side effect the snippet produced.
+
 ### Added (Phase 6 — soft timeout / cancellation)
 - `ReplOptions.TimeoutMs` (default 5000ms) wires `CancellationTokenSource.CancelAfter` for every `Execute` call. `ReplOptions.ExternalCancellation` lets a caller (e.g. a future Cancel button or a Watch panel doing batch re-evaluation) thread its own token through; the engine links both via `CreateLinkedTokenSource`. `0` or negative `TimeoutMs` disables the timer.
 - `ReplEngine.CurrentCancellation` exposes the linked token to the in-flight snippet; the wrapper class adds a `public static System.Threading.CancellationToken ct` property that pulls through, so snippets cooperate with `ct.ThrowIfCancellationRequested()` inside long loops. `ct` is reset to `CancellationToken.None` between runs so a stale reference can't fire later.
