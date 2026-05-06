@@ -39,6 +39,21 @@ return UnityEngine.Application.unityVersion;";
             window.Show();
         }
 
+        [MenuItem("Tools/Roslyn REPL/Import Default Snippets", priority = 30)]
+        public static void ImportDefaultSnippets()
+        {
+            var (added, skipped) = DefaultSnippets.ImportAll();
+            string message = added > 0
+                ? $"Added {added} default snippets to your library."
+                : "No new snippets were added.";
+            if (skipped > 0)
+                message += $"\n{skipped} skipped (a snippet with the same name already exists).";
+            EditorUtility.DisplayDialog("Default snippets", message, "OK");
+            // If the library popup is open, refresh its list so the new
+            // entries appear without forcing the user to reopen it.
+            SnippetLibraryWindow.NotifyChanged();
+        }
+
         public void CreateGUI()
         {
             var root = rootVisualElement;

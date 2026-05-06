@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added (Phase 7 — distribution)
+- `RoslynRepl.Editor.Core.DefaultSnippets`: bundled starter library of 8 snippets covering the most common Unity inspection scenarios — Unity version, editor time, active scene, root GameObjects, singleton lookup, memory snapshot, current Selection, and a `_` carry-over example. `ImportAll()` adds them to `SnippetStore`, skipping any name the user already has so re-running the import never overwrites edits the user made to a default.
+- `Tools / Roslyn REPL / Import Default Snippets` menu invokes the import and surfaces an `EditorUtility.DisplayDialog` summary (`X added, Y skipped`). If the Snippets popup is open, `SnippetLibraryWindow.NotifyChanged()` refreshes its list immediately.
+
 ### Added (Phase 6 — watch panel)
 - `RoslynRepl.Editor.Core.WatchStore`: project-scoped, `EditorPrefs`-backed list of watch expressions. Same base64-per-entry storage as `RunHistoryStore` so any character a user types is safe. De-dupes exact duplicates so accidental double-Enter doesn't add the same row twice.
 - `RoslynRepl.Editor.Core.WatchEvaluator` re-evaluates every saved expression independently. Each watch runs through `ReplEngine.Execute` with its own short timeout (`1000ms`) and the host's effective `Usings`, so a slow or hanging watch can't drag the whole panel down. The evaluator keeps a per-expression preview snapshot and flags rows whose preview just changed via `JustChanged`; the first evaluation after an expression is added doesn't flash (no prior snapshot). `WatchResult` carries `Expression`, `Preview`, `TypeName`, `Failed`, `ErrorMessage`, and the change flag — the view layer's full input contract.
