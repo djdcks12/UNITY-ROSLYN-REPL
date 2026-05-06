@@ -14,13 +14,25 @@ namespace RoslynRepl.Editor.Core
     /// generated class, compiles to an in-memory assembly, loads it, and invokes
     /// the entry point synchronously on the calling thread.
     ///
-    /// Phase 1 limitations:
-    ///  - No variable persistence between calls (each Execute is isolated)
-    ///  - No async/await support (the entry method is synchronous)
-    ///  - No timeout / cancellation (infinite loops will hang the Editor)
+    /// Phase 5 introduces a single piece of carry-over state: the most recent
+    /// non-null returned value is stored in <see cref="LastResult"/> and
+    /// surfaced inside snippets as the static property <c>_</c> on the
+    /// generated wrapper class. Other locals still don't survive between runs;
+    /// see Phase 6 for async/await and timeout/cancellation, which remain
+    /// deferred.
     /// </summary>
     public static class ReplEngine
     {
+        /// <summary>
+        /// The value returned by the most recent successful, non-null Execute
+        /// call. Read inside snippets as <c>_</c>. Reset to <c>null</c> if the
+        /// editor reloads its assemblies (the value is in-memory only).
+        /// </summary>
+        public static object LastResult { get; private set; }
+
+        /// <summary>Clears the carry-over <c>_</c> value.</summary>
+        public static void ResetLastResult() => LastResult = null;
+
         public static ReplResult Execute(string userCode, ReplOptions options = null)
         {
             options ??= new ReplOptions();
@@ -86,6 +98,16 @@ namespace RoslynRepl.Editor.Core
                     return ReplResult.RuntimeError(tie.InnerException ?? tie, ClassifyLogs(capture.End()), sw.Elapsed);
                 }
 
+                // Carry-over: record only meaningful values. The wrapper
+                // adds an unconditional `return null;` fallback at the end
+                // for snippets that don't return anything, and overwriting
+                // LastResult with that synthetic null would defeat the
+                // purpose of `_` — we'd erase the previous useful value
+                // every time the user ran a Debug.Log-only line.
+                if (value != null)
+                {
+                    LastResult = value;
+                }
                 return ReplResult.Success(value, FormatValue(value), ClassifyLogs(capture.End()), sw.Elapsed);
             }
             catch (Exception ex)

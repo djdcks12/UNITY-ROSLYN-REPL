@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added (Phase 5 — persistence + variable continuity)
+- `RoslynRepl.Editor.Core.ReplEngine.LastResult` (and `ResetLastResult()`): the most recent successful, *non-null* return value from `Execute`. Synthetic `return null;` fallbacks (snippets without an explicit return) and explicit `return null;` no longer overwrite the carry-over, so a debug-print run won't erase the value the user is iterating on.
+- `ReplCodeWrapper` exposes a static property `_` on the generated `__ReplScript` class that pulls through to `ReplEngine.LastResult`. Snippets reference it unqualified (`return _ + 1;`) the same way Python's REPL or ipython surface the previous result. A property — rather than an injected local — avoids the CS0219 "declared but never used" diagnostic when the user doesn't reference it, and lets a user-introduced local `_` shadow it cleanly inside its own scope (`int _ = 99; return _;` still compiles).
+
 ### Added (Phase 4 — editor UX polish)
 - `RoslynRepl.Editor.UI.CodeEditorView`: composite VisualElement that wraps the multiline `TextField` with a sibling line-number gutter and a footer caret-position indicator (`Ln N, Col M`). Replaces the bare `TextField` previously bound to `code-input`.
 - The gutter pools its row VisualElements: existing rows are reused on every keystroke and only the delta of new / removed lines is added or removed, so typing in long buffers doesn't churn the UI tree.
