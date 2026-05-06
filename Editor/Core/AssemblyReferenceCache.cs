@@ -63,6 +63,16 @@ namespace RoslynRepl.Editor.Core
 
         private static MetadataReference[] BuildReferences()
         {
+            // Some assemblies the Editor *would* load on demand aren't in
+            // AppDomain at the moment we build references — most notably
+            // Microsoft.CSharp, the C# dynamic runtime binder. Without it,
+            // any snippet using `dynamic` (including the wrapper-class
+            // `_` accessor introduced in Phase 5) fails compilation with
+            // "The type 'object' cannot be used as a type argument", or
+            // resolves operators against `object` and rejects them with
+            // CS0019. Force a load so the reference is present.
+            EnsureLoaded("Microsoft.CSharp");
+
             var list = new List<MetadataReference>(256);
             foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
             {
@@ -91,6 +101,19 @@ namespace RoslynRepl.Editor.Core
         {
             try { return asm.GetName().Name; }
             catch { return "<unknown>"; }
+        }
+
+        // Best-effort: force-load an assembly that's normally resolved on
+        // demand. Failures are silently swallowed because BuildReferences
+        // can't usefully recover if this is missing — the snippet just
+        // won't compile, which the user will see as a normal CS error.
+        private static void EnsureLoaded(string simpleName)
+        {
+            try { Assembly.Load(simpleName); }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[Roslyn REPL] Could not force-load '{simpleName}': {ex.Message}");
+            }
         }
     }
 }

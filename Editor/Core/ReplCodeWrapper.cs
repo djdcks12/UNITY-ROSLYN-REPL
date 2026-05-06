@@ -55,7 +55,14 @@ namespace RoslynRepl.Editor.Core
             // scope (e.g. `int _ = 5;`). Reads pull through to
             // ReplEngine.LastResult, so the same instance reflects the
             // most recent non-null result on every invocation.
-            sb.Append("    public static object _ => RoslynRepl.Editor.Core.ReplEngine.LastResult;\n"); line++;
+            //
+            // Property type is `dynamic` rather than `object` so operators
+            // and member access bind at runtime against the actual stored
+            // value: `return _ + 1;` works after `return 41;`, no
+            // user-side `(int)` cast needed. The C# compiler synthesizes
+            // a CallSite under the hood; AssemblyReferenceCache force-
+            // loads Microsoft.CSharp so the runtime binder is reachable.
+            sb.Append("    public static dynamic _ => RoslynRepl.Editor.Core.ReplEngine.LastResult;\n"); line++;
             sb.Append("    public static object ").Append(MethodName).Append("()\n");  line++;
             sb.Append("    {\n");                              line++;
 
