@@ -492,7 +492,7 @@ Limitations (mostly mirror Phase A's scope):
 | Auto-generated partial (Unity codegen) | ⚠️ may pull but the body is rarely user-editable |
 | Same name + same arity overloads | best-effort match by parameter type names; falls back to the first candidate |
 
-After Phase D lands, you'll be able to leave the pulled body essentially as-is — the rewriter will translate `hp -= amount;` into `__set("hp", __get<int>("hp") - amount);` automatically. Until then, private member access still uses the helper functions described below.
+**Phase D has landed:** you can leave the pulled body as-is. The rewriter routes inaccessible names through the helpers automatically — see "Natural-code patching" below. The helpers are still documented + supported because explicit-helper patches compile clean on the first pass and skip the rewriter walk; the two styles coexist.
 
 ### Picking a method without typing the signature
 
@@ -503,14 +503,51 @@ Two ways to pick a target method instead of hand-typing the type / method / para
 
 The picker also surfaces visibility (`public` / `private` / `internal` / `protected`) and the declaring type per row, so when a derived class inherits a target method from a base, you can spot it before patching the base.
 
+### Natural-code patching (Phase D)
+
+Most patches don't need to touch the helpers anymore. Write the body the way you would inside the source `.cs` — Roslyn's diagnostics tell the engine which names need indirection, and the rewriter routes those through the helpers without the user having to spell `__get` / `__set` / `__call`.
+
+```csharp
+// Target: MyGame.Player.Damage(int amount)
+// Same body as the source file would have:
+hp -= amount;
+if (hp <= 0) Die();
+GameStats.Instance.RecordDamage(amount);
+GameStats.totalDamageEver += amount;
+```
+
+What gets rewritten:
+
+- `hp -= amount` — same-class `private int hp` → `__set("hp", __get<int>("hp") - amount)`.
+- `Die()` — same-class `private void Die()` → `__call<object>("Die")`.
+- `GameStats.Instance.RecordDamage(amount)` — external instance, private method on a singleton → `__callOn<int>(GameStats.Instance, "RecordDamage", amount)`.
+- `GameStats.totalDamageEver += amount` — external `private static int` → `__setStatic(typeof(GameStats), "totalDamageEver", __getStatic<int>(typeof(GameStats), "totalDamageEver") + amount)`.
+
+What stays direct (not rewritten):
+
+- `transform.position`, `Mathf.Min(...)`, `Vector3.zero`, anonymous lambdas, locals, parameters, anything that already compiles. Direct codegen, no reflection cost.
+- `__instance.PublicField` (the typed reference Phase A pre-emits is still the fastest path for public access).
+- The helpers themselves when written explicitly — `__get<int>("hp")` compiles clean on the first pass and never sees the rewriter.
+
+When the rewriter fires, the Console gets a single summary line: `[Roslyn REPL] Patch '…' rewrote N access(es) in M pass(es): hp (-=) → __set/__get; Die(0 args) → __call; …`. Useful as a debug breadcrumb when a rewrite goes subtly wrong.
+
+Phase D limitations:
+- `async` / `await` in patch bodies isn't rewritten.
+- Expression-context postfix `++` / `--` (`var x = hp++;`) is exact for **statements** only — used as an expression, the patched value reads as the post-increment value rather than the pre-increment one.
+- Generic method type inference isn't auto-rewritten — call private generics with explicit type arguments (`GetCache<Foo>(...)`).
+
 ### Helpers available inside a patch body
+
+You don't need these for natural code (Phase D rewrites for you), but they're the canonical form when you want fully-explicit patches or when the rewrite picks the wrong overload:
 
 | Symbol | What it does |
 |---|---|
 | `__instance` | The target instance, typed as the declaring type. Use for `public` member access. |
-| `__get<T>("name")` | Read a `private` (or public) field/property. |
-| `__set("name", value)` | Write a `private` (or public) field/property. |
-| `__call<T>("name", args…)` | Invoke a `private` (or public) method. Use `__call<object>` for `void` methods. |
+| `__get<T>("name")` | Read a `private` (or public) field/property on `__instance`. |
+| `__set("name", value)` | Write a `private` (or public) field/property on `__instance`. |
+| `__call<T>("name", args…)` | Invoke a `private` (or public) method on `__instance`. Use `__call<object>` for `void` methods. |
+| `__getOn<T>(target, "name")` / `__setOn(target, "name", value)` / `__callOn<T>(target, "name", args…)` | Same trio for an arbitrary instance object — what Phase D's rewrite uses for `singleton.PrivateField` and friends. |
+| `__getStatic<T>(typeof(X), "name")` / `__setStatic(typeof(X), "name", value)` / `__callStatic<T>(typeof(X), "name", args…)` | Static-side trio. Phase D uses these for `MyClass.PrivateStatic`. |
 | Method parameters | Same names as the original (e.g. `amount`). |
 
 ### Example — log inside `Player.Damage`
@@ -545,7 +582,7 @@ UnityEngine.Debug.Log($"[patched] after damage:  hp={__get<int>(\"hp\")}");
 | Constructor / static constructor | ❌ not supported |
 | Property getter / setter | ❌ not supported |
 
-Source-style editing (no `__get`/`__set` boilerplate) and `.cs` export will land in later phases of the Runtime Method Patch work (originally tracked as [issue #14](https://github.com/djdcks12/UNITY-ROSLYN-REPL/issues/14)).
+Source-style editing (no `__get`/`__set` boilerplate) landed in Phase D — see "Natural-code patching" above. `.cs` export is still pending; later phases of the Runtime Method Patch work (originally tracked as [issue #14](https://github.com/djdcks12/UNITY-ROSLYN-REPL/issues/14)) cover that.
 
 ### Persistence and auto-reapply
 
