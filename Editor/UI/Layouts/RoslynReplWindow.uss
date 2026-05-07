@@ -336,6 +336,13 @@
     color: rgb(180, 180, 180);
 }
 
+/* Phase 11d: compact "Fallback" toggle in the watch header. */
+.rr-watch-fallback-toggle {
+    margin-right: 6px;
+    font-size: 10px;
+    color: rgb(180, 180, 180);
+}
+
 /* Phase 11a: persistent secondary line under fallback rows so the
    resolved owner is visible without hovering for the tooltip. */
 .rr-watch-row-source {

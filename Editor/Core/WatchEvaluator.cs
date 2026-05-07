@@ -135,7 +135,7 @@ namespace RoslynRepl.Editor.Core
                     SetResolvedResult(result, r.Value);
                     break;
                 case ReplResultKind.CompileError:
-                    if (TryEvaluateFallbackPath(trimmed, result))
+                    if (WatchSettings.FallbackEnabled && TryEvaluateFallbackPath(trimmed, result))
                     {
                         MarkChange(result);
                         return result;
@@ -147,7 +147,7 @@ namespace RoslynRepl.Editor.Core
                         : "Compile error";
                     break;
                 case ReplResultKind.RuntimeError:
-                    if (TryEvaluateFallbackPath(trimmed, result))
+                    if (WatchSettings.FallbackEnabled && TryEvaluateFallbackPath(trimmed, result))
                     {
                         MarkChange(result);
                         return result;
