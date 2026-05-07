@@ -42,7 +42,15 @@ namespace RoslynRepl.Editor.Core
         public event Action Changed;
 
         private const int WatchTimeoutMs = 1000;
-        private const int GlobalSearchMaxEntries = int.MaxValue;
+        // Cap the global instance sweep used by the fallback. The original
+        // int.MaxValue value scaled with project size — large scenes
+        // (thousands of MonoBehaviours) made every Run pay for an
+        // unbounded scan when even one Watch was unqualified. 1000
+        // entries covers realistic projects (the user's intended owner
+        // is virtually always near the top of the list); past that
+        // point first-match-wins quickly stops being meaningful and
+        // the user really should qualify the owner.
+        private const int GlobalSearchMaxEntries = 1000;
 
         private readonly Dictionary<string, string> _previousPreviews = new();
         private readonly List<WatchResult> _current = new();
@@ -127,7 +135,7 @@ namespace RoslynRepl.Editor.Core
                     SetResolvedResult(result, r.Value);
                     break;
                 case ReplResultKind.CompileError:
-                    if (TryEvaluateFallbackPath(trimmed, result))
+                    if (WatchSettings.FallbackEnabled && TryEvaluateFallbackPath(trimmed, result))
                     {
                         MarkChange(result);
                         return result;
@@ -139,7 +147,7 @@ namespace RoslynRepl.Editor.Core
                         : "Compile error";
                     break;
                 case ReplResultKind.RuntimeError:
-                    if (TryEvaluateFallbackPath(trimmed, result))
+                    if (WatchSettings.FallbackEnabled && TryEvaluateFallbackPath(trimmed, result))
                     {
                         MarkChange(result);
                         return result;
@@ -178,7 +186,7 @@ namespace RoslynRepl.Editor.Core
                 if (path == "_" || path.StartsWith("_.", StringComparison.Ordinal) || path.StartsWith("_[", StringComparison.Ordinal))
                     return false;
 
-                if (!TryEvaluateGlobalPath(path, out value, out var matchedEntry)) return false;
+                if (!TryEvaluateGlobalPath(path, out value, out var matchedEntry, out var capHit)) return false;
                 SetResolvedResult(result, value);
                 // Tell the user *which* live instance the value came from.
                 // The previous behaviour of just dropping a value into the
@@ -186,7 +194,16 @@ namespace RoslynRepl.Editor.Core
                 // ambiguous: multiple managers may all have `count`, and
                 // first-match wins is a coin flip. Showing source means
                 // the user can spot "wrong owner" failures at a glance.
-                result.SourceDescription = DescribeSource(matchedEntry);
+                var sourceDesc = DescribeSource(matchedEntry);
+                if (capHit)
+                {
+                    // The instance pool was capped; the picked owner may
+                    // not be the closest match. Phrase the hint as an
+                    // action — qualifying owner is the user's escape
+                    // hatch — rather than a vague "many matches".
+                    sourceDesc += $" — search capped at {GlobalSearchMaxEntries}; qualify the owner (TypeName.Path) if this is wrong";
+                }
+                result.SourceDescription = sourceDesc;
                 return true;
             }
             catch
@@ -236,22 +253,33 @@ namespace RoslynRepl.Editor.Core
             return TryResolvePathFromIndex(current, path, index, out value, allowProperty: true);
         }
 
-        private static bool TryEvaluateGlobalPath(string path, out object value, out InstanceEntry matched)
+        private static bool TryEvaluateGlobalPath(string path, out object value, out InstanceEntry matched, out bool capHit)
         {
             value = null;
             matched = null;
-            var entries = InstanceLocator.Find(InstanceCategory.All, string.Empty, GlobalSearchMaxEntries);
-            if (entries.Count == 0) return false;
+            capHit = false;
 
             TryReadIdentifier(path, 0, out var rootName);
 
-            foreach (var entry in entries)
+            // Owner-qualified pass first, with the rootName threaded
+            // into the InstanceLocator filter. The previous shape did
+            // a single sweep with `filter = ""` and the 1000-entry cap,
+            // which silently dropped exact-owner matches whose entry
+            // sorted past the cap (a real failure mode in big scenes).
+            // Running the qualified pass against a name-filtered pool
+            // lets the cap apply to the *narrowed* set instead — a
+            // type called "GameManager" with a few candidate instances
+            // is virtually never going to overflow 1000, so the cap
+            // disappears as a concern for explicit paths.
+            if (!string.IsNullOrEmpty(rootName))
             {
-                var root = entry?.Value;
-                if (root == null || IsDestroyedUnityObject(root)) continue;
-
-                if (!string.IsNullOrEmpty(rootName) && IsEntryNameMatch(entry, rootName))
+                var qualified = InstanceLocator.Find(InstanceCategory.All, rootName, GlobalSearchMaxEntries);
+                foreach (var entry in qualified)
                 {
+                    var root = entry?.Value;
+                    if (root == null || IsDestroyedUnityObject(root)) continue;
+                    if (!IsEntryNameMatch(entry, rootName)) continue;
+
                     int index = rootName.Length;
                     if (index == path.Length)
                     {
@@ -262,11 +290,11 @@ namespace RoslynRepl.Editor.Core
 
                     if (path[index] == '.' || path[index] == '[')
                     {
-                        // Owner-qualified path: the user explicitly named
-                        // *this* instance via TypeName / DisplayName, so
-                        // property getter invocation is consistent with
-                        // the user's intent. e.g. `GameManager.Config`
-                        // resolves Config as a property if needed.
+                        // The user explicitly named *this* instance via
+                        // TypeName / DisplayName, so property getter
+                        // invocation is consistent with the user's intent.
+                        // e.g. `GameManager.Config` resolves Config as a
+                        // property if needed.
                         if (TryResolvePathFromIndex(root, path, index, out value, allowProperty: true))
                         {
                             matched = entry;
@@ -274,16 +302,37 @@ namespace RoslynRepl.Editor.Core
                         }
                     }
                 }
+            }
 
-                // Unqualified path: the user typed `Count` / `IsReady` /
-                // `_data` and we're guessing which live instance they
-                // meant. First-match wins, so allowing property getters
-                // here would silently invoke arbitrary user code on the
-                // first owner whose type happens to declare `Count` as
-                // a property — every Run, every refresh, with no
-                // breadcrumb to which object actually fired. Restrict
-                // to fields-only; users who want a property must
-                // qualify the owner.
+            // Unqualified fallback: the original path-against-everyone
+            // sweep, capped. Runs only after the owner-qualified pass
+            // didn't resolve, so an explicit `GameManager.Config` never
+            // races against a fields-only `Config` match somewhere
+            // earlier in the pool.
+            var entries = InstanceLocator.Find(InstanceCategory.All, string.Empty, GlobalSearchMaxEntries);
+            // Approximate "the cap stopped us" as "we filled the
+            // requested budget exactly". InstanceLocator doesn't tell
+            // us whether more entries existed beyond the cap, but in
+            // practice a Unity project with exactly 1000 browseable
+            // instances is vanishingly rare and the false-positive on
+            // the hint side just nudges the user to qualify the owner
+            // anyway, which is the right reflex.
+            capHit = entries.Count >= GlobalSearchMaxEntries;
+            if (entries.Count == 0) return false;
+
+            foreach (var entry in entries)
+            {
+                var root = entry?.Value;
+                if (root == null || IsDestroyedUnityObject(root)) continue;
+
+                // The user typed `Count` / `IsReady` / `_data` and we're
+                // guessing which live instance they meant. First-match
+                // wins, so allowing property getters here would silently
+                // invoke arbitrary user code on the first owner whose
+                // type happens to declare `Count` as a property — every
+                // Run, every refresh, with no breadcrumb to which object
+                // actually fired. Restrict to fields-only; users who
+                // want a property must qualify the owner.
                 if (TryResolvePathFromIndex(root, path, 0, out value, allowProperty: false))
                 {
                     matched = entry;

@@ -86,6 +86,26 @@ namespace RoslynRepl.Editor.UI
             spacer.style.flexGrow = 1;
             header.Add(spacer);
 
+            // Phase 11d: opt-out for the global-search fallback. Some
+            // projects don't want passive instance-pool walking on every
+            // Run; flipping this off makes uncompilable Watches simply
+            // fail instead of resolving via best-effort search.
+            var fallbackToggle = new Toggle("Fallback")
+            {
+                tooltip =
+                    "When a Watch expression doesn't compile cleanly, also try resolving it against\n" +
+                    "the previous result `_` and the live MonoBehaviour / ScriptableObject pool.\n" +
+                    "Turn off to skip the fallback (compile-fail Watches stay failed)."
+            };
+            fallbackToggle.AddToClassList("rr-watch-fallback-toggle");
+            fallbackToggle.value = WatchSettings.FallbackEnabled;
+            fallbackToggle.RegisterValueChangedCallback(evt =>
+            {
+                WatchSettings.FallbackEnabled = evt.newValue;
+                Refresh();
+            });
+            header.Add(fallbackToggle);
+
             _addField = new TextField();
             _addField.AddToClassList("rr-watch-add-field");
             // Slim, fits in the header bar.
@@ -211,6 +231,20 @@ namespace RoslynRepl.Editor.UI
             removeBtn.AddToClassList("rr-watch-cell-remove");
             row.Add(removeBtn);
             block.Add(row);
+
+            // Phase 11a: secondary line under fallback rows. The dim
+            // expression label + tooltip in Phase 10b were too easy to
+            // miss — users blamed the wrong owner for a value because
+            // the resolver's choice of instance never made it into
+            // pixels they actually scanned. A persistent "Resolved
+            // from: …" line under the row width-matches the value cell
+            // so the breadcrumb is read-without-hover.
+            if (!string.IsNullOrEmpty(r.SourceDescription) && !r.Failed)
+            {
+                var sourceLabel = new Label("↳ Resolved from: " + r.SourceDescription);
+                sourceLabel.AddToClassList("rr-watch-row-source");
+                block.Add(sourceLabel);
+            }
 
             if (expanded)
             {

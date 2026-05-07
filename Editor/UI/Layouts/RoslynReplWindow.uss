@@ -336,6 +336,29 @@
     color: rgb(180, 180, 180);
 }
 
+/* Phase 11d: compact "Fallback" toggle in the watch header. */
+.rr-watch-fallback-toggle {
+    margin-right: 6px;
+    font-size: 10px;
+    color: rgb(180, 180, 180);
+}
+
+/* Phase 11a: persistent secondary line under fallback rows so the
+   resolved owner is visible without hovering for the tooltip. */
+.rr-watch-row-source {
+    -unity-font-style: italic;
+    color: rgb(150, 200, 220);
+    font-size: 10px;
+    padding-left: 30px;
+    padding-right: 6px;
+    padding-top: 0;
+    padding-bottom: 4px;
+    -unity-text-align: middle-left;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .rr-watch-cell-value {
     flex-grow: 1;
     color: rgb(180, 220, 255);
@@ -433,6 +456,36 @@
     padding: 4px 6px;
     border-bottom-width: 1px;
     border-bottom-color: rgb(28, 28, 28);
+    /* Phase 11e: 3px left bar holds the category color cue without
+       moving the existing labels around. Default transparent so
+       rows in cards that don't carry a category modifier render the
+       same as before. */
+    border-left-width: 3px;
+    border-left-color: rgba(0, 0, 0, 0);
+}
+
+/* Phase 11e: per-category left-bar colors. Picked from the same
+   palette used elsewhere in the UI:
+     MonoBehaviour    → blue   (matches the result-tree value cell)
+     ScriptableObject → orange (asset-flavored, not scene)
+     Singleton        → purple (catch-all "static, machine-wide")
+   Type-cell color is also tinted slightly for the SO and Singleton
+   rows so the cue carries past the bar even on monitors where the
+   3px stripe is hard to spot. */
+.rr-browser-row--mb {
+    border-left-color: rgb(80, 130, 220);
+}
+.rr-browser-row--so {
+    border-left-color: rgb(220, 150, 80);
+}
+.rr-browser-row--singleton {
+    border-left-color: rgb(180, 130, 220);
+}
+.rr-browser-row--so .rr-browser-row-type {
+    color: rgb(220, 180, 140);
+}
+.rr-browser-row--singleton .rr-browser-row-type {
+    color: rgb(200, 170, 220);
 }
 
 .rr-browser-row-name {

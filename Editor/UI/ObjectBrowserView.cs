@@ -156,6 +156,23 @@ namespace RoslynRepl.Editor.UI
 
             ve.RemoveFromClassList("rr-browser-row--inactive");
             if (!entry.IsActive) ve.AddToClassList("rr-browser-row--inactive");
+
+            // Phase 11e: paint a left-edge category indicator so users
+            // can spot what kind of instance a row is at a glance,
+            // especially in the All view where Phase 8 mixed
+            // MonoBehaviour, ScriptableObject, and Singleton entries
+            // into one list. SubLabel already carries the textual
+            // origin ("Scene: Foo", "ScriptableObject", "Singleton")
+            // but the eye reads color faster than text in a long list.
+            ve.RemoveFromClassList("rr-browser-row--mb");
+            ve.RemoveFromClassList("rr-browser-row--so");
+            ve.RemoveFromClassList("rr-browser-row--singleton");
+            switch (entry.Category)
+            {
+                case InstanceCategory.MonoBehaviour:    ve.AddToClassList("rr-browser-row--mb");        break;
+                case InstanceCategory.ScriptableObject: ve.AddToClassList("rr-browser-row--so");        break;
+                case InstanceCategory.Singleton:        ve.AddToClassList("rr-browser-row--singleton"); break;
+            }
         }
     }
 }

@@ -406,6 +406,29 @@ Behavior:
 
 Watch expressions use a shorter timeout than normal runs so the panel remains responsive during normal use. Timeout is still cooperative.
 
+### Resolution order
+
+Each Watch is resolved in three steps. The first one that yields a value wins; if all three fail, the row renders as a `<compile error>` or `<runtime error>`.
+
+1. **Normal C# evaluation.** The expression is wrapped as `return <expr>;` and compiled through the same Roslyn pipeline as the main editor. This handles full snippets like `Manager.Instance.Counter`, lambdas, anonymous types, and references that resolve through the Usings list.
+2. **`_` carry-over path.** If step 1 fails, the expression is treated as a member path off the previous successful result. So after a snippet returning `new { value = 42 }`, a Watch like `value` resolves through the carry-over without any owner reference.
+3. **Global instance pool.** If steps 1–2 both fail, the resolver walks live MonoBehaviour / ScriptableObject / Singleton instances (up to a 1000-entry cap) and returns the first owner whose path matches. The Watch row then shows a `↳ Resolved from: …` line so the picked owner is visible.
+
+Step 3 is opt-out via the `Fallback` toggle in the Watch panel header — flipping it off makes a failing Watch stay failed instead of doing a best-effort search.
+
+### Property getter policy
+
+The REPL is conservative about *when* it invokes a user-defined property getter, since getters in the wild commonly lazy-init, log, mutate counters, or do IO. The rules:
+
+| Surface | Calls user property getters? | Why |
+|---|---|---|
+| Snippet expression itself (compile success) | Yes | The user wrote `Manager.Counter`; calling the getter is the expressed intent. |
+| Output panel result tree | Yes | One-shot, user-initiated inspection. |
+| Watch result tree (expand a Watch row) | **No** | Tree refreshes after every Run; walking properties would amplify any side effect to N rows × every Run. |
+| Watch fallback — `_` carry-over (`_.foo`) | Yes | Single, user-named owner; no ambiguity. |
+| Watch fallback — owner-qualified (`GameManager.Config`) | Yes | The user explicitly named the type; calling that owner's property is consistent with intent. |
+| Watch fallback — unqualified (`Count`, `IsReady`) | **No (fields-only)** | First-match wins; allowing properties would silently fire arbitrary code on whichever owner happens to come up first. Qualify the owner if a property is needed. |
+
 ## Result Rendering
 
 Returned values are converted into a safe inspection tree where possible.
@@ -445,6 +468,21 @@ Because this is `EditorPrefs` storage:
 - moving the project to a different path can create a fresh project-scoped bucket.
 
 To wipe everything for the current project (snippets, run history, watches, custom usings, and the in-memory `_` carry-over) in one click, use `Tools / Roslyn REPL / Reset Project Data`. The menu reports counts before and after, and never touches data for other Unity projects on the same machine.
+
+What `Reset Project Data` does and doesn't do:
+
+| Action | What it touches |
+|---|---|
+| **Clears** | Saved snippets for *this* project |
+| **Clears** | Run history for this project |
+| **Clears** | Watch expressions for this project |
+| **Clears** | Custom Usings for this project |
+| **Clears** | The in-memory `_` carry-over |
+| **Clears** | The Output panel of any open REPL window (logs, summary, duration label, gutter error markers) |
+| **Does NOT touch** | Unity scenes, prefabs, or assets |
+| **Does NOT touch** | Package files (`Packages/com.roslyn-repl/...` or installed Roslyn DLLs) |
+| **Does NOT touch** | REPL data for *other* Unity projects on the same machine |
+| **Does NOT touch** | Already-loaded dynamic REPL assemblies (those clear on the next domain reload — see Verify Setup for the live count) |
 
 ## Security and Data Handling
 
