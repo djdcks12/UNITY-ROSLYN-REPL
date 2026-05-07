@@ -1,8 +1,8 @@
 {
   "name": "com.roslyn-repl",
-  "version": "0.1.0",
+  "version": "0.7.0",
   "displayName": "Roslyn REPL",
-  "description": "In-editor C# REPL with runtime instance inspector. Roslyn-powered, zero project dependencies. Compile and execute C# on the fly during Play Mode and inspect any MonoBehaviour, ScriptableObject, or singleton in memory.",
+  "description": "Editor-only C# REPL for Unity, powered by Roslyn. Compile and execute arbitrary C# at runtime, inspect any MonoBehaviour / ScriptableObject / singleton in memory, watch expressions live, save named snippets, and review run history — all from a UI Toolkit window inside the Editor. Zero project dependencies.",
   "unity": "2022.3",
   "type": "tool",
   "keywords": [
@@ -12,10 +12,20 @@
     "roslyn",
     "debug",
     "inspector",
-    "runtime"
+    "runtime",
+    "watch",
+    "snippet"
   ],
   "author": {
-    "name": "youngchan.seo"
+    "name": "djdcks12",
+    "url": "https://github.com/djdcks12"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/djdcks12/ROSLYN-REPL.git"
+  },
+  "documentationUrl": "https://github.com/djdcks12/ROSLYN-REPL/blob/main/README.md",
+  "changelogUrl": "https://github.com/djdcks12/ROSLYN-REPL/blob/main/CHANGELOG.md",
+  "licensesUrl": "https://github.com/djdcks12/ROSLYN-REPL/blob/main/LICENSE.md"
 }

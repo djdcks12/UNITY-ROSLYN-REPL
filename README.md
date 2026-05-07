@@ -31,7 +31,40 @@ The package does not require a runtime dependency in your game assemblies.
 
 ## Installation
 
-### Option A: Put The Package In The Project
+### Option A: OpenUPM (recommended once published)
+
+Once the package is registered on OpenUPM, install it through the Unity Package Manager:
+
+1. `Edit / Project Settings / Package Manager`.
+2. Add a Scoped Registry:
+    - **Name:** `OpenUPM`
+    - **URL:** `https://package.openupm.com`
+    - **Scopes:** `com.roslyn-repl`
+3. Open `Window / Package Manager`, switch the source dropdown to `My Registries`, find **Roslyn REPL**, and click `Install`.
+
+The Package Manager UI will then show update notifications when a new version is published.
+
+> Status: the package metadata and the OpenUPM descriptor (`Documentation~/openupm/com.roslyn-repl.yml`) are ready; the registry submission itself is still pending. Until then, use Option B, C, or D below.
+
+### Option B: Git URL (no OpenUPM required)
+
+Add a single line to your project's `Packages/manifest.json`:
+
+```json
+{
+  "dependencies": {
+    "com.roslyn-repl": "https://github.com/djdcks12/ROSLYN-REPL.git"
+  }
+}
+```
+
+Pin to a specific tag if you don't want bleeding-edge `main`:
+
+```json
+"com.roslyn-repl": "https://github.com/djdcks12/ROSLYN-REPL.git#v0.7.0"
+```
+
+### Option C: Put The Package In The Project
 
 Copy this package to:
 
@@ -41,7 +74,7 @@ Packages/com.roslyn-repl/
 
 Unity will detect the package through `package.json`.
 
-### Option B: Add From Disk
+### Option D: Add From Disk
 
 1. Open Unity Package Manager.
 2. Click `+`.
