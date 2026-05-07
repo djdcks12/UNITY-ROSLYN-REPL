@@ -212,6 +212,20 @@ namespace RoslynRepl.Editor.UI
             row.Add(removeBtn);
             block.Add(row);
 
+            // Phase 11a: secondary line under fallback rows. The dim
+            // expression label + tooltip in Phase 10b were too easy to
+            // miss — users blamed the wrong owner for a value because
+            // the resolver's choice of instance never made it into
+            // pixels they actually scanned. A persistent "Resolved
+            // from: …" line under the row width-matches the value cell
+            // so the breadcrumb is read-without-hover.
+            if (!string.IsNullOrEmpty(r.SourceDescription) && !r.Failed)
+            {
+                var sourceLabel = new Label("↳ Resolved from: " + r.SourceDescription);
+                sourceLabel.AddToClassList("rr-watch-row-source");
+                block.Add(sourceLabel);
+            }
+
             if (expanded)
             {
                 var tree = BuildWatchTree(r.Tree);

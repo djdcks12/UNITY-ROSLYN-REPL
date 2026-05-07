@@ -336,6 +336,22 @@
     color: rgb(180, 180, 180);
 }
 
+/* Phase 11a: persistent secondary line under fallback rows so the
+   resolved owner is visible without hovering for the tooltip. */
+.rr-watch-row-source {
+    -unity-font-style: italic;
+    color: rgb(150, 200, 220);
+    font-size: 10px;
+    padding-left: 30px;
+    padding-right: 6px;
+    padding-top: 0;
+    padding-bottom: 4px;
+    -unity-text-align: middle-left;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .rr-watch-cell-value {
     flex-grow: 1;
     color: rgb(180, 220, 255);
