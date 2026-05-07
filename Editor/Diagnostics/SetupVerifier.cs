@@ -169,7 +169,7 @@ namespace RoslynRepl.Editor.Diagnostics
             sb.AppendLine($"  [optional] Harmony (Runtime Method Patch): " +
                           (IsHarmonyLoaded()
                               ? "present"
-                              : "absent — Tools / Roslyn REPL / Install Harmony to enable runtime method patching"));
+                              : "absent — Tools / Roslyn REPL / Install Roslyn DLLs installs Harmony alongside Roslyn"));
             return sb.ToString();
         }
 
