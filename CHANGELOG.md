@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added (Phase 10 — side-effect mitigations)
+- `Tools / Roslyn REPL / Reset Project Data` menu wipes all four `EditorPrefs`-backed stores (`SnippetStore`, `RunHistoryStore`, `WatchStore`, `UsingsStore`) for the current project plus the in-memory `_` carry-over. Closes the gap where uninstalling the package or moving on from a project left the user's data behind in the registry — relevant for both housekeeping and for security (history/snippets/watches are stored as plain text and may contain auth tokens, server URLs, or account values from debugging sessions). Snapshots counts before clearing and surfaces them in both the confirmation prompt ("delete X snippets, Y history entries, …") and the result dialog so users see exactly what's gone. No-ops with a friendly dialog when all four stores are already empty.
+- `UsingsStore.Clear` and `SnippetStore.Clear` added so the menu has a single uniform API across all four stores (`RunHistoryStore` and `WatchStore` already shipped Clear in Phase 5b/6c). All four fire their `Changed` events so any open popup re-renders to the now-empty state.
+
 ### Changed (Phase 9 — discoverability rename)
 - `displayName` rebranded `Roslyn REPL` → `Unity Roslyn REPL` so OpenUPM and Package Manager UI searches for the literal `unity` keyword surface this package. The package id (`com.roslyn-repl`), C# namespaces (`RoslynRepl.Editor.*`), assembly definition, menu paths, and on-disk folder layout are all unchanged — anyone already depending on the package by name doesn't need to migrate, and nothing internal needs to be edited.
 - GitHub repository renamed `ROSLYN-REPL` → `UNITY-ROSLYN-REPL` for the same discoverability reason. All `repository.url`, `documentationUrl`, `changelogUrl`, `licensesUrl` references in `package.json`, README installation snippets (Git URL options, both `main` and tagged), and the OpenUPM descriptor (`Documentation~/openupm/com.roslyn-repl.yml`) point at the new URL. GitHub auto-redirects from the old slug, so existing clones, PR links, and outbound references keep resolving.

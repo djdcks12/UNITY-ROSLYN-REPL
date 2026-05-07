@@ -54,6 +54,57 @@ return UnityEngine.Application.unityVersion;";
             SnippetLibraryWindow.NotifyChanged();
         }
 
+        [MenuItem("Tools/Roslyn REPL/Reset Project Data", priority = 200)]
+        public static void ResetProjectData()
+        {
+            // Snapshot counts before clearing so the confirmation and the
+            // result dialog can both surface concrete numbers — vague
+            // "are you sure?" prompts get clicked through without thought.
+            int snippetCount = SnippetStore.Load().Count;
+            int historyCount = RunHistoryStore.Load().Count;
+            int watchCount   = WatchStore.Load().Count;
+            int usingsCount  = UsingsStore.LoadCustom().Count;
+            int total = snippetCount + historyCount + watchCount + usingsCount;
+
+            if (total == 0)
+            {
+                EditorUtility.DisplayDialog(
+                    "Roslyn REPL — Reset Project Data",
+                    "Nothing to clear — all four stores are already empty for this project.",
+                    "OK");
+                return;
+            }
+
+            string detail =
+                $"This will permanently delete the REPL data for the *current project*:\n" +
+                $"  • {snippetCount} saved snippet{(snippetCount == 1 ? "" : "s")}\n" +
+                $"  • {historyCount} run history entr{(historyCount == 1 ? "y" : "ies")}\n" +
+                $"  • {watchCount} watch expression{(watchCount == 1 ? "" : "s")}\n" +
+                $"  • {usingsCount} custom using{(usingsCount == 1 ? "" : "s")}\n" +
+                $"  • the in-memory previous-result carry-over (`_`)\n\n" +
+                $"Other projects on this machine are not affected. There is no undo.";
+
+            if (!EditorUtility.DisplayDialog(
+                "Roslyn REPL — Reset Project Data",
+                detail,
+                "Delete everything",
+                "Cancel"))
+            {
+                return;
+            }
+
+            SnippetStore.Clear();
+            RunHistoryStore.Clear();
+            WatchStore.Clear();
+            UsingsStore.Clear();
+            ReplEngine.ResetLastResult();
+
+            EditorUtility.DisplayDialog(
+                "Roslyn REPL — Reset Project Data",
+                $"Cleared {total} entr{(total == 1 ? "y" : "ies")} across snippet library, run history, watches, and custom usings.",
+                "OK");
+        }
+
         public void CreateGUI()
         {
             var root = rootVisualElement;

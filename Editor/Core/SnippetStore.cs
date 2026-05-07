@@ -85,6 +85,13 @@ namespace RoslynRepl.Editor.Core
             if (removed > 0) Persist(list);
         }
 
+        /// <summary>Wipe every saved snippet for the current project.</summary>
+        public static void Clear()
+        {
+            EditorPrefs.DeleteKey(PrefsKey);
+            Changed?.Invoke();
+        }
+
         public static void Rename(string oldName, string newName)
         {
             if (string.IsNullOrEmpty(oldName) || string.IsNullOrWhiteSpace(newName)) return;
