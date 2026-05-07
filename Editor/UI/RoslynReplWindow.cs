@@ -425,19 +425,49 @@ return UnityEngine.Application.unityVersion;";
             _watch?.Refresh();
         }
 
-        // Double-click on a browser row renders that instance into the output
-        // panel as if the user wrote `return X;` themselves. No code typed.
+        // Double-click on a browser row routes through different paths
+        // depending on the lower pane's mode. Phase C UI: in Patches
+        // mode the click means "I want to patch a method on this
+        // type's class" — open the method picker instead of the usual
+        // Output inspect. Output mode keeps the legacy
+        // render-as-`return X;` behavior.
         private void OnBrowserInstanceChosen(InstanceEntry entry)
         {
-            if (_outputContent == null) return;
             if (entry == null) return;
+
+            object value = entry.Value;
+            if (value is UnityEngine.Object uo && uo == null) value = null;
+
+            if (_patchesModeActive)
+            {
+                if (value == null)
+                {
+                    // Without a live instance we can still pick a
+                    // method on the declared type — but DeclaredType
+                    // is only set for some entries (singletons read
+                    // from a static accessor). Fall back to
+                    // value's GetType() when present, otherwise show
+                    // a hint.
+                    if (entry.DeclaredType != null)
+                    {
+                        OpenMethodPickerForType(entry.DeclaredType);
+                    }
+                    else
+                    {
+                        AppendOutput("(can't open method picker — instance is null and no DeclaredType)", "warning");
+                    }
+                    return;
+                }
+                OpenMethodPickerForType(value.GetType());
+                return;
+            }
+
+            // Output mode — original behavior.
+            if (_outputContent == null) return;
 
             ClearOutput();
             AppendOutput($"▼ Browse: {entry.TypeName} \"{entry.DisplayName}\" ({entry.SubLabel})", "info");
 
-            object value = entry.Value;
-            // Unity fake-null: wrapper alive but native side gone.
-            if (value is UnityEngine.Object uo && uo == null) value = null;
             if (value == null)
             {
                 AppendOutput("(instance is null or destroyed)", "warning");
@@ -451,6 +481,16 @@ return UnityEngine.Application.unityVersion;";
             if (_outputSummary != null) _outputSummary.text = "Browsed";
             _watch?.Refresh();
             ScrollOutputToBottom();
+        }
+
+        private void OpenMethodPickerForType(Type type)
+        {
+            if (type == null) return;
+            MethodPickerPopup.Open(type, picked =>
+            {
+                if (picked == null) return;
+                _patchView?.FillFormFromMethod(picked);
+            });
         }
 
         private void RenderResult(ReplResult result)

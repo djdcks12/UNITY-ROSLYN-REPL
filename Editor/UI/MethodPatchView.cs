@@ -97,7 +97,19 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
 
             _paramsField = new TextField("Params") { tooltip = "Comma-joined full type names. Empty = no parameters. Example: System.Int32,System.String" };
             _paramsField.style.flexGrow = 1;
+            _paramsField.style.marginRight = 4;
             formRow.Add(_paramsField);
+
+            // Browse Methods — open a popup that lists every patchable
+            // method on the current Type, click to fill Method/Params.
+            // Saves users from typing exact method signatures with
+            // overload-disambiguating parameter type lists.
+            var browseBtn = new Button(OnBrowseMethodsClicked) { text = "Browse" };
+            browseBtn.tooltip =
+                "List patchable methods on the current target type and fill\n" +
+                "Method + Params from the chosen one. Type field must be set.";
+            browseBtn.style.minWidth = 70;
+            formRow.Add(browseBtn);
 
             _host.Add(formRow);
 
@@ -202,6 +214,56 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             _host.Add(listScroll);
 
             RebuildActiveList();
+        }
+
+        private void OnBrowseMethodsClicked()
+        {
+            var typeName = _targetField.value?.Trim() ?? string.Empty;
+            if (string.IsNullOrEmpty(typeName))
+            {
+                SetStatus("Type is required to browse methods.", error: true);
+                return;
+            }
+
+            // Reuse the engine's resolver so type discovery rules (full
+            // AppDomain walk, namespace handling) match Apply / Pull.
+            var type = ResolveTypeByName(typeName);
+            if (type == null)
+            {
+                SetStatus($"Type not found: {typeName}", error: true);
+                return;
+            }
+
+            MethodPickerPopup.Open(type, picked =>
+            {
+                if (picked == null) return;
+                FillFormFromMethod(picked);
+                SetStatus($"Picked: {picked.DeclaringType?.Name}.{picked.Name}", error: false);
+            });
+        }
+
+        public void FillFormFromMethod(System.Reflection.MethodInfo method)
+        {
+            if (method == null) return;
+            var declType = method.DeclaringType;
+            if (declType != null) _targetField.SetValueWithoutNotify(declType.FullName ?? declType.Name);
+            _methodField.SetValueWithoutNotify(method.Name);
+            var ps = method.GetParameters();
+            _paramsField.SetValueWithoutNotify(ps.Length == 0
+                ? string.Empty
+                : string.Join(",", ps.Select(p => p.ParameterType.FullName ?? p.ParameterType.Name)));
+        }
+
+        private static System.Type ResolveTypeByName(string fullName)
+        {
+            var direct = System.Type.GetType(fullName, throwOnError: false);
+            if (direct != null) return direct;
+            foreach (var asm in System.AppDomain.CurrentDomain.GetAssemblies())
+            {
+                var t = asm.GetType(fullName, throwOnError: false);
+                if (t != null) return t;
+            }
+            return null;
         }
 
         private void OnPullOriginalClicked()
