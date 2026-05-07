@@ -170,10 +170,33 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             }
             catch (Exception ex)
             {
-                spec.Status = PatchStatus.Failed;
-                spec.LastError = ex.Message;
-                PatchRegistry.AddOrUpdate(spec);
-                SetStatus(ex.Message, error: true);
+                // PatchEngine.Apply now preserves the previously-applied
+                // detour when the new body fails to compile (engine fix
+                // landed earlier in this PR). The old upsert here would
+                // *still* overwrite the registry's live spec with the
+                // broken body and a Failed status — the UI would then
+                // lie: red "Failed" row in the active list while the
+                // method is still being detoured by the original
+                // working prefix. Suppress the upsert when an active
+                // spec already lives at this key; just surface the
+                // compile error as transient status. The form keeps
+                // the user's edit so they can fix it and retry.
+                var existing = PatchRegistry.Find(
+                    spec.TargetTypeName, spec.MethodName, spec.ParameterTypes);
+                if (existing != null && existing.Status == PatchStatus.Active)
+                {
+                    SetStatus($"compile failed; previous patch still active. {ex.Message}", error: true);
+                }
+                else
+                {
+                    // No prior active patch — record the failed attempt
+                    // so the user can read the error from the active
+                    // list row and iterate.
+                    spec.Status = PatchStatus.Failed;
+                    spec.LastError = ex.Message;
+                    PatchRegistry.AddOrUpdate(spec);
+                    SetStatus(ex.Message, error: true);
+                }
             }
         }
 
