@@ -89,6 +89,7 @@ namespace RoslynRepl.Editor.Patches
             if (string.IsNullOrEmpty(spec.MethodName))     throw new ArgumentException("MethodName is required",     nameof(spec));
             spec.ParameterTypes ??= string.Empty;
             _byKey[spec.Key] = spec;
+            Persist();
             Changed?.Invoke();
         }
 
@@ -97,6 +98,7 @@ namespace RoslynRepl.Editor.Patches
             var key = MethodPatchSpec.Keyed(typeName, methodName, parameterTypes);
             if (_byKey.Remove(key))
             {
+                Persist();
                 Changed?.Invoke();
                 return true;
             }
@@ -113,7 +115,39 @@ namespace RoslynRepl.Editor.Patches
         {
             if (_byKey.Count == 0) return;
             _byKey.Clear();
+            Persist();
             Changed?.Invoke();
+        }
+
+        /// <summary>
+        /// Pull the persisted spec list back into the live registry.
+        /// Intended for the [InitializeOnLoad] boot path — Phase B3
+        /// calls this once per domain reload, then walks the loaded
+        /// specs and re-applies the Active ones.
+        ///
+        /// Specs already in the live registry are overwritten by their
+        /// persisted counterparts (the live state during a recompile
+        /// pause is whatever was already set; the persisted state is
+        /// the most recently committed view, so it wins). Fires
+        /// <see cref="Changed"/> once at the end so the UI rebuilds in
+        /// a single pass instead of per-row.
+        /// </summary>
+        public static void LoadFromPersistence()
+        {
+            var persisted = PatchPersistence.Load();
+            foreach (var s in persisted)
+            {
+                if (s == null || string.IsNullOrEmpty(s.TargetTypeName) || string.IsNullOrEmpty(s.MethodName))
+                    continue;
+                s.ParameterTypes ??= string.Empty;
+                _byKey[s.Key] = s;
+            }
+            Changed?.Invoke();
+        }
+
+        private static void Persist()
+        {
+            PatchPersistence.Save(_byKey.Values);
         }
     }
 }
