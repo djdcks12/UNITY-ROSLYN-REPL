@@ -494,6 +494,15 @@ Limitations (mostly mirror Phase A's scope):
 
 After Phase D lands, you'll be able to leave the pulled body essentially as-is — the rewriter will translate `hp -= amount;` into `__set("hp", __get<int>("hp") - amount);` automatically. Until then, private member access still uses the helper functions described below.
 
+### Picking a method without typing the signature
+
+Two ways to pick a target method instead of hand-typing the type / method / parameter list:
+
+- **Patches form → Browse button.** Type the target type's full name in the `Type` field, click **Browse**. A picker pops up listing every patchable method on that type (Phase A scope: void instance, non-generic, no ref/out, no getter/setter accessor). Search by name, double-click or hit `Pick`, and the form fills `Method` + `Params` from the chosen method's reflection metadata.
+- **Object Browser × Patches mode.** When the lower pane is in Patches mode, double-clicking a Browser row no longer renders that instance into Output — it opens the same method picker on the instance's runtime type. (Output mode keeps the original `return X;`-style inspect.) The picker's callback fills the patch form, so a click in Browser → click in picker is enough to be ready to write the body.
+
+The picker also surfaces visibility (`public` / `private` / `internal` / `protected`) and the declaring type per row, so when a derived class inherits a target method from a base, you can spot it before patching the base.
+
 ### Helpers available inside a patch body
 
 | Symbol | What it does |
