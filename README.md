@@ -513,7 +513,18 @@ UnityEngine.Debug.Log($"[patched] after damage:  hp={__get<int>(\"hp\")}");
 | Constructor / static constructor | ❌ not supported |
 | Property getter / setter | ❌ not supported |
 
-Patches are in-memory only — they reset on the next domain reload (Editor restart, script recompile, or Play Mode toggle). Source-style editing (no `__get`/`__set` boilerplate) and `.cs` export will land in later phases of [issue #14](https://github.com/djdcks12/UNITY-ROSLYN-REPL/issues/14).
+Source-style editing (no `__get`/`__set` boilerplate) and `.cs` export will land in later phases of the Runtime Method Patch work (originally tracked as [issue #14](https://github.com/djdcks12/UNITY-ROSLYN-REPL/issues/14)).
+
+### Persistence and auto-reapply
+
+Patches are persisted to `EditorPrefs` per project, the same way snippets / history / watches / custom usings are. That means:
+
+- **Active patches survive domain reloads.** Editor restart, script recompile, or Play Mode toggle: every patch you'd Apply'd is automatically re-installed one editor frame after the reload finishes. A summary line lands in the Console (`[Roslyn REPL] Runtime patches: N re-applied, M failed.`).
+- **Failed re-applies don't retry on every boot.** If the target type / method renamed, the body no longer compiles, or anything else goes wrong during the re-install, the spec is flipped to `Failed` with `LastError` set to `"Auto-reapply failed: …"` and persisted in that state. The next boot loads it but doesn't try again — you have to re-Apply explicitly from the UI.
+- **Inactive and Failed drafts persist too.** The Patches panel remembers what you authored even if you Revert'd or last-applied'd into a failure. Use `Load` from the active list to bring an old spec back into the form.
+- **The Patches list is project-scoped.** Two projects on the same machine never share patch sets — same `ProjectScopedPrefs` hash all the other persistence stores use.
+
+To wipe everything: `Tools / Roslyn REPL / Reset Project Data` reverts every active Harmony detour and clears the persisted spec list (alongside snippets / history / watches / usings / `_` / Output panels).
 
 ### Dependencies
 
@@ -528,7 +539,8 @@ The following data is stored per Unity project:
 - snippets,
 - run history,
 - custom usings,
-- watch expressions.
+- watch expressions,
+- runtime method patches (Phase B onward — auto-reapplied on domain reload).
 
 The storage uses `EditorPrefs` with a project discriminator based on the project path. This keeps one project's `MyGame.Runtime` using or snippets from leaking into another Unity project.
 
@@ -550,6 +562,7 @@ What `Reset Project Data` does and doesn't do:
 | **Clears** | Custom Usings for this project |
 | **Clears** | The in-memory `_` carry-over |
 | **Clears** | The Output panel of any open REPL window (logs, summary, duration label, gutter error markers) |
+| **Clears** | Active runtime method patches (reverts every Harmony detour) and the persisted patch list |
 | **Does NOT touch** | Unity scenes, prefabs, or assets |
 | **Does NOT touch** | Package files (`Packages/com.roslyn-repl/...` or installed Roslyn DLLs) |
 | **Does NOT touch** | REPL data for *other* Unity projects on the same machine |
