@@ -128,9 +128,35 @@ namespace RoslynRepl.Editor.UI
             root.Add(footer);
         }
 
+        private void OnEnable()
+        {
+            // External writes (most importantly Tools / Roslyn REPL /
+            // Reset Project Data) need to refresh the open popup —
+            // otherwise stale `using` rows stay visible and the user
+            // can re-save them, repopulating the cleared store. Mirrors
+            // RunHistoryWindow's Phase 5 subscription pattern.
+            UsingsStore.Changed -= OnStoreChanged;
+            UsingsStore.Changed += OnStoreChanged;
+        }
+
+        private void OnDisable()
+        {
+            UsingsStore.Changed -= OnStoreChanged;
+        }
+
         private void OnDestroy()
         {
             _instance = null;
+        }
+
+        private void OnStoreChanged()
+        {
+            // Reload from the store rather than trusting the in-memory
+            // list — the cleared state isn't representable as "remove
+            // these specific entries", and trying to diff would let a
+            // race re-introduce removed rows.
+            _customUsings = UsingsStore.LoadCustom();
+            if (_customList != null) RebuildCustomList();
         }
 
         private void AddFromField()

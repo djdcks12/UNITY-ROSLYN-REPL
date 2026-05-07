@@ -22,6 +22,11 @@ namespace RoslynRepl.Editor.Core
         public bool Failed;             // true on compile/runtime error or cancel
         public string ErrorMessage;
         public bool JustChanged;        // true if Preview differs from last run
+        // Filled only when the value came from the global-search fallback
+        // (compile/runtime error → InstanceLocator sweep). Compile-success
+        // rows leave this null because their result is unambiguous —
+        // whatever the user's expression returned.
+        public string SourceDescription;
     }
 
     /// <summary>
@@ -163,20 +168,44 @@ namespace RoslynRepl.Editor.Core
                 if (TryEvaluateLastResultPath(path, out var value))
                 {
                     SetResolvedResult(result, value);
+                    // The user's `_` carry-over is unambiguous — there's
+                    // exactly one. The global-path branch below has the
+                    // multiple-match problem; this one doesn't.
+                    result.SourceDescription = "previous result (`_`)";
                     return true;
                 }
 
                 if (path == "_" || path.StartsWith("_.", StringComparison.Ordinal) || path.StartsWith("_[", StringComparison.Ordinal))
                     return false;
 
-                if (!TryEvaluateGlobalPath(path, out value)) return false;
+                if (!TryEvaluateGlobalPath(path, out value, out var matchedEntry)) return false;
                 SetResolvedResult(result, value);
+                // Tell the user *which* live instance the value came from.
+                // The previous behaviour of just dropping a value into the
+                // row left common-name fields (`items`, `count`, `_data`)
+                // ambiguous: multiple managers may all have `count`, and
+                // first-match wins is a coin flip. Showing source means
+                // the user can spot "wrong owner" failures at a glance.
+                result.SourceDescription = DescribeSource(matchedEntry);
                 return true;
             }
             catch
             {
                 return false;
             }
+        }
+
+        private static string DescribeSource(InstanceEntry entry)
+        {
+            if (entry == null) return "global search";
+            // SubLabel already encodes the rough origin (scene name,
+            // "ScriptableObject", "Singleton"); display name + type
+            // disambiguate within a category. Format:
+            //   "FriendListView (PopupFriend) — Scene: NewWorldMap"
+            //   "GameManager.Instance (GameManager) — Singleton"
+            string typePart = string.IsNullOrEmpty(entry.TypeName) ? string.Empty : $" ({entry.TypeName})";
+            string subPart = string.IsNullOrEmpty(entry.SubLabel) ? string.Empty : $" — {entry.SubLabel}";
+            return (entry.DisplayName ?? "?") + typePart + subPart;
         }
 
         private static bool TryEvaluateLastResultPath(string path, out object value)
@@ -201,12 +230,16 @@ namespace RoslynRepl.Editor.Core
                 index = 1;
             }
 
-            return TryResolvePathFromIndex(current, path, index, out value);
+            // `_` is the user's explicit, single carry-over slot — there's
+            // no ambiguity over which owner this came from. Property
+            // getters are allowed because the user typed the path.
+            return TryResolvePathFromIndex(current, path, index, out value, allowProperty: true);
         }
 
-        private static bool TryEvaluateGlobalPath(string path, out object value)
+        private static bool TryEvaluateGlobalPath(string path, out object value, out InstanceEntry matched)
         {
             value = null;
+            matched = null;
             var entries = InstanceLocator.Find(InstanceCategory.All, string.Empty, GlobalSearchMaxEntries);
             if (entries.Count == 0) return false;
 
@@ -223,24 +256,45 @@ namespace RoslynRepl.Editor.Core
                     if (index == path.Length)
                     {
                         value = root;
+                        matched = entry;
                         return true;
                     }
 
                     if (path[index] == '.' || path[index] == '[')
                     {
-                        if (TryResolvePathFromIndex(root, path, index, out value))
+                        // Owner-qualified path: the user explicitly named
+                        // *this* instance via TypeName / DisplayName, so
+                        // property getter invocation is consistent with
+                        // the user's intent. e.g. `GameManager.Config`
+                        // resolves Config as a property if needed.
+                        if (TryResolvePathFromIndex(root, path, index, out value, allowProperty: true))
+                        {
+                            matched = entry;
                             return true;
+                        }
                     }
                 }
 
-                if (TryResolvePathFromIndex(root, path, 0, out value))
+                // Unqualified path: the user typed `Count` / `IsReady` /
+                // `_data` and we're guessing which live instance they
+                // meant. First-match wins, so allowing property getters
+                // here would silently invoke arbitrary user code on the
+                // first owner whose type happens to declare `Count` as
+                // a property — every Run, every refresh, with no
+                // breadcrumb to which object actually fired. Restrict
+                // to fields-only; users who want a property must
+                // qualify the owner.
+                if (TryResolvePathFromIndex(root, path, 0, out value, allowProperty: false))
+                {
+                    matched = entry;
                     return true;
+                }
             }
 
             return false;
         }
 
-        private static bool TryResolvePathFromIndex(object root, string path, int index, out object value)
+        private static bool TryResolvePathFromIndex(object root, string path, int index, out object value, bool allowProperty)
         {
             value = null;
             object current = root;
@@ -266,7 +320,7 @@ namespace RoslynRepl.Editor.Core
                 }
 
                 if (!TryReadIdentifier(path, ref index, out var memberName)) return false;
-                if (!TryResolveMember(current, memberName, out current)) return false;
+                if (!TryResolveMember(current, memberName, out current, allowProperty)) return false;
 
                 while (index < path.Length && path[index] == '[')
                 {
@@ -365,7 +419,7 @@ namespace RoslynRepl.Editor.Core
             return true;
         }
 
-        private static bool TryResolveMember(object target, string memberName, out object value)
+        private static bool TryResolveMember(object target, string memberName, out object value, bool allowProperty)
         {
             value = null;
             if (target == null || IsDestroyedUnityObject(target)) return false;
@@ -379,6 +433,8 @@ namespace RoslynRepl.Editor.Core
                     value = field.GetValue(target);
                     return true;
                 }
+
+                if (!allowProperty) continue;
 
                 var property = t.GetProperty(memberName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
                 if (property == null || property.GetIndexParameters().Length != 0) continue;
@@ -462,7 +518,27 @@ namespace RoslynRepl.Editor.Core
         {
             try
             {
-                return SimpleObjectSerializer.ToTree(value);
+                // Watches re-evaluate after every user Run. Walking
+                // properties of the returned object means user-defined
+                // getters fire on every refresh — and getters are
+                // usually where lazy-init, log spam, IO, or counter
+                // mutations live (`return ResolveOrCreate();`,
+                // `Profiler.MarkAccessed()`, etc.). One careless watch
+                // pinned to a `Manager.SomeProperty` row can multiply
+                // those side effects per Run × per row × per Editor
+                // session.
+                //
+                // Skip property walk for the watch tree only. The user
+                // *did* opt into evaluating the expression itself
+                // (which can hit one getter), but they didn't sign up
+                // for a recursive sweep of every property the result
+                // exposes. Output panel still walks properties because
+                // a user-driven `return X;` is a one-shot inspection,
+                // not a per-Run loop.
+                return SimpleObjectSerializer.ToTree(value, new SimpleObjectSerializer.Options
+                {
+                    IncludeProperties = false,
+                });
             }
             catch (Exception ex)
             {

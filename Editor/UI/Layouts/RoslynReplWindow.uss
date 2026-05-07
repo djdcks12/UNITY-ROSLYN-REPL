@@ -328,6 +328,14 @@
     font-size: 11px;
 }
 
+/* Phase 10b: row resolved through the global-search fallback —
+   ambiguous owner. Italic + slightly dimmer to call out that the
+   value didn't come from a normal compiled expression. */
+.rr-watch-cell-expr--global {
+    -unity-font-style: italic;
+    color: rgb(180, 180, 180);
+}
+
 .rr-watch-cell-value {
     flex-grow: 1;
     color: rgb(180, 220, 255);

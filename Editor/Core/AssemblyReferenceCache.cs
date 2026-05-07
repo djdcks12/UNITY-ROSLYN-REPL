@@ -22,6 +22,31 @@ namespace RoslynRepl.Editor.Core
         static AssemblyReferenceCache()
         {
             AppDomain.CurrentDomain.AssemblyLoad += OnAssemblyLoad;
+
+            // Phase 10e: pre-build the reference list on a background
+            // thread so the user's first Run doesn't pay the metadata
+            // scan as a 1–3s hang. BuildReferences opens every file-
+            // backed loaded assembly and constructs a MetadataReference
+            // (~1ms each on a warm SSD, more on cold storage), so doing
+            // it lazily inside Execute makes the first compilation feel
+            // sluggish even when the snippet is `return 1;`.
+            //
+            // Roslyn's MetadataReference.CreateFromFile is built on an
+            // immutable model and is documented thread-safe;
+            // AppDomain.GetAssemblies, asm.Location, and File.Exists
+            // are likewise. We still defer one frame via delayCall so
+            // we don't lengthen Editor startup, then offload to
+            // Task.Run. Failures are swallowed — the worst case is the
+            // first user Run pays the build itself, which is the
+            // status quo before this change.
+            EditorApplication.delayCall += () =>
+            {
+                System.Threading.Tasks.Task.Run(() =>
+                {
+                    try { _ = GetReferences(); }
+                    catch { /* warm-up is best-effort */ }
+                });
+            };
         }
 
         private static void OnAssemblyLoad(object sender, AssemblyLoadEventArgs args)

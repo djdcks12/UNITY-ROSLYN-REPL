@@ -180,11 +180,27 @@ namespace RoslynRepl.Editor.UI
 
             var expr = new Label(r.Expression);
             expr.AddToClassList("rr-watch-cell-expr");
+            // Source descriptor: only present on global-search fallback
+            // hits, where the value is otherwise ambiguous about which
+            // owner it came from. Surfacing it on the expression label
+            // (and dimming the visual style via the modifier class)
+            // tells the user "this row resolved by walking instances —
+            // here's the one we picked."
+            if (!string.IsNullOrEmpty(r.SourceDescription))
+            {
+                expr.AddToClassList("rr-watch-cell-expr--global");
+                expr.tooltip = $"Resolved from: {r.SourceDescription}";
+            }
             row.Add(expr);
 
             var value = new Label(r.Failed ? r.ErrorMessage ?? r.Preview : r.Preview);
             value.AddToClassList("rr-watch-cell-value");
-            value.tooltip = r.Failed ? r.ErrorMessage : (r.TypeName + ": " + r.Preview);
+            string valueTooltip = r.Failed
+                ? r.ErrorMessage
+                : (r.TypeName + ": " + r.Preview);
+            if (!r.Failed && !string.IsNullOrEmpty(r.SourceDescription))
+                valueTooltip += "\nSource: " + r.SourceDescription;
+            value.tooltip = valueTooltip;
             row.Add(value);
 
             var typeLabel = new Label(r.Failed ? string.Empty : r.TypeName ?? string.Empty);

@@ -52,6 +52,13 @@ namespace RoslynRepl.Editor.Core
             Changed?.Invoke();
         }
 
+        /// <summary>Wipe the user's custom usings for the current project.</summary>
+        public static void Clear()
+        {
+            EditorPrefs.DeleteKey(PrefsKey);
+            Changed?.Invoke();
+        }
+
         /// <summary>
         /// Defaults concatenated with the user's additions, de-duplicated and
         /// in stable order (defaults first). Returned as a fresh list so
