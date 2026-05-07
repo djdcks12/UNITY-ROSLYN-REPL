@@ -269,6 +269,17 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
 
             foreach (var s in specs)
             {
+                // Block wraps the main row plus an optional error
+                // sub-line so the bottom border draws cleanly under
+                // both — moving the border from the row to the
+                // block keeps the visual divider where users expect
+                // it (between specs, not between the spec and its
+                // error message).
+                var block = new VisualElement();
+                block.style.flexDirection = FlexDirection.Column;
+                block.style.borderBottomWidth = 1;
+                block.style.borderBottomColor = new StyleColor(new Color(0.25f, 0.25f, 0.25f));
+
                 var row = new VisualElement();
                 row.style.flexDirection = FlexDirection.Row;
                 row.style.alignItems = Align.Center;
@@ -276,8 +287,6 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
                 row.style.paddingRight = 4;
                 row.style.paddingTop = 3;
                 row.style.paddingBottom = 3;
-                row.style.borderBottomWidth = 1;
-                row.style.borderBottomColor = new StyleColor(new Color(0.25f, 0.25f, 0.25f));
 
                 var dot = new VisualElement();
                 dot.style.width = 8;
@@ -314,7 +323,35 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
                 revertBtn.style.minWidth = 60;
                 row.Add(revertBtn);
 
-                _activeListContainer.Add(row);
+                block.Add(row);
+
+                // Phase B4: surface LastError as a persistent secondary
+                // line under the row so users don't have to hover for
+                // the tooltip to know why a row is red. The most common
+                // cause in Phase B is "Auto-reapply failed: …" — i.e.
+                // a domain reload happened and the patch couldn't be
+                // re-installed. Hovering still shows the full text;
+                // the inline preview is the first line only so a 100-
+                // char compile diagnostic doesn't push the row layout
+                // around.
+                if (s.Status == PatchStatus.Failed && !string.IsNullOrEmpty(s.LastError))
+                {
+                    var firstLine = s.LastError.Split('\n')[0];
+                    var errLabel = new Label("↳ " + firstLine);
+                    errLabel.style.color = new StyleColor(new Color(0.95f, 0.65f, 0.65f));
+                    errLabel.style.fontSize = 10;
+                    errLabel.style.unityFontStyleAndWeight = FontStyle.Italic;
+                    errLabel.style.paddingLeft = 22;
+                    errLabel.style.paddingRight = 6;
+                    errLabel.style.paddingBottom = 3;
+                    errLabel.style.whiteSpace = WhiteSpace.NoWrap;
+                    errLabel.style.overflow = Overflow.Hidden;
+                    errLabel.style.textOverflow = TextOverflow.Ellipsis;
+                    errLabel.tooltip = s.LastError;
+                    block.Add(errLabel);
+                }
+
+                _activeListContainer.Add(block);
             }
         }
     }
