@@ -89,6 +89,7 @@ namespace RoslynRepl.Editor.Patches
             if (string.IsNullOrEmpty(spec.MethodName))     throw new ArgumentException("MethodName is required",     nameof(spec));
             spec.ParameterTypes ??= string.Empty;
             _byKey[spec.Key] = spec;
+            Persist();
             Changed?.Invoke();
         }
 
@@ -97,6 +98,7 @@ namespace RoslynRepl.Editor.Patches
             var key = MethodPatchSpec.Keyed(typeName, methodName, parameterTypes);
             if (_byKey.Remove(key))
             {
+                Persist();
                 Changed?.Invoke();
                 return true;
             }
@@ -111,9 +113,61 @@ namespace RoslynRepl.Editor.Patches
 
         public static void Clear()
         {
-            if (_byKey.Count == 0) return;
+            // Two independent buckets to consider:
+            //   • the live in-memory dictionary,
+            //   • the persisted EditorPrefs key.
+            // An older package version that wrote SetString(key, "")
+            // could leave the second bucket non-empty even when the
+            // first is empty after LoadFromPersistence. Bailing on
+            // _byKey.Count == 0 alone would skip the DeleteKey on
+            // those upgraded projects and break the README's
+            // "Reset removes every package-owned EditorPrefs key"
+            // promise.
+            bool hadInMemory  = _byKey.Count > 0;
+            bool hadPersisted = PatchPersistence.HasAny();
+            if (!hadInMemory && !hadPersisted) return;
+
             _byKey.Clear();
+            // Use the dedicated DeleteKey path instead of Persist()'s
+            // SetString-with-empty-list. SetString("") leaves an empty
+            // EditorPrefs key on disk, which contradicts the README's
+            // "Reset removes every package-owned EditorPrefs key"
+            // promise. Match the behavior the other stores ship
+            // (UsingsStore.Clear, RunHistoryStore.Clear, etc. all call
+            // DeleteKey directly).
+            PatchPersistence.Clear();
             Changed?.Invoke();
+        }
+
+        /// <summary>
+        /// Pull the persisted spec list back into the live registry.
+        /// Intended for the [InitializeOnLoad] boot path — Phase B3
+        /// calls this once per domain reload, then walks the loaded
+        /// specs and re-applies the Active ones.
+        ///
+        /// Specs already in the live registry are overwritten by their
+        /// persisted counterparts (the live state during a recompile
+        /// pause is whatever was already set; the persisted state is
+        /// the most recently committed view, so it wins). Fires
+        /// <see cref="Changed"/> once at the end so the UI rebuilds in
+        /// a single pass instead of per-row.
+        /// </summary>
+        public static void LoadFromPersistence()
+        {
+            var persisted = PatchPersistence.Load();
+            foreach (var s in persisted)
+            {
+                if (s == null || string.IsNullOrEmpty(s.TargetTypeName) || string.IsNullOrEmpty(s.MethodName))
+                    continue;
+                s.ParameterTypes ??= string.Empty;
+                _byKey[s.Key] = s;
+            }
+            Changed?.Invoke();
+        }
+
+        private static void Persist()
+        {
+            PatchPersistence.Save(_byKey.Values);
         }
     }
 }

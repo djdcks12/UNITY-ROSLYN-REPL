@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added (Phase B — runtime patch persistence + domain-reload reapply)
+- `RoslynRepl.Editor.Patches.PatchPersistence`: project-scoped EditorPrefs store for the runtime patch list. Each spec is six base64-encoded fields (target / method / params / original body / patch body / status) joined by `|`, specs joined by `\n`. Single malformed entry skipped, rest of the set still loads. `LastError` deliberately not persisted — it's transient diagnostic state from the last apply attempt.
+- `PatchRegistry.AddOrUpdate` / `Remove` / `Clear` now write through to `PatchPersistence` automatically; the in-memory dictionary stays the read path. `PatchRegistry.LoadFromPersistence()` is the inbound counterpart used by the boot path. Authoring-side code (UI, engine) is unchanged.
+- `RoslynRepl.Editor.Patches.PatchAutoReapply` (`[InitializeOnLoad]`): on every domain reload, deferred one Editor frame, loads the persisted spec list and re-installs each `Active` patch through `PatchEngine.Apply`. Successful re-applies stay Active; failures flip to `Failed` with `LastError = "Auto-reapply failed: …"` and persist the new status so the next boot doesn't repeat the noise. Inactive / Failed specs are loaded so the UI remembers the user's drafts but are not retried.
+- `MethodPatchView`: failed rows now show their `LastError`'s first line as a persistent italic secondary label under the row (`↳ Auto-reapply failed: …`). Hovering still surfaces the full message; the inline preview is one line only so multi-line compile diagnostics don't shift the row layout.
+
 ### Added (Phase A — runtime method patch MVP, issue #14)
 - `RoslynRepl.Editor.Patches.MethodPatchSpec`: identifies a patch by `(TargetTypeName, MethodName, ParameterTypes)` triple plus the patch body, original-body snapshot, status, and last-error. `Key` is a stable string for registry lookup and a future Phase B persistence id.
 - `RoslynRepl.Editor.Patches.PatchRegistry`: in-memory registry keyed by spec key, fires a `Changed` event on every add/update/remove/clear. Phase A is intentionally non-persistent — Phase B (deferred) will layer EditorPrefs/asset persistence on the same API.

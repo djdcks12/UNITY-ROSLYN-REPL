@@ -105,7 +105,19 @@ return UnityEngine.Application.unityVersion;";
             // behavior. Pull both into the reset scope.
             int patchCount = RoslynRepl.Editor.Patches.PatchRegistry.Count;
 
-            if (storeTotal == 0 && !hasCarryOver && dirtyOutputs == 0 && patchCount == 0)
+            // Phase B PR fix: an upgraded user can land here with the
+            // in-memory registry empty *and* the persisted EditorPrefs
+            // key still present (the previous package version wrote
+            // SetString(key, "") on Reset, which deserializes back to
+            // zero specs but the key sticks). Counting only patchCount
+            // would let the early-return below skip the cleanup that
+            // README promises. PatchPersistence.HasAny() catches the
+            // stale-key case so reset still routes through Clear().
+            bool hasStalePatchKey = patchCount == 0
+                && RoslynRepl.Editor.Patches.PatchPersistence.HasAny();
+
+            if (storeTotal == 0 && !hasCarryOver && dirtyOutputs == 0
+                && patchCount == 0 && !hasStalePatchKey)
             {
                 EditorUtility.DisplayDialog(
                     "Roslyn REPL — Reset Project Data",
