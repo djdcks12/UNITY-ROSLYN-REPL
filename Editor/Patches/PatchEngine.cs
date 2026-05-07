@@ -76,7 +76,7 @@ namespace RoslynRepl.Editor.Patches
             var target = ResolveTargetMethod(spec);
             var className = "__ReplPatch_" + Guid.NewGuid().ToString("N").Substring(0, 8);
             var source = PatchCodeGenerator.Generate(spec, target, className);
-            var asm = CompileToAssembly(source);
+            var asm = CompileToAssembly(source, target.DeclaringType, spec.Key);
             var patchType = asm.GetType(className)
                 ?? throw new InvalidOperationException($"Compiled patch is missing class '{className}'");
             var prefix = patchType.GetMethod("Prefix", BindingFlags.Public | BindingFlags.Static)
@@ -252,14 +252,83 @@ namespace RoslynRepl.Editor.Patches
             return null;
         }
 
-        private static Assembly CompileToAssembly(string source)
+        private static Assembly CompileToAssembly(string source, Type declaringType, string specKey)
         {
             var tree = CSharpSyntaxTree.ParseText(source);
+            var asmName = "ReplPatch_" + Guid.NewGuid().ToString("N").Substring(0, 8);
+            var refs = AssemblyReferenceCache.GetReferences();
+            var options = new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary);
+
             var compilation = CSharpCompilation.Create(
-                assemblyName: "ReplPatch_" + Guid.NewGuid().ToString("N").Substring(0, 8),
+                assemblyName: asmName,
                 syntaxTrees: new[] { tree },
-                references: AssemblyReferenceCache.GetReferences(),
-                options: new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
+                references: refs,
+                options: options);
+
+            // Phase D — natural-code rewrite. The user can write
+            // `hp -= 10`, `Singleton.Instance.privateField`,
+            // `MyClass.PrivateStatic = …` and have the wrapper still
+            // compile. The mechanism: ask Roslyn what it complains
+            // about, route every "name doesn't exist" / "inaccessible
+            // due to protection level" / "no definition" location
+            // through the reflection helpers PatchCodeGenerator
+            // already pre-emits into the wrapper. Code that compiles
+            // untouched (public access, locals, etc.) is left exactly
+            // as the user wrote it, so direct calls keep their fast
+            // codegen.
+            //
+            // The loop is mandatory, not paranoid: a compound rewrite
+            // like `hidden = hp + armor` swallows the inner `hp` and
+            // `armor` reads when their parent assignment is replaced
+            // (SyntaxNode.ReplaceNodes is outer-first; once the
+            // assignment is rewritten, the read nodes inside live in
+            // the new helper expression and get re-flagged by the
+            // next compile). Iterating until DidRewrite is false
+            // converges on the fix point. Cap at 8 passes — anything
+            // beyond that is an infinite loop, not a deeply nested
+            // patch.
+            //
+            // The first-pass error count guards the common case: if
+            // a patch already uses helpers explicitly (Phase A's
+            // documented form), the first compile is clean and we
+            // skip the rewriter walk entirely.
+            int rewriteRounds = 0;
+            int totalRewrites = 0;
+            var allNotes = new List<string>();
+            if (declaringType != null)
+            {
+                while (rewriteRounds < 8)
+                {
+                    var passErrors = compilation.GetDiagnostics()
+                        .Where(d => d.Severity == DiagnosticSeverity.Error)
+                        .ToArray();
+                    if (passErrors.Length == 0) break;
+
+                    var rewrite = PatchSyntaxRewriter.Rewrite(tree, compilation, declaringType);
+                    if (!rewrite.DidRewrite) break;
+
+                    tree = rewrite.Tree;
+                    compilation = CSharpCompilation.Create(
+                        assemblyName: asmName,
+                        syntaxTrees: new[] { tree },
+                        references: refs,
+                        options: options);
+
+                    rewriteRounds++;
+                    totalRewrites += rewrite.Notes.Count;
+                    allNotes.AddRange(rewrite.Notes);
+                }
+
+                if (totalRewrites > 0)
+                {
+                    // Surface a single summary line. Quiet enough not
+                    // to spam, verbose enough to be a debug breadcrumb
+                    // when a rewrite goes subtly wrong.
+                    UnityEngine.Debug.Log(
+                        $"[Roslyn REPL] Patch '{specKey}' rewrote {totalRewrites} access(es) in {rewriteRounds} pass(es): "
+                        + string.Join("; ", allNotes));
+                }
+            }
 
             using var ms = new MemoryStream();
             var emit = compilation.Emit(ms);
