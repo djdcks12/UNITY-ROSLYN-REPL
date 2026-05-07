@@ -65,7 +65,7 @@ namespace RoslynRepl.Editor.Patches
                 catch (Exception ex) { lastParseError = $"Could not read '{path}': {ex.Message}"; continue; }
 
                 MethodDeclarationSyntax match;
-                try { match = FindMethodNode(source, method.Name, paramTypes); }
+                try { match = FindMethodNode(source, declaringType, method.Name, paramTypes); }
                 catch (Exception ex) { lastParseError = $"Roslyn parse failed for '{path}': {ex.Message}"; continue; }
 
                 if (match == null) continue;
@@ -123,15 +123,35 @@ namespace RoslynRepl.Editor.Patches
         // short name); count alone disambiguates the common cases
         // and avoids the headache of comparing Roslyn's syntax-level
         // type strings to System.Type's reflection metadata.
-        private static MethodDeclarationSyntax FindMethodNode(string source, string methodName, Type[] paramTypes)
+        //
+        // Scoped to the declaring type's syntax declarations so a file
+        // hosting two top-level classes — or an outer class + nested
+        // helper class — that happen to share a method name + arity
+        // can't leak the wrong body. We walk the ancestor chain
+        // (Outer → Inner) when the target is a nested type, and gather
+        // methods *directly* under each matching declaration, never
+        // descending into further nested types of those.
+        private static MethodDeclarationSyntax FindMethodNode(string source, Type declaringType, string methodName, Type[] paramTypes)
         {
             var tree = CSharpSyntaxTree.ParseText(source);
             var root = tree.GetRoot();
-            var candidates = root.DescendantNodes()
-                .OfType<MethodDeclarationSyntax>()
-                .Where(m => m.Identifier.ValueText == methodName)
-                .Where(m => m.ParameterList.Parameters.Count == paramTypes.Length)
-                .ToList();
+
+            var typeDecls = FindMatchingTypeDeclarations(root, declaringType);
+            if (typeDecls.Count == 0) return null;
+
+            var candidates = new List<MethodDeclarationSyntax>();
+            foreach (var td in typeDecls)
+            {
+                foreach (var member in td.Members)
+                {
+                    if (member is MethodDeclarationSyntax m
+                        && m.Identifier.ValueText == methodName
+                        && m.ParameterList.Parameters.Count == paramTypes.Length)
+                    {
+                        candidates.Add(m);
+                    }
+                }
+            }
 
             if (candidates.Count == 0) return null;
             if (candidates.Count == 1) return candidates[0];
@@ -157,6 +177,62 @@ namespace RoslynRepl.Editor.Patches
                 if (allMatch) return c;
             }
             return candidates[0];
+        }
+
+        // Resolve every TypeDeclarationSyntax in the file whose simple
+        // name + ancestor chain matches the target type. For partial
+        // classes a single file can declare the same type multiple
+        // times (or split across files — we'd be invoked once per
+        // path). For nested types we walk the syntactic ancestors so
+        // an unrelated outer type that happens to contain a nested
+        // class with the same simple name doesn't get conflated.
+        private static List<TypeDeclarationSyntax> FindMatchingTypeDeclarations(SyntaxNode root, Type declaringType)
+        {
+            // Build the simple-name chain Outer → Inner ignoring generics
+            // (Foo`1 → "Foo"). Phase A doesn't pull from generic methods,
+            // and reflection's `Type.Name` already drops type-arg names.
+            var nameChain = new List<string>();
+            for (var cur = declaringType; cur != null; cur = cur.DeclaringType)
+                nameChain.Add(StripGenericArity(cur.Name));
+            nameChain.Reverse(); // outermost first
+
+            var matches = new List<TypeDeclarationSyntax>();
+            foreach (var td in root.DescendantNodes().OfType<TypeDeclarationSyntax>())
+            {
+                if (td.Identifier.ValueText != nameChain[nameChain.Count - 1]) continue;
+                if (!AncestorChainMatches(td, nameChain)) continue;
+                matches.Add(td);
+            }
+            return matches;
+        }
+
+        private static bool AncestorChainMatches(TypeDeclarationSyntax leaf, List<string> nameChain)
+        {
+            // Walk syntactic parents collecting enclosing type names.
+            // Stop when we reach a non-type ancestor (namespace / file
+            // scope). Then compare bottom-up to the expected chain.
+            var actual = new List<string>();
+            actual.Add(leaf.Identifier.ValueText);
+            for (var p = leaf.Parent; p != null; p = p.Parent)
+            {
+                if (p is TypeDeclarationSyntax pt) actual.Add(pt.Identifier.ValueText);
+                else if (p is NamespaceDeclarationSyntax || p is CompilationUnitSyntax
+                         // FileScopedNamespaceDeclarationSyntax exists in newer Roslyn — pattern-match by name to keep older builds compiling
+                         || p.GetType().Name == "FileScopedNamespaceDeclarationSyntax")
+                    break;
+            }
+            // actual is innermost-first; reverse to outer-first
+            actual.Reverse();
+            if (actual.Count != nameChain.Count) return false;
+            for (int i = 0; i < nameChain.Count; i++)
+                if (actual[i] != nameChain[i]) return false;
+            return true;
+        }
+
+        private static string StripGenericArity(string name)
+        {
+            int tick = name.IndexOf('`');
+            return tick < 0 ? name : name.Substring(0, tick);
         }
 
         private static string ShortAliasFor(Type t)
