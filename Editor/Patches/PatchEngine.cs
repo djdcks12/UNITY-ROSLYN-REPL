@@ -306,12 +306,25 @@ namespace RoslynRepl.Editor.Patches
             sb.AppendLine("        }");
 
             sb.AppendLine();
+            // Wrap the user body in a void local function. The Prefix
+            // method itself returns bool (Harmony's "skip original"
+            // signal), but the user's body looks and feels like an
+            // ordinary void method body — guard clauses (`if (!ready)
+            // return;`), early-exit returns, copy-paste of an existing
+            // void method, all valid C#. Inserting that text directly
+            // into a bool Prefix would have CS0126'd on every bare
+            // `return;`. The local function captures __instance, the
+            // method parameters, and the __get / __set / __call
+            // helpers from the enclosing scope, so the user-visible
+            // shape is unchanged.
             sb.AppendLine("        // ===== user patch body =====");
-            // User body verbatim. MVP forbids `return X;` (method is void)
-            // but a bare `return;` to early-exit is fine.
+            sb.AppendLine("        void __exec()");
+            sb.AppendLine("        {");
             sb.AppendLine(spec.PatchBody ?? string.Empty);
+            sb.AppendLine("        }");
             sb.AppendLine("        // ===== end =====");
             sb.AppendLine();
+            sb.AppendLine("        __exec();");
             sb.AppendLine("        return false; // Harmony Prefix: skip the original method body");
             sb.AppendLine("    }");
             sb.AppendLine("}");
