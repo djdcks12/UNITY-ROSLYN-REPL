@@ -86,6 +86,28 @@
     -unity-text-align: middle-right;
 }
 
+/* Phase-A4: clickable mode tabs in the Output / Patches header. */
+.rr-pane-tab {
+    margin-right: 12px;
+    color: rgb(120, 120, 120);
+    -unity-font-style: normal;
+    cursor: link;
+}
+
+.rr-pane-tab--active {
+    color: rgb(220, 220, 220);
+    -unity-font-style: bold;
+}
+
+/* Toggleable display for the output/patch swap. UIElements doesn't
+   honor `display: none` from a class as cleanly as inline style, so
+   the C# layer flips DisplayStyle on the host element directly —
+   this class is a no-op default that's nice to have when reading
+   UXML. */
+.rr-pane--hidden {
+    display: none;
+}
+
 /* Code editor (Phase 4: gutter + caret indicator) */
 .rr-code-editor-host {
     flex-grow: 1;

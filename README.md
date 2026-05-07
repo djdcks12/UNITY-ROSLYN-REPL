@@ -17,7 +17,8 @@ Use this package as a practical Unity Editor console for C# investigation. Run s
 - Watch panel for repeatedly evaluating expressions after each run.
 - Previous-result carry-over through `_`.
 - Cooperative cancellation through `ct`.
-- Setup verification and Roslyn DLL installer menu items.
+- **Runtime Method Patch (Phase A MVP)** — redirect a void instance method to a runtime-compiled body, no source `.cs` edit, revertable. Powered by Harmony.
+- Setup verification and one-click Roslyn + Harmony installer.
 
 The package is editor-only and is designed for debugging, investigation, tool building, and quick one-off probes while working inside Unity.
 
@@ -450,6 +451,76 @@ The serializer applies depth and node caps so accidental large graphs do not ove
 
 Unity objects need special care because some Unity-owned properties can trigger native assertions or throw after destruction. The serializer handles destroyed Unity fake-null objects and avoids unsafe Unity-engine property walks while still surfacing user-defined fields and safe user-defined properties.
 
+## Runtime Method Patch (Phase A MVP)
+
+The Patches tab in the main REPL window's lower pane (next to Output) lets you redirect a live method's calls to a runtime-compiled body without touching the source `.cs` file. Use it to add a `Debug.Log` mid-method, change a comparison, swap a return value, and iterate without losing the running scene state — then bake the change back into source when you're happy.
+
+### Open
+
+Either:
+
+- `Tools / Roslyn REPL / Patch Method…` — opens the main window and flips the lower pane to **Patches**.
+- Or click **Patches** on the lower pane's mode tab (next to **Output**) inside an already-open REPL window.
+
+### Form
+
+| Field | Example | Notes |
+|---|---|---|
+| **Target type** | `MyGame.Player` | Full type name including namespace. |
+| **Method name** | `Damage` | Must be a `void` instance method. |
+| **Parameter types** | `System.Int32,System.String` | Comma-joined full type names. Empty when the method has no parameters. |
+| **Patch body** | (see below) | C# statements that replace the original method body. |
+
+### Helpers available inside a patch body
+
+| Symbol | What it does |
+|---|---|
+| `__instance` | The target instance, typed as the declaring type. Use for `public` member access. |
+| `__get<T>("name")` | Read a `private` (or public) field/property. |
+| `__set("name", value)` | Write a `private` (or public) field/property. |
+| `__call<T>("name", args…)` | Invoke a `private` (or public) method. Use `__call<object>` for `void` methods. |
+| Method parameters | Same names as the original (e.g. `amount`). |
+
+### Example — log inside `Player.Damage`
+
+```csharp
+// Target type:     MyGame.Player
+// Method name:     Damage
+// Parameter types: System.Int32
+// Patch body:
+var hp = __get<int>("hp");
+UnityEngine.Debug.Log($"[patched] before damage: hp={hp}, amount={amount}");
+__set("hp", hp - amount);
+UnityEngine.Debug.Log($"[patched] after damage:  hp={__get<int>(\"hp\")}");
+```
+
+### Lifecycle
+
+- **Apply Patch** — compiles the body, installs a Harmony Prefix, and skips the original method body on every subsequent call.
+- **Revert** — removes the patch matching the current form. The Active patches list also has a per-row Revert.
+- **Revert All** — drops every active patch.
+- The Active patches list shows the status dot (green = active, red = failed, grey = inactive). **Load** repopulates the form from a saved spec; if you re-Apply, the engine reverts the previous patch and installs the new one in one step.
+
+### Phase A scope (intentional)
+
+| Try to patch | Result |
+|---|---|
+| `void` instance method | ✅ supported |
+| Non-`void` method (`int Calculate()`, `string GetName()`) | ❌ rejected with `"Phase A MVP only patches void instance methods"` |
+| `static` method | ❌ rejected with `"Phase A MVP only patches *instance* methods"` |
+| `ref` / `out` / `in` parameters | ❌ not supported |
+| Generic method | ❌ not supported |
+| Constructor / static constructor | ❌ not supported |
+| Property getter / setter | ❌ not supported |
+
+Patches are in-memory only — they reset on the next domain reload (Editor restart, script recompile, or Play Mode toggle). Source-style editing (no `__get`/`__set` boilerplate) and `.cs` export will land in later phases of [issue #14](https://github.com/djdcks12/UNITY-ROSLYN-REPL/issues/14).
+
+### Dependencies
+
+The Patch feature needs `0Harmony.dll`. The bundled `Tools / Roslyn REPL / Install Roslyn DLLs` menu installs it alongside Roslyn — one click covers both. The first time you import the package, a setup prompt offers to install both dependencies; pick **Install Now** and you're done.
+
+`Tools / Roslyn REPL / Verify Setup` reports the live Harmony state (`[optional] Harmony (Runtime Method Patch): present` once installed).
+
 ## Persistence Model
 
 The following data is stored per Unity project:
@@ -533,10 +604,15 @@ Main menus:
 ```text
 Tools / Roslyn REPL / Open
 Tools / Roslyn REPL / Import Default Snippets
+Tools / Roslyn REPL / Patch Method…
 Tools / Roslyn REPL / Reset Project Data
 Tools / Roslyn REPL / Verify Setup
 Tools / Roslyn REPL / Install Roslyn DLLs
 ```
+
+`Install Roslyn DLLs` installs Harmony alongside Roslyn — both dependencies in one click.
+
+`Patch Method…` opens the main REPL window and flips its lower pane to the **Patches** tab. See "Runtime Method Patch" above.
 
 Use `Reset Project Data` when:
 
