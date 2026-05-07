@@ -471,6 +471,29 @@ Either:
 | **Parameter types** | `System.Int32,System.String` | Comma-joined full type names. Empty when the method has no parameters. |
 | **Patch body** | (see below) | C# statements that replace the original method body. |
 
+### Pull Original — start from the existing implementation
+
+Click **Pull Original** in the Patch body header to copy the target method's current source into the editor. Use it as the starting point for an in-place edit (add a `Debug.Log`, change a comparison, swap a return path, …) instead of writing from scratch.
+
+What it does:
+
+1. Resolves the target method via the same path Apply uses (Target type / Method name / Parameter types), so any Phase A scope error (non-void, static, …) shows up here too.
+2. Walks the project's `MonoScript`s for one whose declared class matches the target type. Partial classes are tried in order until the matching method node is found.
+3. Roslyn-parses the candidate file, locates the matching method by identifier + parameter count (with type-name disambiguation for overloads), and extracts the text between the outer braces.
+4. Replaces the editor body with that text, preserving original indentation. If the editor already has non-default content, an overwrite confirm dialog runs first.
+
+Limitations (mostly mirror Phase A's scope):
+
+| Try to pull | Result |
+|---|---|
+| `void` instance method, block body, source in `Assets/` or `Packages/` | ✅ pulled |
+| `=> expr` (expression-bodied) | ❌ "Phase C MVP only extracts block-bodied methods" |
+| Method in a precompiled DLL (no MonoScript) | ❌ "No MonoScript found for X" |
+| Auto-generated partial (Unity codegen) | ⚠️ may pull but the body is rarely user-editable |
+| Same name + same arity overloads | best-effort match by parameter type names; falls back to the first candidate |
+
+After Phase D lands, you'll be able to leave the pulled body essentially as-is — the rewriter will translate `hp -= amount;` into `__set("hp", __get<int>("hp") - amount);` automatically. Until then, private member access still uses the helper functions described below.
+
 ### Helpers available inside a patch body
 
 | Symbol | What it does |

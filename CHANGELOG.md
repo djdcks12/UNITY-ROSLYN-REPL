@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added (Phase C — pull original method body into the patch editor)
+- `RoslynRepl.Editor.Patches.PatchSourcePuller`: locates a target method's `.cs` file via `MonoScript.GetClass()` matching, parses the file with Roslyn, finds the method by identifier + parameter count (with type-name disambiguation for overloads), and extracts the text between the outer braces. Returns a structured `PullResult` with `Success` / `Body` / `SourcePath` / `Error` so the UI can either populate the editor or show a specific failure message ("No MonoScript found", "expression-bodied — Phase C MVP doesn't unwrap those", "arity mismatch", …).
+- `PatchEngine.TryResolveTargetMethod`: public non-throwing wrapper around the existing `ResolveTargetMethod` so the Pull UI can reuse the same Phase A scope checks (void instance only) without catching exceptions.
+- `MethodPatchView` Patch body header gains a "Pull Original" button. Clicking pulls the target method's source body into the editor, preserving original indentation. Non-default existing bodies prompt for overwrite via `EditorUtility.DisplayDialog`. Status line reports the source path + char count on success, or the specific Error from `PatchSourcePuller` on failure.
+
+### Phase C limitations (intentional, see issue #14 plan)
+- Void instance methods only — same Phase A scope. Static, non-void, ref/out, generic, constructor, property accessor are all rejected before Pull even runs.
+- Block bodies only (`{ … }`). Expression-bodied methods (`=> expr`) are detected and surfaced as a specific error rather than silently returning an empty body.
+- Source must live in `Assets/` or `Packages/`. Methods declared in precompiled DLLs (an SDK package without source, Unity-shipped types, etc.) have no MonoScript path to resolve and surface "No MonoScript found".
+- Partial classes work (multiple paths walked in order until a matching method node resolves), but auto-generated partials (Unity codegen, source generators) may carry method bodies the user can't easily edit anyway.
+- Phase D will add a Roslyn syntax rewriter so the user can write `hp -= amount;` instead of `__set("hp", __get<int>("hp") - amount);` against a Pull'd body. Until then, private member access still requires the helper functions.
+
 ### Added (Phase B — runtime patch persistence + domain-reload reapply)
 - `RoslynRepl.Editor.Patches.PatchPersistence`: project-scoped EditorPrefs store for the runtime patch list. Each spec is six base64-encoded fields (target / method / params / original body / patch body / status) joined by `|`, specs joined by `\n`. Single malformed entry skipped, rest of the set still loads. `LastError` deliberately not persisted — it's transient diagnostic state from the last apply attempt.
 - `PatchRegistry.AddOrUpdate` / `Remove` / `Clear` now write through to `PatchPersistence` automatically; the in-memory dictionary stays the read path. `PatchRegistry.LoadFromPersistence()` is the inbound counterpart used by the boot path. Authoring-side code (UI, engine) is unchanged.
