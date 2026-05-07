@@ -456,6 +456,36 @@
     padding: 4px 6px;
     border-bottom-width: 1px;
     border-bottom-color: rgb(28, 28, 28);
+    /* Phase 11e: 3px left bar holds the category color cue without
+       moving the existing labels around. Default transparent so
+       rows in cards that don't carry a category modifier render the
+       same as before. */
+    border-left-width: 3px;
+    border-left-color: rgba(0, 0, 0, 0);
+}
+
+/* Phase 11e: per-category left-bar colors. Picked from the same
+   palette used elsewhere in the UI:
+     MonoBehaviour    → blue   (matches the result-tree value cell)
+     ScriptableObject → orange (asset-flavored, not scene)
+     Singleton        → purple (catch-all "static, machine-wide")
+   Type-cell color is also tinted slightly for the SO and Singleton
+   rows so the cue carries past the bar even on monitors where the
+   3px stripe is hard to spot. */
+.rr-browser-row--mb {
+    border-left-color: rgb(80, 130, 220);
+}
+.rr-browser-row--so {
+    border-left-color: rgb(220, 150, 80);
+}
+.rr-browser-row--singleton {
+    border-left-color: rgb(180, 130, 220);
+}
+.rr-browser-row--so .rr-browser-row-type {
+    color: rgb(220, 180, 140);
+}
+.rr-browser-row--singleton .rr-browser-row-type {
+    color: rgb(200, 170, 220);
 }
 
 .rr-browser-row-name {
