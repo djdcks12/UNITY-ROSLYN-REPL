@@ -161,7 +161,29 @@ namespace RoslynRepl.Editor.Diagnostics
             sb.AppendLine($"  [diag]     Loaded REPL dynamic assemblies: {CountDynamicReplAssemblies()}");
             sb.AppendLine($"             (cleared by domain reload — recompile any script or re-enter Play Mode)");
             sb.AppendLine($"  [diag]     Cached MetadataReferences: {AssemblyReferenceCache.CountOrZero}");
+            // Phase A1: Harmony is optional — only the Runtime Method
+            // Patch feature needs it. Don't list it as Required (so
+            // users running just the REPL don't see a "missing DLL"
+            // warning), but do report its presence so the Patch UI
+            // can ask "did you install Harmony yet?" with one glance.
+            sb.AppendLine($"  [optional] Harmony (Runtime Method Patch): " +
+                          (IsHarmonyLoaded()
+                              ? "present"
+                              : "absent — Tools / Roslyn REPL / Install Harmony to enable runtime method patching"));
             return sb.ToString();
+        }
+
+        private static bool IsHarmonyLoaded()
+        {
+            foreach (var a in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                string name;
+                try { name = a.GetName().Name; }
+                catch { continue; }
+                if (string.Equals(name, "0Harmony", StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+            return false;
         }
 
         private static int CountDynamicReplAssemblies()
