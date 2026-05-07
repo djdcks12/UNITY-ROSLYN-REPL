@@ -62,15 +62,18 @@ namespace RoslynRepl.Editor.Patches
         //           context" — typical for unqualified references to a
         //           declaring-type member, since the wrapper class
         //           sees the user body without `this`.
+        // - CS0117: "'X' does not contain a definition for 'foo'" —
+        //           fires for static lookups when the private member
+        //           is filtered out of metadata-only references; very
+        //           common for `MyType.PrivateStaticMethod()`.
         // - CS0122: "'X.foo' is inaccessible due to its protection
         //           level" — fires when Roslyn does see the symbol but
         //           it's private/protected from outside. Common for
         //           `singleton.privateField`.
-        // - CS1061: "'X' does not contain a definition for 'foo'"
-        //           — fires when the symbol isn't visible at all (the
-        //           private member is filtered out of metadata-only
-        //           references). Common for cross-assembly access.
-        private static readonly HashSet<string> _rewritableIds = new() { "CS0103", "CS0122", "CS1061" };
+        // - CS1061: "'X' does not contain a definition for 'foo' and
+        //           no accessible extension method..." — instance
+        //           variant of CS0117 for cross-assembly access.
+        private static readonly HashSet<string> _rewritableIds = new() { "CS0103", "CS0117", "CS0122", "CS1061" };
 
         public static Result Rewrite(SyntaxTree tree, Compilation compilation, Type declaringType)
         {
@@ -162,6 +165,15 @@ namespace RoslynRepl.Editor.Patches
                 case AccessKind.SimpleWrite:
                     return TryStageSimpleWrite(ctx.AssignmentNode, access, model, declaringType, replacements, notes);
 
+                case AccessKind.CompoundWrite:
+                    return TryStageCompoundWrite(ctx.AssignmentNode, access, model, declaringType, replacements, notes);
+
+                case AccessKind.Increment:
+                    return TryStageIncrement(ctx.UnaryNode, access, model, declaringType, replacements, notes);
+
+                case AccessKind.Invocation:
+                    return TryStageInvocation(ctx.InvocationNode, access, model, declaringType, replacements, notes);
+
                 default:
                     return false;
             }
@@ -187,28 +199,51 @@ namespace RoslynRepl.Editor.Patches
             return null;
         }
 
-        private enum AccessKind { Other, Read, SimpleWrite }
+        private enum AccessKind { Other, Read, SimpleWrite, CompoundWrite, Increment, Invocation }
         private struct AccessContext
         {
             public AccessKind Kind;
             public AssignmentExpressionSyntax AssignmentNode;
+            public ExpressionSyntax UnaryNode;        // PrefixUnary or PostfixUnary that wraps the access
+            public InvocationExpressionSyntax InvocationNode;
         }
 
         // Decide read vs. write by the access's role in its parent.
         // `x = …` → SimpleWrite (rewrite the whole assignment).
-        // Compound assignments, `++`, method invocations are Phase D3.
+        // `x += …` etc. → CompoundWrite (rewrite as set(x, get(x) op rhs)).
+        // `x++` / `++x` → Increment (rewrite as set(x, get(x) ± 1)).
+        // `x(args)` / `obj.x(args)` → Invocation (rewrite as call helper).
         private static AccessContext ClassifyContext(ExpressionSyntax access)
         {
             if (access.Parent is AssignmentExpressionSyntax assign && assign.Left == access)
             {
                 if (assign.IsKind(SyntaxKind.SimpleAssignmentExpression))
                     return new AccessContext { Kind = AccessKind.SimpleWrite, AssignmentNode = assign };
-                // Compound assignment / await assignment / etc. — D3.
-                return new AccessContext { Kind = AccessKind.Other };
+                // Compound assignment: +=, -=, *=, /=, %=, &=, |=, ^=, <<=, >>=
+                return new AccessContext { Kind = AccessKind.CompoundWrite, AssignmentNode = assign };
             }
-            // The access is being invoked: foo(args). D3.
+
+            // ++x / x++ / --x / x--. We treat all four uniformly because
+            // statement-context increments are by far the common case
+            // and the result-value distinction (postfix returns the
+            // pre-modify value) only matters in expression context.
+            // The Phase D scope doc lists this caveat.
+            if (access.Parent is PrefixUnaryExpressionSyntax pre
+                && pre.Operand == access
+                && (pre.IsKind(SyntaxKind.PreIncrementExpression) || pre.IsKind(SyntaxKind.PreDecrementExpression)))
+            {
+                return new AccessContext { Kind = AccessKind.Increment, UnaryNode = pre };
+            }
+            if (access.Parent is PostfixUnaryExpressionSyntax post
+                && post.Operand == access
+                && (post.IsKind(SyntaxKind.PostIncrementExpression) || post.IsKind(SyntaxKind.PostDecrementExpression)))
+            {
+                return new AccessContext { Kind = AccessKind.Increment, UnaryNode = post };
+            }
+
+            // The access is being invoked: foo(args) or obj.foo(args).
             if (access.Parent is InvocationExpressionSyntax inv && inv.Expression == access)
-                return new AccessContext { Kind = AccessKind.Other };
+                return new AccessContext { Kind = AccessKind.Invocation, InvocationNode = inv };
 
             return new AccessContext { Kind = AccessKind.Read };
         }
@@ -344,6 +379,268 @@ namespace RoslynRepl.Editor.Patches
             }
 
             return false;
+        }
+
+        // ─── Compound-write context ────────────────────────────────
+        // `hp += 5` → `__set("hp", __get<int>("hp") + (5))`.
+        // The set/get helper choice (instance / external instance /
+        // static) mirrors the read+write pair: external `obj.x += d`
+        // becomes `__setOn(obj, "x", __getOn<T>(obj, "x") + (d))`,
+        // and `Type.x += d` becomes
+        // `__setStatic(typeof(Type), "x", __getStatic<T>(typeof(Type), "x") + (d))`.
+        // Right-hand side is wrapped in parens so operator precedence
+        // (`hp += 1 << 2`) doesn't shift inside the helper call.
+        private static bool TryStageCompoundWrite(
+            AssignmentExpressionSyntax assignment,
+            ExpressionSyntax accessLhs,
+            SemanticModel model,
+            Type declaringType,
+            Dictionary<SyntaxNode, SyntaxNode> replacements,
+            List<string> notes)
+        {
+            var binOp = CompoundOperator(assignment.OperatorToken);
+            if (binOp == null) return false;
+
+            var rhsText = assignment.Right.ToFullString();
+
+            if (accessLhs is IdentifierNameSyntax id)
+            {
+                var name = id.Identifier.ValueText;
+                var t = ResolveMemberType(declaringType, name, includeStatic: false);
+                if (t == null) return false;
+                var typeArg = TypeRef(t);
+                var call = SyntaxFactory.ParseExpression(
+                    $"__set(\"{name}\", __get<{typeArg}>(\"{name}\") {binOp} ({rhsText}))");
+                replacements[assignment] = call.WithTriviaFrom(assignment);
+                notes.Add($"{name} ({assignment.OperatorToken.Text}) → __set/__get");
+                return true;
+            }
+
+            if (accessLhs is MemberAccessExpressionSyntax ma)
+            {
+                var memberName = ma.Name.Identifier.ValueText;
+                var lhsSymbol = model.GetSymbolInfo(ma.Expression).Symbol;
+                if (lhsSymbol is INamedTypeSymbol nts)
+                {
+                    var staticType = ResolveTypeFromSymbol(nts);
+                    if (staticType == null) return false;
+                    var t = ResolveMemberType(staticType, memberName, includeStatic: true, instanceOnly: false, staticOnly: true);
+                    if (t == null) return false;
+                    var typeArg = TypeRef(t);
+                    var typeRef = nts.ToDisplayString();
+                    var call = SyntaxFactory.ParseExpression(
+                        $"__setStatic(typeof({typeRef}), \"{memberName}\", __getStatic<{typeArg}>(typeof({typeRef}), \"{memberName}\") {binOp} ({rhsText}))");
+                    replacements[assignment] = call.WithTriviaFrom(assignment);
+                    notes.Add($"{nts.Name}.{memberName} (static {assignment.OperatorToken.Text}) → __setStatic/__getStatic");
+                    return true;
+                }
+
+                var lhsText = ma.Expression.ToFullString();
+                var lhsTypeInfo = model.GetTypeInfo(ma.Expression);
+                Type lhsType = ResolveTypeFromSymbol(lhsTypeInfo.Type);
+                Type memberT = lhsType != null
+                    ? ResolveMemberType(lhsType, memberName, includeStatic: true)
+                    : null;
+                string typeArg2 = memberT != null ? TypeRef(memberT) : "object";
+
+                var call2 = SyntaxFactory.ParseExpression(
+                    $"__setOn({lhsText}, \"{memberName}\", __getOn<{typeArg2}>({lhsText}, \"{memberName}\") {binOp} ({rhsText}))");
+                replacements[assignment] = call2.WithTriviaFrom(assignment);
+                notes.Add($"{lhsText.Trim()}.{memberName} ({assignment.OperatorToken.Text}) → __setOn/__getOn");
+                return true;
+            }
+
+            return false;
+        }
+
+        // ─── Increment context ─────────────────────────────────────
+        // `hp++` / `++hp` / `hp--` / `--hp` → set(hp, get(hp) ± 1).
+        // Statement-context increments are exact under this rewrite;
+        // expression-context postfix (`var x = hp++;`) is documented
+        // as Phase D's "edge case left for the user to spell with
+        // helpers" because preserving postfix semantics would require
+        // a temp.
+        private static bool TryStageIncrement(
+            ExpressionSyntax unaryNode,
+            ExpressionSyntax accessOperand,
+            SemanticModel model,
+            Type declaringType,
+            Dictionary<SyntaxNode, SyntaxNode> replacements,
+            List<string> notes)
+        {
+            string op =
+                unaryNode.IsKind(SyntaxKind.PreIncrementExpression)
+                    || unaryNode.IsKind(SyntaxKind.PostIncrementExpression)
+                ? "+" : "-";
+
+            if (accessOperand is IdentifierNameSyntax id)
+            {
+                var name = id.Identifier.ValueText;
+                var t = ResolveMemberType(declaringType, name, includeStatic: false);
+                if (t == null) return false;
+                var typeArg = TypeRef(t);
+                var call = SyntaxFactory.ParseExpression(
+                    $"__set(\"{name}\", __get<{typeArg}>(\"{name}\") {op} 1)");
+                replacements[unaryNode] = call.WithTriviaFrom(unaryNode);
+                notes.Add($"{name} ({(op == "+" ? "++" : "--")}) → __set/__get");
+                return true;
+            }
+
+            if (accessOperand is MemberAccessExpressionSyntax ma)
+            {
+                var memberName = ma.Name.Identifier.ValueText;
+                var lhsSymbol = model.GetSymbolInfo(ma.Expression).Symbol;
+                if (lhsSymbol is INamedTypeSymbol nts)
+                {
+                    var staticType = ResolveTypeFromSymbol(nts);
+                    if (staticType == null) return false;
+                    var t = ResolveMemberType(staticType, memberName, includeStatic: true, instanceOnly: false, staticOnly: true);
+                    if (t == null) return false;
+                    var typeArg = TypeRef(t);
+                    var typeRef = nts.ToDisplayString();
+                    var call = SyntaxFactory.ParseExpression(
+                        $"__setStatic(typeof({typeRef}), \"{memberName}\", __getStatic<{typeArg}>(typeof({typeRef}), \"{memberName}\") {op} 1)");
+                    replacements[unaryNode] = call.WithTriviaFrom(unaryNode);
+                    notes.Add($"{nts.Name}.{memberName} ({(op == "+" ? "++" : "--")} static) → __setStatic/__getStatic");
+                    return true;
+                }
+
+                var lhsText = ma.Expression.ToFullString();
+                var lhsTypeInfo = model.GetTypeInfo(ma.Expression);
+                Type lhsType = ResolveTypeFromSymbol(lhsTypeInfo.Type);
+                Type memberT = lhsType != null
+                    ? ResolveMemberType(lhsType, memberName, includeStatic: true)
+                    : null;
+                string typeArg2 = memberT != null ? TypeRef(memberT) : "object";
+
+                var call2 = SyntaxFactory.ParseExpression(
+                    $"__setOn({lhsText}, \"{memberName}\", __getOn<{typeArg2}>({lhsText}, \"{memberName}\") {op} 1)");
+                replacements[unaryNode] = call2.WithTriviaFrom(unaryNode);
+                notes.Add($"{lhsText.Trim()}.{memberName} ({(op == "+" ? "++" : "--")}) → __setOn/__getOn");
+                return true;
+            }
+
+            return false;
+        }
+
+        // ─── Invocation context ────────────────────────────────────
+        // `Foo(args)` (unqualified) → `__call<R>("Foo", args)`.
+        // `obj.PrivateMethod(args)` → `__callOn<R>(obj, "PrivateMethod", args)`.
+        // `Type.PrivateStatic(args)` → `__callStatic<R>(typeof(Type), "PrivateStatic", args)`.
+        // R is the method's return type if we can find a matching
+        // overload by name + arity (an exact arg-type match would
+        // require a SemanticModel-side reflection and we want this to
+        // work even when Roslyn couldn't bind anything). Falls back to
+        // `object` for void / unknown returns; that matches Phase A's
+        // existing __call<T> behavior of returning default(T) when the
+        // boxed result isn't assignable.
+        private static bool TryStageInvocation(
+            InvocationExpressionSyntax invocation,
+            ExpressionSyntax accessExpr,
+            SemanticModel model,
+            Type declaringType,
+            Dictionary<SyntaxNode, SyntaxNode> replacements,
+            List<string> notes)
+        {
+            var argsList = invocation.ArgumentList.Arguments;
+            int arity = argsList.Count;
+            var argsText = string.Join(", ", argsList.Select(a => a.ToFullString()));
+
+            if (accessExpr is IdentifierNameSyntax id)
+            {
+                var name = id.Identifier.ValueText;
+                var ret = FindMethodReturnType(declaringType, name, arity, includeStatic: false);
+                if (ret == null) return false;
+                var typeArg = TypeRef(ret);
+                var argsBlob = arity == 0 ? string.Empty : ", " + argsText;
+                var call = SyntaxFactory.ParseExpression($"__call<{typeArg}>(\"{name}\"{argsBlob})");
+                replacements[invocation] = call.WithTriviaFrom(invocation);
+                notes.Add($"{name}({arity} args) → __call");
+                return true;
+            }
+
+            if (accessExpr is MemberAccessExpressionSyntax ma)
+            {
+                var memberName = ma.Name.Identifier.ValueText;
+                var lhsSymbol = model.GetSymbolInfo(ma.Expression).Symbol;
+                if (lhsSymbol is INamedTypeSymbol nts)
+                {
+                    var staticType = ResolveTypeFromSymbol(nts);
+                    if (staticType == null) return false;
+                    var ret = FindMethodReturnType(staticType, memberName, arity, includeStatic: true, staticOnly: true);
+                    if (ret == null) return false;
+                    var typeArg = TypeRef(ret);
+                    var typeRef = nts.ToDisplayString();
+                    var argsBlob = arity == 0 ? string.Empty : ", " + argsText;
+                    var call = SyntaxFactory.ParseExpression(
+                        $"__callStatic<{typeArg}>(typeof({typeRef}), \"{memberName}\"{argsBlob})");
+                    replacements[invocation] = call.WithTriviaFrom(invocation);
+                    notes.Add($"{nts.Name}.{memberName}({arity} args) → __callStatic");
+                    return true;
+                }
+
+                var lhsText = ma.Expression.ToFullString();
+                var lhsTypeInfo = model.GetTypeInfo(ma.Expression);
+                Type lhsType = ResolveTypeFromSymbol(lhsTypeInfo.Type);
+                Type ret2 = lhsType != null
+                    ? FindMethodReturnType(lhsType, memberName, arity, includeStatic: false)
+                    : null;
+                string typeArg2 = ret2 != null ? TypeRef(ret2) : "object";
+                var argsBlob2 = arity == 0 ? string.Empty : ", " + argsText;
+                var call2 = SyntaxFactory.ParseExpression(
+                    $"__callOn<{typeArg2}>({lhsText}, \"{memberName}\"{argsBlob2})");
+                replacements[invocation] = call2.WithTriviaFrom(invocation);
+                notes.Add($"{lhsText.Trim()}.{memberName}({arity} args) → __callOn");
+                return true;
+            }
+
+            return false;
+        }
+
+        // Map `+=` etc. to the binary operator. Returns null for
+        // operators we don't expand (e.g., `??=` requires nullable
+        // semantics that don't survive a get/set round-trip without
+        // additional handling).
+        private static string CompoundOperator(SyntaxToken op)
+        {
+            switch (op.Kind())
+            {
+                case SyntaxKind.PlusEqualsToken:        return "+";
+                case SyntaxKind.MinusEqualsToken:       return "-";
+                case SyntaxKind.AsteriskEqualsToken:    return "*";
+                case SyntaxKind.SlashEqualsToken:       return "/";
+                case SyntaxKind.PercentEqualsToken:     return "%";
+                case SyntaxKind.AmpersandEqualsToken:   return "&";
+                case SyntaxKind.BarEqualsToken:         return "|";
+                case SyntaxKind.CaretEqualsToken:       return "^";
+                case SyntaxKind.LessThanLessThanEqualsToken:        return "<<";
+                case SyntaxKind.GreaterThanGreaterThanEqualsToken:  return ">>";
+                default: return null;
+            }
+        }
+
+        // Find a method by name + arg count and return its declared
+        // return type. Picks the first arity-matching overload — we
+        // can't bind by argument types statically here, so the helper
+        // does the runtime tie-breaking. This is good enough for the
+        // generic-arg decision; the helper itself re-resolves the
+        // overload at invoke time.
+        private static Type FindMethodReturnType(
+            Type t,
+            string name,
+            int arity,
+            bool includeStatic,
+            bool staticOnly = false)
+        {
+            BindingFlags bf = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.FlattenHierarchy;
+            if (!staticOnly) bf |= BindingFlags.Instance;
+            if (includeStatic || staticOnly) bf |= BindingFlags.Static;
+
+            foreach (var m in t.GetMethods(bf))
+            {
+                if (m.Name == name && m.GetParameters().Length == arity) return m.ReturnType;
+            }
+            return null;
         }
 
         // ─── Helpers ──────────────────────────────────────────────
