@@ -462,7 +462,27 @@ namespace RoslynRepl.Editor.Core
         {
             try
             {
-                return SimpleObjectSerializer.ToTree(value);
+                // Watches re-evaluate after every user Run. Walking
+                // properties of the returned object means user-defined
+                // getters fire on every refresh — and getters are
+                // usually where lazy-init, log spam, IO, or counter
+                // mutations live (`return ResolveOrCreate();`,
+                // `Profiler.MarkAccessed()`, etc.). One careless watch
+                // pinned to a `Manager.SomeProperty` row can multiply
+                // those side effects per Run × per row × per Editor
+                // session.
+                //
+                // Skip property walk for the watch tree only. The user
+                // *did* opt into evaluating the expression itself
+                // (which can hit one getter), but they didn't sign up
+                // for a recursive sweep of every property the result
+                // exposes. Output panel still walks properties because
+                // a user-driven `return X;` is a one-shot inspection,
+                // not a per-Run loop.
+                return SimpleObjectSerializer.ToTree(value, new SimpleObjectSerializer.Options
+                {
+                    IncludeProperties = false,
+                });
             }
             catch (Exception ex)
             {
