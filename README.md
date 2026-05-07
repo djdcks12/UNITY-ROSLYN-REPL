@@ -1,125 +1,521 @@
-# Roslyn REPL
+# Roslyn REPL for Unity
 
-Editor-only C# REPL for Unity. Compile and execute arbitrary C# code at runtime, inspect any MonoBehaviour / ScriptableObject / singleton in memory, and watch expressions live — all from a UI Toolkit window inside the Editor.
+An editor-only C# REPL window for Unity, powered by Roslyn.
 
-Powered by Roslyn (`Microsoft.CodeAnalysis.CSharp`). Zero project dependencies. Drop the package into any Unity 6 project and it works.
+Use this package as a practical Unity Editor console for C# investigation. Run snippets, inspect returned objects, keep reusable probes, track watch expressions, manage custom `using` directives, and browse common runtime/editor objects without adding runtime dependencies to the game.
 
-## Install
+## Feature Highlights
 
-Local UPM package. Either:
+- Roslyn-backed C# snippet execution from an EditorWindow.
+- Multiline code editor with line numbers, caret position, keyboard shortcuts, and compile-error gutter markers.
+- Captured `Debug.Log` output from the executed snippet.
+- Structured result rendering for objects, collections, dictionaries, Unity objects, and primitive values.
+- Object Browser for scene `MonoBehaviour` instances, loaded `ScriptableObject` instances, and singleton discovery.
+- Project-scoped snippet library with built-in default snippets.
+- Project-scoped run history.
+- Project-scoped custom `using` directives.
+- Watch panel for repeatedly evaluating expressions after each run.
+- Previous-result carry-over through `_`.
+- Cooperative cancellation through `ct`.
+- Setup verification and Roslyn DLL installer menu items.
 
-- Place this folder under `Packages/com.roslyn-repl/` of any Unity 6+ project, or
-- Add via Package Manager → "Add package from disk" → select `package.json`
+The package is editor-only and is designed for debugging, investigation, tool building, and quick one-off probes while working inside Unity.
 
-After import, run **Tools / Roslyn REPL / Install Roslyn DLLs** once (or run `Tools~/install-roslyn.ps1` manually) to download the bundled Roslyn binaries from NuGet into `Editor/Plugins/Roslyn/`. Then **Tools / Roslyn REPL / Open** to launch the window.
+## Requirements
 
-## Quick start
+- Unity 2022.3 or newer.
+- Windows, macOS, or Linux Unity Editor.
+- Internet access the first time you install the bundled Roslyn DLLs, unless you provide the DLLs manually.
 
-1. **Tools / Roslyn REPL / Open** — opens the window. The first time you open it, the editor is pre-filled with a one-line snippet that returns the Unity version. Press **F5** to run it.
-2. **Tools / Roslyn REPL / Import Default Snippets** — copies an 8-entry starter library (Unity version, scene info, time, memory snapshot, current Selection, …) into your project. They land in the **Snippets…** popup and are normal snippets from there on — edit, rename, delete freely.
-3. **Snippets… → Save current editor contents as…** — give your active code a name. From now on, the **Snippets…** popup holds it for one-click reload.
+The package does not require a runtime dependency in your game assemblies.
 
-## Window guide
+## Installation
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│ ▶ Run   Clear     Roslyn REPL    [duration]  EDIT  vX.Y  Verify Setup │
-│                                                  Snippets… History… Usings… │
-├──────────────┬──────────────────────────────────────────────────┤
-│              │ Code                                F5 / Ctrl+Enter │
-│              │ ┌─┬─────────────────────────────────────────────┐ │
-│   Browser    │ │1│ // gutter shows line numbers + error markers│ │
-│              │ │2│ return Manager.Instance.SomeValue;          │ │
-│  (Phase 3)   │ ├─┴─────────────────────────────────────────────┤ │
-│              │ │ Ln 1, Col 1                                   │ │
-│              ├──────────────────────────────────────────────────┤
-│              │ Output                                       OK │
-│              │ => 42                                            │
-│              │ [tree-view of complex results]                   │
-│              ├──────────────────────────────────────────────────┤
-│              │ Watch                       [+] expression…  + │
-│              │ Manager.Count    42                int       ✕ │
-│              │ Time.frameCount  120391            int       ✕ │
-└──────────────┴──────────────────────────────────────────────────┘
+### Option A: Put The Package In The Project
+
+Copy this package to:
+
+```text
+Packages/com.roslyn-repl/
 ```
 
-### Toolbar buttons
+Unity will detect the package through `package.json`.
 
-| Button | What it does |
-|---|---|
-| **▶ Run** | Compile + execute the editor contents. F5 / Ctrl+Enter do the same. |
-| **Clear** | Wipe the Output panel. Doesn't touch history or carry-over. |
-| **Snippets…** | Save / load / rename / delete named snippets. Per-project. |
-| **History…** | Last 50 runs (success or failure). Double-click to reload. |
-| **Usings…** | Edit the `using` namespaces injected at the top of every snippet. |
-| **Verify Setup** | Diagnose Roslyn assembly resolution (bundled vs Unity-shipped vs conflicting). |
+### Option B: Add From Disk
 
-### Side panels
+1. Open Unity Package Manager.
+2. Click `+`.
+3. Choose `Add package from disk...`.
+4. Select this package's `package.json`.
 
-- **Browser** (left) — discover live `MonoBehaviour`, `ScriptableObject`, and singleton instances by category + search. Double-click renders the instance into Output, equivalent to typing `return X;`.
-- **Watch** (lower right) — type an expression like `Manager.Instance.Count`, hit Enter. The panel re-evaluates every entry after each Run; rows whose value changed flash green for 1.5s.
+### Install Roslyn DLLs
 
-## Inside snippets
+After the package is present in Unity, install the Roslyn compiler DLLs once:
 
-The wrapper exposes a couple of accessors snippets can use unqualified:
+1. Open `Tools / Roslyn REPL / Install Roslyn DLLs`.
+2. Wait for the installer to download Roslyn 4.8.0 assemblies into `Editor/Plugins/Roslyn/`.
+3. Run `Tools / Roslyn REPL / Verify Setup`.
 
-- **`_`** — previous successful non-null result. Operators bind at runtime against the actual value (`return _ + 1;` after `return 41;` → 42). User locals like `int _ = 5;` shadow it cleanly inside their own scope.
-- **`ct`** — `CancellationToken` for the current snippet. Long loops should call `ct.ThrowIfCancellationRequested()` so the soft 5-second timeout (configurable via `ReplOptions.TimeoutMs`) can interrupt them.
+You can also run the script manually:
 
-## Keyboard shortcuts
+```powershell
+Tools~/install-roslyn.ps1
+```
 
-| Shortcut | Action |
-|---|---|
-| **F5** | Run |
-| **Ctrl + Enter** | Run |
-| **Enter** (in Snippets save / Watch add field) | Submit |
-| **Esc** (in Rename modal) | Cancel |
+The installer keeps compiler assemblies inside the package so the REPL can compile snippets without adding NuGetForUnity or project-wide package dependencies.
+
+## Quick Start
+
+1. Open `Tools / Roslyn REPL / Open`.
+2. Type:
+
+```csharp
+return UnityEngine.Application.unityVersion;
+```
+
+3. Press `Run`, `F5`, or `Ctrl+Enter`.
+4. Read the result in the Output panel.
+5. Open `Tools / Roslyn REPL / Import Default Snippets` to seed the snippet library.
+6. Click `Snippets` in the toolbar and load one of the built-in examples.
+
+For a log-only probe:
+
+```csharp
+Debug.Log("Hello from the REPL");
+```
+
+For a scene probe:
+
+```csharp
+return UnityEngine.Object.FindObjectsByType<UnityEngine.Camera>(
+    UnityEngine.FindObjectsSortMode.None);
+```
+
+For a multi-line investigation:
+
+```csharp
+var scene = UnityEngine.SceneManagement.SceneManager.GetActiveScene();
+var roots = scene.GetRootGameObjects();
+
+return roots.Select(go => new
+{
+    go.name,
+    childCount = go.transform.childCount
+}).ToArray();
+```
+
+## Window Guide
+
+Open the window from:
+
+```text
+Tools / Roslyn REPL / Open
+```
+
+The window is split into three main areas:
+
+- Left: Object Browser.
+- Center top: Code editor.
+- Center bottom: Output tree and Watch panel.
+
+### Toolbar
+
+- `Run`: executes the current editor contents.
+- `Clear`: clears the editor and output view.
+- `Snippets`: opens the snippet library popup.
+- `History`: opens the run history popup.
+- `Usings`: opens the custom usings popup.
+- `Verify Setup`: checks Roslyn assembly availability and common conflict conditions.
+- Duration label: shows the last execution time.
+- Mode badge: shows whether the Editor is in Edit Mode or Play Mode.
+- Version label: shows the package version.
+
+### Code Editor
+
+The editor supports multiline snippets. It shows:
+
+- line numbers,
+- current caret line and column,
+- compile-error markers,
+- compile-error tooltips,
+- persisted text while the Unity editor session stays alive.
+
+Shortcuts:
+
+- `F5`: run the current snippet.
+- `Ctrl+Enter`: run the current snippet.
+
+### Output
+
+The Output panel shows:
+
+- captured snippet logs,
+- compile diagnostics,
+- runtime exceptions,
+- cancellation warnings,
+- scalar return values,
+- expandable result trees for complex objects.
+
+Object results are rendered with three columns:
+
+- `Name`
+- `Type`
+- `Value`
+
+If a snippet only logs and does not return a value, the UI does not show a fake `=> null` result.
+
+## Writing Snippets
+
+Snippets are wrapped into a generated C# class and method before compilation. You can write normal C# statements:
+
+```csharp
+var selected = UnityEditor.Selection.activeObject;
+return selected != null ? selected.name : "Nothing selected";
+```
+
+Use `return` when you want a value rendered in the Output panel:
+
+```csharp
+return UnityEngine.Time.frameCount;
+```
+
+If no `return` statement is used, the snippet still runs, but the synthetic fallback result is hidden.
+
+### Available Helpers
+
+Two helper values are available inside snippets:
+
+- `_`: previous successful non-null result.
+- `ct`: cancellation token for cooperative cancellation.
+
+Example using `_`:
+
+```csharp
+return 41;
+```
+
+Then run:
+
+```csharp
+return _ + 1;
+```
+
+`_` is exposed as `dynamic`, so common REPL-style follow-up expressions work without a cast. It is updated only by successful returned values. Compile failures, runtime failures, cancellations, log-only snippets, null returns, and watch evaluations do not overwrite it.
+
+Example using `ct`:
+
+```csharp
+var count = 0;
+while (!ct.IsCancellationRequested)
+{
+    count++;
+    if (count > 100000)
+        break;
+}
+
+return count;
+```
+
+Snippet execution uses cooperative timeout handling. Code that never returns and never checks `ct` can still block the Editor.
+
+### Execution Context
+
+Snippets run on the Unity Editor main thread, so Unity API calls work the same way they do in normal editor scripts. For long loops or repeated work, check `ct` so cancellation can keep the Editor responsive.
+
+## Object Browser
+
+The Object Browser helps you locate objects without writing discovery code first.
+
+Categories:
+
+- `All`: scene `MonoBehaviour` instances and loaded `ScriptableObject` instances.
+- `MonoBehaviour`: scene `MonoBehaviour` instances only.
+- `ScriptableObject`: loaded `ScriptableObject` instances only.
+- `Singleton`: opt-in reflection scan for static singleton-like members.
+
+Use the filter box to search by display name or type name. Press the refresh button to rescan.
+
+Using the browser:
+
+- Press refresh when you want a fresh scan.
+- Select `Singleton` when you want to run the singleton scanner.
+- Result lists are capped to keep the window responsive.
+- Double-clicking a row renders that object in the Output tree.
+
+Singleton discovery looks for static fields/properties that can expose an instance related to the scanned type, including common base/interface-typed singleton patterns. Property getters are handled conservatively so browsing does not accidentally invoke expensive user code.
+
+## Snippet Library
+
+Open with:
+
+```text
+Toolbar / Snippets
+```
+
+The snippet popup lets you:
+
+- save the current editor contents as a named snippet,
+- load a saved snippet,
+- rename a snippet,
+- delete a snippet,
+- double-click a row to load it into the editor.
+
+Snippets are stored per Unity project through project-scoped `EditorPrefs`.
+
+### Default Snippets
+
+Import built-in examples from:
+
+```text
+Tools / Roslyn REPL / Import Default Snippets
+```
+
+The import is non-destructive:
+
+- snippets with new names are added,
+- snippets with existing names are skipped,
+- user-edited snippets are not overwritten.
+
+Included default snippets cover:
+
+- Unity version,
+- editor time and frame information,
+- active scene summary,
+- root GameObjects,
+- a singleton/object lookup starter,
+- memory snapshot,
+- current Unity selection,
+- previous-result carry-over with `_`.
+
+## Run History
+
+Open with:
+
+```text
+Toolbar / History
+```
+
+The history popup records recent runs so you can bring back a previous probe quickly.
+
+Behavior:
+
+- Stores up to 50 entries.
+- Stores successful runs, compile failures, runtime failures, and cancellations.
+- Skips duplicate consecutive snippets.
+- Refreshes while the history popup is open.
+- Double-clicking a row loads that snippet back into the editor.
+- `Clear` removes all saved history after confirmation.
+
+History is project-scoped through `EditorPrefs`.
+
+## Custom Usings
+
+Open with:
+
+```text
+Toolbar / Usings
+```
+
+Default usings:
+
+```csharp
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using UnityEngine;
+using UnityEditor;
+```
+
+The Usings popup lets you add project-specific namespaces. You may type either:
+
+```csharp
+MyGame.Runtime
+```
+
+or:
+
+```csharp
+using MyGame.Runtime;
+```
+
+The editor normalizes the entry, removes the leading `using`, removes the trailing semicolon, and skips duplicates.
+
+Custom usings are read fresh for every Run and Watch evaluation, so newly added namespaces are available immediately.
+
+Custom usings are stored per Unity project through project-scoped `EditorPrefs`, not globally across every Unity project on the same machine.
+
+## Watch Panel
+
+The Watch panel is the lower-right area of the main window.
+
+Use it to track expressions while repeatedly running snippets:
+
+```csharp
+UnityEditor.Selection.activeObject
+```
+
+or:
+
+```csharp
+return UnityEngine.Time.frameCount;
+```
+
+Behavior:
+
+- Press `Enter` or `+` to add a watch.
+- Expressions without `return` are automatically wrapped as `return <expr>;`.
+- Expressions starting with `return ` are used as written.
+- Watches are reevaluated after every Run.
+- Watches are reevaluated after add/remove.
+- Changed previews briefly flash green.
+- Failed watches show compile/runtime/cancel information.
+- Watch evaluations do not overwrite `_`.
+
+Watch expressions use a shorter timeout than normal runs so the panel remains responsive during normal use. Timeout is still cooperative.
+
+## Result Rendering
+
+Returned values are converted into a safe inspection tree where possible.
+
+Supported result shapes include:
+
+- primitive values,
+- strings,
+- enums,
+- arrays,
+- lists and other `IEnumerable` values,
+- dictionaries,
+- anonymous objects,
+- normal managed objects,
+- Unity objects,
+- destroyed Unity object references.
+
+The serializer applies depth and node caps so accidental large graphs do not overwhelm the Editor. Collection previews show the head of large sequences instead of expanding everything.
+
+Unity objects need special care because some Unity-owned properties can trigger native assertions or throw after destruction. The serializer handles destroyed Unity fake-null objects and avoids unsafe Unity-engine property walks while still surfacing user-defined fields and safe user-defined properties.
+
+## Persistence Model
+
+The following data is stored per Unity project:
+
+- snippets,
+- run history,
+- custom usings,
+- watch expressions.
+
+The storage uses `EditorPrefs` with a project discriminator based on the project path. This keeps one project's `MyGame.Runtime` using or snippets from leaking into another Unity project.
+
+Because this is `EditorPrefs` storage:
+
+- the data is local to the current machine/user,
+- it is not committed to source control,
+- moving the project to a different path can create a fresh project-scoped bucket.
 
 ## Menus
 
-- `Tools / Roslyn REPL / Open` — open the REPL window
-- `Tools / Roslyn REPL / Import Default Snippets` — add the 8 starter snippets to your project
-- `Tools / Roslyn REPL / Verify Setup` — diagnose Roslyn assembly resolution (shows whether bundled, Unity-shipped, or conflicting)
-- `Tools / Roslyn REPL / Install Roslyn DLLs` — re-fetch the bundled Roslyn 4.8.0 binaries from NuGet
+Main menus:
 
-## Compatibility
+```text
+Tools / Roslyn REPL / Open
+Tools / Roslyn REPL / Import Default Snippets
+Tools / Roslyn REPL / Verify Setup
+Tools / Roslyn REPL / Install Roslyn DLLs
+```
 
-- Unity 2022.3+ (recommended Unity 6 / 6000.x)
-- Editor-only (excluded from builds)
-- Mono BleedingEdge runtime (Editor default)
+Use `Verify Setup` when:
 
-## Conflict resolution
+- the REPL window cannot compile,
+- Unity reports duplicate `Microsoft.CodeAnalysis` assemblies,
+- another package also ships Roslyn DLLs,
+- the package has just been installed on a new machine.
 
-If another package (e.g. `com.ivanmurzak.unity.mcp`, `com.unity.code-analysis`, or a future Unity 6.5 built-in Roslyn) already ships `Microsoft.CodeAnalysis.dll`, Unity's `Validate References` will surface a duplicate-assembly error. Resolve by disabling one of the duplicate Plugin Importers (Inspector → uncheck Editor for the copy you want excluded). Run `Tools / Roslyn REPL / Verify Setup` to see exactly which copies are loaded and from where.
+## Roslyn DLLs And Conflict Resolution
 
-## Roadmap
+The REPL expects Roslyn assemblies under:
 
-Shipped:
+```text
+Editor/Plugins/Roslyn/
+```
 
-- **Phase 4 — UX polish**: line-number gutter + caret position indicator, compile-error gutter markers with hover tooltips, `Usings…` editor popup that persists user-added namespaces via `EditorPrefs`. *Inline syntax highlighting is intentionally not shipped — see "Known limitations" below.*
-- **Phase 5 — Persistence + variable continuity**: `_` carries the previous successful non-null result into the next snippet (`return _ + 1;`); auto-saved run history (`History…`) — last 50 entries, double-click to reload; named snippet library (`Snippets…`) with save / load / rename / delete and overwrite confirmation. All persistence is project-scoped via a shared `ProjectScopedPrefs` helper so different Unity projects don't share state.
-- **Phase 6 — Watch panel + soft cancellation**: in-window Watch panel below Output that auto-re-evaluates user expressions after every Run, with a green flash on rows whose preview changed; `ReplOptions.TimeoutMs` (default 5000ms) wires `CancellationTokenSource.CancelAfter`, and snippets observe the token via the new wrapper-class `ct` accessor (`for(...) { ct.ThrowIfCancellationRequested(); }`). Cancellation surfaces as a distinct `ReplResultKind.Cancelled` so the UI can render it as a warning instead of a runtime error. *`async / await` inside snippets is intentionally not shipped — see "Known limitations" below.*
-- **Phase 7 — Distribution (in this release)**: bundled `DefaultSnippets` library — 8 starter snippets one menu click away; expanded README with a quick-start, window guide, keyboard shortcuts, and troubleshooting.
+If Unity reports duplicate compiler assemblies, another package may also be shipping `Microsoft.CodeAnalysis` DLLs. Common sources include NuGetForUnity, analyzer packages, or another editor tooling package.
 
-Open:
+Recommended flow:
 
-- **OpenUPM registry submission**. The package metadata is in shape; submission is a separate yaml PR against the OpenUPM repo plus a tagged GitHub release. Held until distribution is the priority.
+1. Run `Tools / Roslyn REPL / Verify Setup`.
+2. Read the reported Roslyn assembly origins.
+3. Keep one Editor-compatible Roslyn set active.
+4. Disable duplicate Plugin Importer entries for Editor, or remove the duplicate package if it is not needed.
 
-## Known limitations
+Do not disable random DLLs blindly. Unity's assembly loading rules are global within the Editor, so duplicate compiler assemblies can cause confusing compile failures.
 
-- **No inline C# syntax highlighting in the code editor.** UI Toolkit's `TextField` renders its content with a single foreground color and offers no per-token color API; the only options are (a) lose editability by replacing the input with a `RichText`-rendered `Label` overlay, or (b) maintain a parallel non-editable highlight surface and keep it in sync with the live `TextField` on every keystroke. Both add substantial complexity for what amounts to a quality-of-life nicety in a snippet REPL — Roslyn diagnostics are already surfaced in the gutter (Phase 4) and in the output panel — so true highlighting stays out for now. If a future Unity release exposes a richer text-input element, this can be revisited.
-- **No `async` / `await` inside snippets.** The naive implementation (wrapper signature → `Task<object>`, `GetAwaiter().GetResult()` on the Editor main thread) deadlocks on every realistic await: most Unity continuations post back to the same main thread the engine is blocking, so the continuation never runs. Doing it correctly would require pumping `Execute` on `EditorApplication.update` with the entire UI rebuilt around per-frame callbacks (different return contract, different result rendering, different Watch integration). The cost is far above the value for a snippet REPL whose 95% case is synchronous inspection — `return Manager.Instance.Count;`, `return list.Where(...).Sum();`, etc. If a snippet really needs to observe an async result, run the work on `Task.Run` and surface a sentinel via `Debug.Log` or the `_` carry-over.
-- **No hard kill of a synchronous snippet.** Phase 6 ships soft cancellation: snippets can call `ct.ThrowIfCancellationRequested()` inside long loops, and `ReplOptions.TimeoutMs` (default 5000ms) automatically cancels the token. But code that *doesn't* check `ct` — most notably `while (true) { … }` with no `ct` access — still hangs the Editor main thread until process kill. `Thread.Abort` is unavailable on Mono / .NET 6+ and the snippet runs on the same thread the engine is invoked from, so there's no safe way to forcibly stop a non-cooperative loop. Treat the timeout as a courtesy, not a guarantee, and write Run-style snippets with `ct` awareness when you don't trust the body.
+## Project Behavior
+
+- Unity 2022.3+ is the supported target.
+- The tool is editor-only.
+- Snippets run on the Editor main thread.
+- Play Mode is supported. Treat snippets as live editor commands because they can read or mutate active game state.
+- Logs from the generated snippet are captured; unrelated background Play Mode logs are filtered out when possible.
+- The package is designed to avoid runtime player builds.
 
 ## Troubleshooting
 
-- **"The window is empty / shows a fallback message about UXML."** Run `Tools / Roslyn REPL / Verify Setup` and check that the package was imported correctly. The window loads its UXML / USS from `Packages/com.roslyn-repl/Editor/UI/Layouts/`; if those paths don't resolve, the package didn't import as expected.
-- **"My snippet says CS0103 but it works elsewhere."** The snippet runs in a fresh class with a fixed default `using` set (`System`, `System.Collections.Generic`, `System.Linq`, `UnityEngine`, `UnityEditor`). Add anything else through **Usings…**, or qualify the type fully (`MyGame.Manager.Whatever`).
-- **"`return _ + 1;` worked yesterday and now CS-something."** `_` carries the previous *successful, non-null* result. After a Compile error, Cancelled run, or `Debug.Log`-only snippet, `_` keeps its earlier value — but if the editor reloaded its assemblies (entered Play Mode and back, or recompiled scripts), `_` resets to `null`. Run a value-returning snippet to repopulate.
-- **"Editor froze when I ran a `while(true)` snippet."** The soft cancellation in Phase 6 needs the snippet to cooperate — it observes `ct.ThrowIfCancellationRequested()` inside the loop. Code that doesn't check `ct` runs on the Editor main thread with no available hard kill (see "Known limitations" below); kill the Editor process if it gets there. Future versions of the loop should use `for (long i = 0; i < N; i++) { if ((i & 0xFFFF) == 0) ct.ThrowIfCancellationRequested(); … }`.
-- **"Watch panel shows `<compile error>` for one row."** Each watch compiles independently and surfaces its own diagnostic in the row tooltip. Hover the value cell for the message; fix the expression in the add field and re-add.
-- **"After installing another package the REPL stops compiling."** Most likely a duplicate Roslyn assembly conflict — e.g. NuGetForUnity also shipped `Microsoft.CodeAnalysis.dll`. Run **Verify Setup** to see which copies are loaded; uncheck Editor in the Plugin Importer for the duplicate you don't want.
+### The REPL Window Opens But Compilation Fails
+
+Run:
+
+```text
+Tools / Roslyn REPL / Verify Setup
+```
+
+If Roslyn DLLs are missing, run:
+
+```text
+Tools / Roslyn REPL / Install Roslyn DLLs
+```
+
+### Unity Reports Duplicate Microsoft.CodeAnalysis Assemblies
+
+Another package probably includes Roslyn. Use `Verify Setup` to identify origins, then keep one Editor-compatible Roslyn copy active.
+
+### My Custom Namespace Is Not Found
+
+Open `Usings`, add the namespace without the `using` keyword, and run again.
+
+Example:
+
+```text
+MyGame.Runtime
+```
+
+If the namespace still fails, confirm the assembly containing that namespace is compiled for the Editor and referenced by the current project.
+
+### The Editor Freezes During A Snippet
+
+The snippet may be doing long-running work on the main thread. Add cancellation checks:
+
+```csharp
+while (!ct.IsCancellationRequested)
+{
+    // work
+}
+```
+
+Avoid blocking waits, unbounded loops, and heavy reflection scans in snippets.
+
+### A Watch Expression Keeps Failing
+
+Open the Watch panel tooltip or output message and check whether it is a compile error, runtime exception, or timeout. Watches are normal snippets under the hood, so the same namespace and main-thread rules apply.
+
+### Object Browser Does Not Show A Singleton
+
+Switch the category to `Singleton` and press refresh. The `All` category avoids singleton scanning by design.
+
+If the singleton still does not appear, check that the instance is loaded and exposed through a static field/property pattern that the browser can inspect safely.
+
+### Default Snippets Did Not Overwrite My Edits
+
+That is expected. Default snippet import is non-destructive. Delete or rename the existing snippet first if you want to re-import the built-in version.
 
 ## License
 
-MIT for this package. Bundled Roslyn DLLs are MIT-licensed by Microsoft (see `Editor/Plugins/Roslyn/THIRD_PARTY_NOTICES.md` after install).
+MIT for this package. Installed Roslyn DLLs are MIT-licensed by Microsoft; see `Editor/Plugins/Roslyn/THIRD_PARTY_NOTICES.md` after installation.
