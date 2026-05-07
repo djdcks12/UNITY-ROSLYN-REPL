@@ -32,6 +32,20 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
         private Label _statusLabel;
         private VisualElement _activeListContainer;
 
+        // Phase C bridge: Pull Original drops the source body into the
+        // editor, but the user then edits it before Apply. To keep
+        // spec.OriginalBody (the unedited snapshot Phase E will diff
+        // against) accurate, remember the last successful pull keyed
+        // by the form's identity at pull time. If the form still
+        // matches that key when Apply runs, the snapshot ships into
+        // the spec; if the form drifted (user changed Type / Method /
+        // Params, picked a different method via Browse, etc.) the
+        // snapshot is stale and we leave OriginalBody empty rather
+        // than persist a body that doesn't belong to the target
+        // method.
+        private string _lastPulledKey;
+        private string _lastPulledOriginal;
+
         public MethodPatchView(VisualElement host)
         {
             _host = host ?? throw new ArgumentNullException(nameof(host));
@@ -54,46 +68,117 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
 
         private void BuildLayout()
         {
+            // Layout philosophy after the "outer scroll feels weird"
+            // feedback: the host pane has its own boundaries, so don't
+            // wrap the whole view in a ScrollView (that moves form +
+            // body + list together when the user just wants to scroll
+            // the body text). Instead lay out form / body / actions /
+            // list as a flex column, with two specific elements that
+            // *do* scroll on their own:
+            //   • body field: multiline TextField inside a vertical
+            //     ScrollView so long edits scroll inside the editor
+            //     while the form/actions/list stay anchored.
+            //   • active patches list: its own vertical ScrollView at
+            //     the bottom, fixed height, so a long list doesn't
+            //     push the body off-screen.
             _host.Clear();
             _host.AddToClassList("rr-patch-view");
+            _host.style.flexDirection = FlexDirection.Column;
+            _host.style.flexGrow = 1;
             _host.style.paddingLeft = 6;
             _host.style.paddingRight = 6;
             _host.style.paddingTop = 4;
             _host.style.paddingBottom = 4;
-            _host.style.flexDirection = FlexDirection.Column;
 
-            var subtitle = new Label("Phase A MVP — redirect a void instance method's calls to a runtime-compiled body. Reverts cleanly. Survives until next domain reload.");
-            subtitle.style.color = new StyleColor(new Color(0.55f, 0.55f, 0.55f));
-            subtitle.style.fontSize = 10;
-            subtitle.style.whiteSpace = WhiteSpace.Normal;
-            subtitle.style.marginBottom = 4;
-            _host.Add(subtitle);
+            // Compact form row: Target / Method / Parameter types in
+            // one horizontal line. Saves ~3× the vertical space the
+            // stacked TextFields used to take.
+            var formRow = new VisualElement();
+            formRow.style.flexDirection = FlexDirection.Row;
+            formRow.style.alignItems = Align.Center;
+            formRow.style.marginBottom = 4;
+            formRow.style.flexShrink = 0;
 
-            _targetField = new TextField("Target type") { tooltip = "Full type name including namespace, e.g. MyGame.GameManager" };
-            _methodField = new TextField("Method name") { tooltip = "Method to redirect — must be a void instance method" };
-            _paramsField = new TextField("Parameter types") { tooltip = "Comma-joined full type names. Empty = no parameters. Example: System.Int32,System.String" };
-            _host.Add(_targetField);
-            _host.Add(_methodField);
-            _host.Add(_paramsField);
+            _targetField = new TextField("Type") { tooltip = "Full type name including namespace, e.g. MyGame.GameManager" };
+            _targetField.style.flexGrow = 2;
+            _targetField.style.marginRight = 4;
+            formRow.Add(_targetField);
+
+            _methodField = new TextField("Method") { tooltip = "Method to redirect — must be a void instance method" };
+            _methodField.style.flexGrow = 1;
+            _methodField.style.marginRight = 4;
+            formRow.Add(_methodField);
+
+            _paramsField = new TextField("Params") { tooltip = "Comma-joined full type names. Empty = no parameters. Example: System.Int32,System.String" };
+            _paramsField.style.flexGrow = 1;
+            _paramsField.style.marginRight = 4;
+            formRow.Add(_paramsField);
+
+            // Browse Methods — open a popup that lists every patchable
+            // method on the current Type, click to fill Method/Params.
+            // Saves users from typing exact method signatures with
+            // overload-disambiguating parameter type lists.
+            var browseBtn = new Button(OnBrowseMethodsClicked) { text = "Browse" };
+            browseBtn.tooltip =
+                "List patchable methods on the current target type and fill\n" +
+                "Method + Params from the chosen one. Type field must be set.";
+            browseBtn.style.minWidth = 70;
+            formRow.Add(browseBtn);
+
+            _host.Add(formRow);
+
+            // Body header — Pull Original on the right.
+            var bodyHeader = new VisualElement();
+            bodyHeader.style.flexDirection = FlexDirection.Row;
+            bodyHeader.style.alignItems = Align.Center;
+            bodyHeader.style.marginTop = 2;
+            bodyHeader.style.marginBottom = 1;
+            bodyHeader.style.flexShrink = 0;
 
             var bodyLabel = new Label("Patch body");
-            bodyLabel.style.marginTop = 4;
-            bodyLabel.style.marginBottom = 1;
             bodyLabel.style.fontSize = 10;
+            bodyLabel.style.flexGrow = 1;
             bodyLabel.style.color = new StyleColor(new Color(0.7f, 0.7f, 0.7f));
-            _host.Add(bodyLabel);
+            bodyHeader.Add(bodyLabel);
+
+            var pullBtn = new Button(OnPullOriginalClicked) { text = "Pull Original" };
+            pullBtn.style.fontSize = 10;
+            pullBtn.tooltip =
+                "Locate the target method's .cs source and copy its body into the editor.\n" +
+                "Use as the starting point for an in-place edit. Phase C MVP: void instance methods,\n" +
+                "block bodies (`{ … }`), source must live in Assets/ or Packages/.";
+            bodyHeader.Add(pullBtn);
+            _host.Add(bodyHeader);
+
+            // Body editor: TextField inside a vertical ScrollView. The
+            // TextField itself doesn't constrain height, so a long
+            // patch body extends inside the ScrollView and the user
+            // scrolls *inside the editor* without the rest of the
+            // view moving. flex-grow=1 on the ScrollView absorbs the
+            // leftover pane height.
+            var bodyScroll = new ScrollView(ScrollViewMode.Vertical);
+            bodyScroll.style.flexGrow = 1;
+            bodyScroll.style.minHeight = 140;
+            bodyScroll.style.backgroundColor = new StyleColor(new Color(0.14f, 0.14f, 0.14f));
 
             _bodyField = new TextField { multiline = true, value = DefaultBody };
-            _bodyField.style.minHeight = 110;
-            _bodyField.style.flexGrow = 0;
             _bodyField.style.whiteSpace = WhiteSpace.Normal;
-            _host.Add(_bodyField);
+            _bodyField.style.flexGrow = 1;
+            // No explicit height — let the inner content drive it so
+            // the parent ScrollView is the one that scrolls. Some
+            // platforms cap unbounded TextField height at zero, so
+            // give it a sane minimum.
+            _bodyField.style.minHeight = 200;
+            bodyScroll.Add(_bodyField);
+            _host.Add(bodyScroll);
 
+            // Actions + status. Single row, doesn't scroll.
             var actionRow = new VisualElement();
             actionRow.style.flexDirection = FlexDirection.Row;
             actionRow.style.alignItems = Align.Center;
             actionRow.style.marginTop = 4;
             actionRow.style.marginBottom = 4;
+            actionRow.style.flexShrink = 0;
 
             var applyBtn = new Button(OnApplyClicked) { text = "Apply Patch" };
             applyBtn.style.marginRight = 4;
@@ -113,6 +198,8 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             _statusLabel = new Label("Status: idle");
             _statusLabel.style.color = new StyleColor(new Color(0.65f, 0.65f, 0.65f));
             _statusLabel.style.fontSize = 11;
+            _statusLabel.style.whiteSpace = WhiteSpace.Normal;
+            _statusLabel.style.flexShrink = 1;
             actionRow.Add(_statusLabel);
 
             _host.Add(actionRow);
@@ -123,18 +210,138 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             listTitle.style.fontSize = 10;
             listTitle.style.marginTop = 2;
             listTitle.style.marginBottom = 1;
+            listTitle.style.flexShrink = 0;
             _host.Add(listTitle);
 
-            var scroll = new ScrollView(ScrollViewMode.Vertical);
-            scroll.style.flexGrow = 1;
-            scroll.style.minHeight = 60;
-            scroll.style.backgroundColor = new StyleColor(new Color(0.14f, 0.14f, 0.14f));
+            // Active patches: own vertical ScrollView with a fixed
+            // max-height share so a long list doesn't push the body
+            // editor offscreen. flex-shrink=0 so the column layout
+            // doesn't squeeze it to zero when the body is large.
+            var listScroll = new ScrollView(ScrollViewMode.Vertical);
+            listScroll.style.flexShrink = 0;
+            listScroll.style.minHeight = 80;
+            listScroll.style.maxHeight = 160;
+            listScroll.style.backgroundColor = new StyleColor(new Color(0.14f, 0.14f, 0.14f));
 
             _activeListContainer = new VisualElement();
-            scroll.Add(_activeListContainer);
-            _host.Add(scroll);
+            listScroll.Add(_activeListContainer);
+            _host.Add(listScroll);
 
             RebuildActiveList();
+        }
+
+        private void OnBrowseMethodsClicked()
+        {
+            var typeName = _targetField.value?.Trim() ?? string.Empty;
+            if (string.IsNullOrEmpty(typeName))
+            {
+                SetStatus("Type is required to browse methods.", error: true);
+                return;
+            }
+
+            // Reuse the engine's resolver so type discovery rules (full
+            // AppDomain walk, namespace handling) match Apply / Pull.
+            var type = ResolveTypeByName(typeName);
+            if (type == null)
+            {
+                SetStatus($"Type not found: {typeName}", error: true);
+                return;
+            }
+
+            MethodPickerPopup.Open(type, picked =>
+            {
+                if (picked == null) return;
+                FillFormFromMethod(picked);
+                SetStatus($"Picked: {picked.DeclaringType?.Name}.{picked.Name}", error: false);
+            });
+        }
+
+        public void FillFormFromMethod(System.Reflection.MethodInfo method)
+        {
+            if (method == null) return;
+            var declType = method.DeclaringType;
+            if (declType != null) _targetField.SetValueWithoutNotify(declType.FullName ?? declType.Name);
+            _methodField.SetValueWithoutNotify(method.Name);
+            var ps = method.GetParameters();
+            _paramsField.SetValueWithoutNotify(ps.Length == 0
+                ? string.Empty
+                : string.Join(",", ps.Select(p => p.ParameterType.FullName ?? p.ParameterType.Name)));
+
+            // Form just got rewritten to a different method — any
+            // previous Pull's snapshot belongs to the *old* form
+            // identity, so drop it. The user can hit Pull Original
+            // again to refresh against the new method.
+            _lastPulledKey = null;
+            _lastPulledOriginal = null;
+        }
+
+        private static System.Type ResolveTypeByName(string fullName)
+        {
+            var direct = System.Type.GetType(fullName, throwOnError: false);
+            if (direct != null) return direct;
+            foreach (var asm in System.AppDomain.CurrentDomain.GetAssemblies())
+            {
+                var t = asm.GetType(fullName, throwOnError: false);
+                if (t != null) return t;
+            }
+            return null;
+        }
+
+        private void OnPullOriginalClicked()
+        {
+            var spec = new MethodPatchSpec
+            {
+                TargetTypeName = _targetField.value?.Trim() ?? string.Empty,
+                MethodName     = _methodField.value?.Trim() ?? string.Empty,
+                ParameterTypes = _paramsField.value?.Trim() ?? string.Empty,
+            };
+            if (string.IsNullOrEmpty(spec.TargetTypeName) || string.IsNullOrEmpty(spec.MethodName))
+            {
+                SetStatus("Target type and method name are required to pull source.", error: true);
+                return;
+            }
+
+            var method = PatchEngine.TryResolveTargetMethod(spec, out var resolveErr);
+            if (method == null)
+            {
+                SetStatus($"Pull failed — {resolveErr}", error: true);
+                return;
+            }
+
+            var pulled = PatchSourcePuller.TryPullMethodBody(method);
+            if (!pulled.Success)
+            {
+                SetStatus($"Pull failed — {pulled.Error}", error: true);
+                return;
+            }
+
+            // Don't silently overwrite a non-default body — the user may
+            // already be mid-edit. The default starter snippet is
+            // recognizable; anything else gets a confirm dialog. (No
+            // Editor dialog support inside ShowUtility-style panels?
+            // EditorUtility.DisplayDialog works from the main editor
+            // window's context, which is where this view lives.)
+            bool currentIsDefault = string.IsNullOrEmpty(_bodyField.value)
+                                 || _bodyField.value == DefaultBody
+                                 || _bodyField.value.TrimStart().StartsWith("// Phase A MVP scope: void instance methods.");
+            if (!currentIsDefault)
+            {
+                bool overwrite = UnityEditor.EditorUtility.DisplayDialog(
+                    "Pull Original",
+                    "The patch body is non-empty. Overwrite it with the original method body from " + pulled.SourcePath + "?",
+                    "Overwrite",
+                    "Cancel");
+                if (!overwrite) { SetStatus("Pull cancelled — body unchanged.", error: false); return; }
+            }
+
+            _bodyField.SetValueWithoutNotify(pulled.Body);
+            // Remember the snapshot keyed by *this* form so the next
+            // Apply can ship it into spec.OriginalBody even after the
+            // user edits the body. Stale on Type/Method/Params change
+            // — handled in FillFormFromMethod / LoadIntoForm.
+            _lastPulledKey = MethodPatchSpec.Keyed(spec.TargetTypeName, spec.MethodName, spec.ParameterTypes);
+            _lastPulledOriginal = pulled.Body;
+            SetStatus($"Pulled from {pulled.SourcePath} ({pulled.Body?.Length ?? 0} chars).", error: false);
         }
 
         public void LoadIntoForm(MethodPatchSpec spec)
@@ -144,6 +351,23 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             _methodField.SetValueWithoutNotify(spec.MethodName);
             _paramsField.SetValueWithoutNotify(spec.ParameterTypes ?? string.Empty);
             _bodyField.SetValueWithoutNotify(spec.PatchBody ?? string.Empty);
+
+            // Restore the OriginalBody snapshot so a subsequent Apply
+            // re-persists it. The previous flow lost the snapshot the
+            // moment the user clicked Load on a stored spec — Pull's
+            // first run was permanent state, but every subsequent
+            // round-trip dropped it.
+            if (!string.IsNullOrEmpty(spec.OriginalBody))
+            {
+                _lastPulledKey = spec.Key;
+                _lastPulledOriginal = spec.OriginalBody;
+            }
+            else
+            {
+                _lastPulledKey = null;
+                _lastPulledOriginal = null;
+            }
+
             UpdateStatusForCurrentForm();
         }
 
@@ -161,6 +385,20 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             {
                 SetStatus("Target type and method name are required.", error: true);
                 return;
+            }
+
+            // Carry the most recent Pull's snapshot into the spec when
+            // it still belongs to *this* form identity. Stale snapshots
+            // (form changed since the last Pull) are dropped instead of
+            // persisted against the wrong target. Phase E will diff
+            // OriginalBody against PatchBody to surface the user's
+            // actual edits; without this hook the diff would always be
+            // "the entire patch body is new", which is wrong.
+            if (!string.IsNullOrEmpty(_lastPulledKey)
+                && _lastPulledKey == spec.Key
+                && _lastPulledOriginal != null)
+            {
+                spec.OriginalBody = _lastPulledOriginal;
             }
 
             try
