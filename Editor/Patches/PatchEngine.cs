@@ -337,11 +337,113 @@ namespace RoslynRepl.Editor.Patches
             sb.AppendLine("        T __call<T>(string name, params object[] args)");
             sb.AppendLine("        {");
             sb.AppendLine($"            var __t = __instance != null ? __instance.GetType() : typeof({declType});");
-            sb.AppendLine("            var __bf = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.FlattenHierarchy;");
-            sb.AppendLine("            var __m = __t.GetMethod(name, __bf);");
-            sb.AppendLine("            if (__m == null) throw new System.InvalidOperationException(\"Member '\" + name + \"' not found on \" + __t.Name);");
-            sb.AppendLine("            var __r = __m.Invoke(__instance, args);");
+            sb.AppendLine("            var __r = __InvokeReflective(__t, __instance, name, args);");
             sb.AppendLine("            return __r is T __cast ? __cast : default;");
+            sb.AppendLine("        }");
+
+            // ─── Phase D helpers: same shape as the originals but
+            // parameterized over the target type / instance, so the
+            // syntax rewriter can redirect inaccessible member access
+            // through them no matter where the symbol lives:
+            //   • __getOn / __setOn / __callOn — instance reflection on
+            //     an arbitrary `target` object (covers `singleton.X`,
+            //     `someField.PrivateMember`, etc.).
+            //   • __getStatic / __setStatic / __callStatic — static
+            //     reflection on an arbitrary `Type` (covers
+            //     `SomeClass.PrivateStatic`, `Type.PrivateStaticMethod()`).
+            //
+            // Phase A's original `__get<T>` / `__set` / `__call<T>` keep
+            // their signatures so existing patches written against the
+            // documented helpers still compile unchanged.
+            sb.AppendLine();
+            sb.AppendLine("        T __getOn<T>(object target, string name)");
+            sb.AppendLine("        {");
+            sb.AppendLine("            if (target == null) throw new System.ArgumentNullException(nameof(target));");
+            sb.AppendLine("            var __t = target.GetType();");
+            sb.AppendLine("            var __bf = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.FlattenHierarchy;");
+            sb.AppendLine("            var __f = __t.GetField(name, __bf);");
+            sb.AppendLine("            if (__f != null) return (T)__f.GetValue(target);");
+            sb.AppendLine("            var __p = __t.GetProperty(name, __bf);");
+            sb.AppendLine("            if (__p != null) return (T)__p.GetValue(target);");
+            sb.AppendLine("            throw new System.InvalidOperationException(\"Member '\" + name + \"' not found on \" + __t.Name);");
+            sb.AppendLine("        }");
+
+            sb.AppendLine("        void __setOn(object target, string name, object value)");
+            sb.AppendLine("        {");
+            sb.AppendLine("            if (target == null) throw new System.ArgumentNullException(nameof(target));");
+            sb.AppendLine("            var __t = target.GetType();");
+            sb.AppendLine("            var __bf = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.FlattenHierarchy;");
+            sb.AppendLine("            var __f = __t.GetField(name, __bf);");
+            sb.AppendLine("            if (__f != null) { __f.SetValue(target, value); return; }");
+            sb.AppendLine("            var __p = __t.GetProperty(name, __bf);");
+            sb.AppendLine("            if (__p != null) { __p.SetValue(target, value); return; }");
+            sb.AppendLine("            throw new System.InvalidOperationException(\"Member '\" + name + \"' not found on \" + __t.Name);");
+            sb.AppendLine("        }");
+
+            sb.AppendLine("        T __callOn<T>(object target, string name, params object[] args)");
+            sb.AppendLine("        {");
+            sb.AppendLine("            if (target == null) throw new System.ArgumentNullException(nameof(target));");
+            sb.AppendLine("            var __r = __InvokeReflective(target.GetType(), target, name, args);");
+            sb.AppendLine("            return __r is T __cast ? __cast : default;");
+            sb.AppendLine("        }");
+
+            sb.AppendLine("        T __getStatic<T>(System.Type type, string name)");
+            sb.AppendLine("        {");
+            sb.AppendLine("            if (type == null) throw new System.ArgumentNullException(nameof(type));");
+            sb.AppendLine("            var __bf = System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.FlattenHierarchy;");
+            sb.AppendLine("            var __f = type.GetField(name, __bf);");
+            sb.AppendLine("            if (__f != null) return (T)__f.GetValue(null);");
+            sb.AppendLine("            var __p = type.GetProperty(name, __bf);");
+            sb.AppendLine("            if (__p != null) return (T)__p.GetValue(null);");
+            sb.AppendLine("            throw new System.InvalidOperationException(\"Static member '\" + name + \"' not found on \" + type.Name);");
+            sb.AppendLine("        }");
+
+            sb.AppendLine("        void __setStatic(System.Type type, string name, object value)");
+            sb.AppendLine("        {");
+            sb.AppendLine("            if (type == null) throw new System.ArgumentNullException(nameof(type));");
+            sb.AppendLine("            var __bf = System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.FlattenHierarchy;");
+            sb.AppendLine("            var __f = type.GetField(name, __bf);");
+            sb.AppendLine("            if (__f != null) { __f.SetValue(null, value); return; }");
+            sb.AppendLine("            var __p = type.GetProperty(name, __bf);");
+            sb.AppendLine("            if (__p != null) { __p.SetValue(null, value); return; }");
+            sb.AppendLine("            throw new System.InvalidOperationException(\"Static member '\" + name + \"' not found on \" + type.Name);");
+            sb.AppendLine("        }");
+
+            sb.AppendLine("        T __callStatic<T>(System.Type type, string name, params object[] args)");
+            sb.AppendLine("        {");
+            sb.AppendLine("            if (type == null) throw new System.ArgumentNullException(nameof(type));");
+            sb.AppendLine("            var __r = __InvokeReflective(type, null, name, args);");
+            sb.AppendLine("            return __r is T __cast ? __cast : default;");
+            sb.AppendLine("        }");
+
+            // Shared invoke pipeline for __call / __callOn / __callStatic.
+            // Picks an overload by argument count first (so user code with
+            // params doesn't accidentally bind to a different-arity
+            // method), then narrows by argument types when more than one
+            // candidate remains. Returns the boxed result; the caller
+            // unboxes via (T) cast — `null` round-trips as `default(T)`
+            // for value types, which matches the pattern Phase A used.
+            sb.AppendLine("        object __InvokeReflective(System.Type type, object instance, string name, object[] args)");
+            sb.AppendLine("        {");
+            sb.AppendLine("            var __bf = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.FlattenHierarchy;");
+            sb.AppendLine("            args = args ?? new object[0];");
+            sb.AppendLine("            var __ms = new System.Collections.Generic.List<System.Reflection.MethodInfo>();");
+            sb.AppendLine("            foreach (var __mm in type.GetMethods(__bf))");
+            sb.AppendLine("            {");
+            sb.AppendLine("                if (__mm.Name != name) continue;");
+            sb.AppendLine("                if (__mm.GetParameters().Length != args.Length) continue;");
+            sb.AppendLine("                __ms.Add(__mm);");
+            sb.AppendLine("            }");
+            sb.AppendLine("            if (__ms.Count == 0) throw new System.InvalidOperationException(\"Method '\" + name + \"(\" + args.Length + \" args)' not found on \" + type.Name);");
+            sb.AppendLine("            System.Reflection.MethodInfo __m;");
+            sb.AppendLine("            if (__ms.Count == 1) { __m = __ms[0]; }");
+            sb.AppendLine("            else");
+            sb.AppendLine("            {");
+            sb.AppendLine("                var __argTypes = new System.Type[args.Length];");
+            sb.AppendLine("                for (int __i = 0; __i < args.Length; __i++) __argTypes[__i] = args[__i] == null ? typeof(object) : args[__i].GetType();");
+            sb.AppendLine("                __m = type.GetMethod(name, __bf, null, __argTypes, null) ?? __ms[0];");
+            sb.AppendLine("            }");
+            sb.AppendLine("            return __m.Invoke(instance, args);");
             sb.AppendLine("        }");
 
             sb.AppendLine();
