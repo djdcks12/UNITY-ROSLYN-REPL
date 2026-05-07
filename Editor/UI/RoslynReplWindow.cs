@@ -64,35 +64,59 @@ return UnityEngine.Application.unityVersion;";
             int historyCount = RunHistoryStore.Load().Count;
             int watchCount   = WatchStore.Load().Count;
             int usingsCount  = UsingsStore.LoadCustom().Count;
-            int total = snippetCount + historyCount + watchCount + usingsCount;
+            int storeTotal = snippetCount + historyCount + watchCount + usingsCount;
 
-            if (total == 0)
+            // Phase 11 PR fix: the persistent stores aren't the only
+            // surface that can hold sensitive data. A user who only ran
+            // a single ad-hoc snippet and never saved it will have
+            // storeTotal=0 but a non-null `_` and a result rendered
+            // into Output — exactly the case Reset is supposed to
+            // cover. Pull both into the scope check so the early-return
+            // doesn't lie to the user about there being nothing to wipe.
+            bool hasCarryOver = ReplEngine.LastResult != null;
+            var openWindows = Resources.FindObjectsOfTypeAll<RoslynReplWindow>();
+            int dirtyOutputs = 0;
+            foreach (var w in openWindows)
+                if (w != null && w.HasInspectableOutput()) dirtyOutputs++;
+
+            if (storeTotal == 0 && !hasCarryOver && dirtyOutputs == 0)
             {
                 EditorUtility.DisplayDialog(
                     "Roslyn REPL — Reset Project Data",
-                    "Nothing to clear — all four stores are already empty for this project.",
+                    "Nothing to clear — all four stores are empty, no `_` carry-over is set, and no Output panel has run results to wipe.",
                     "OK");
                 return;
             }
 
-            string detail =
-                $"This will permanently delete the REPL data for the *current project*:\n" +
-                $"  • {snippetCount} saved snippet{(snippetCount == 1 ? "" : "s")}\n" +
-                $"  • {historyCount} run history entr{(historyCount == 1 ? "y" : "ies")}\n" +
-                $"  • {watchCount} watch expression{(watchCount == 1 ? "" : "s")}\n" +
-                $"  • {usingsCount} custom using{(usingsCount == 1 ? "" : "s")}\n" +
-                $"  • the in-memory previous-result carry-over (`_`)\n\n" +
-                $"Other projects on this machine are not affected. There is no undo.";
+            var detail = new System.Text.StringBuilder();
+            detail.Append("This will permanently delete the REPL data for the *current project*:\n");
+            detail.Append($"  • {snippetCount} saved snippet{(snippetCount == 1 ? "" : "s")}\n");
+            detail.Append($"  • {historyCount} run history entr{(historyCount == 1 ? "y" : "ies")}\n");
+            detail.Append($"  • {watchCount} watch expression{(watchCount == 1 ? "" : "s")}\n");
+            detail.Append($"  • {usingsCount} custom using{(usingsCount == 1 ? "" : "s")}\n");
+            // Always list the in-memory targets — they're always reset,
+            // even when their visible state is empty, so the dialog
+            // doesn't surprise the user later.
+            detail.Append(hasCarryOver
+                ? "  • the in-memory previous-result carry-over (`_`)\n"
+                : "  • the in-memory previous-result carry-over (`_`, currently empty)\n");
+            detail.Append(dirtyOutputs > 0
+                ? $"  • the Output panel of {dirtyOutputs} open REPL window{(dirtyOutputs == 1 ? "" : "s")}\n"
+                : "  • the Output panel of any open REPL window (currently idle)\n");
+            detail.Append("\nOther projects on this machine are not affected. There is no undo.");
 
             if (!EditorUtility.DisplayDialog(
                 "Roslyn REPL — Reset Project Data",
-                detail,
+                detail.ToString(),
                 "Delete everything",
                 "Cancel"))
             {
                 return;
             }
 
+            // Always run every clear, regardless of which buckets had
+            // content. Skipping ResetLastResult / ClearOutputAfterReset
+            // when storeTotal==0 is exactly the bug the PR caught.
             SnippetStore.Clear();
             RunHistoryStore.Clear();
             WatchStore.Clear();
@@ -104,14 +128,15 @@ return UnityEngine.Application.unityVersion;";
             // The host Output panel doesn't subscribe to anything —
             // ClearOutputAfterReset is the explicit handshake so the
             // visible UI matches the wiped data.
-            foreach (var w in Resources.FindObjectsOfTypeAll<RoslynReplWindow>())
+            foreach (var w in openWindows)
             {
                 if (w != null) w.ClearOutputAfterReset();
             }
 
+            int reportedTotal = storeTotal + (hasCarryOver ? 1 : 0) + dirtyOutputs;
             EditorUtility.DisplayDialog(
                 "Roslyn REPL — Reset Project Data",
-                $"Cleared {total} entr{(total == 1 ? "y" : "ies")} across snippet library, run history, watches, and custom usings.",
+                $"Cleared {reportedTotal} item{(reportedTotal == 1 ? "" : "s")} across snippet library, run history, watches, custom usings, the `_` carry-over, and visible Output panels.",
                 "OK");
         }
 
@@ -440,6 +465,21 @@ return UnityEngine.Application.unityVersion;";
             if (_durationLabel != null) _durationLabel.text = string.Empty;
             _codeEditor?.ClearErrorMarkers();
             ShowReadyMessage();
+        }
+
+        // Idle-state predicate used by ResetProjectData to decide
+        // whether this window has anything worth wiping. The Output
+        // panel always carries the Ready prompt as a single child after
+        // ClearOutput → ShowReadyMessage; anything past that means a
+        // Run produced rows the user hasn't cleared. Treat duration
+        // text as a secondary signal so a finished run with zero
+        // log/result rows (rare but possible) still counts as dirty.
+        public bool HasInspectableOutput()
+        {
+            if (_outputContent != null && _outputContent.childCount > 1) return true;
+            if (_durationLabel != null && !string.IsNullOrEmpty(_durationLabel.text)) return true;
+            if (_outputSummary != null && !string.IsNullOrEmpty(_outputSummary.text)) return true;
+            return false;
         }
 
         private void AppendOutput(string text, string severity)
