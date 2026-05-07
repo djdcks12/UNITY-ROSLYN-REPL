@@ -42,7 +42,15 @@ namespace RoslynRepl.Editor.Core
         public event Action Changed;
 
         private const int WatchTimeoutMs = 1000;
-        private const int GlobalSearchMaxEntries = int.MaxValue;
+        // Cap the global instance sweep used by the fallback. The original
+        // int.MaxValue value scaled with project size — large scenes
+        // (thousands of MonoBehaviours) made every Run pay for an
+        // unbounded scan when even one Watch was unqualified. 1000
+        // entries covers realistic projects (the user's intended owner
+        // is virtually always near the top of the list); past that
+        // point first-match-wins quickly stops being meaningful and
+        // the user really should qualify the owner.
+        private const int GlobalSearchMaxEntries = 1000;
 
         private readonly Dictionary<string, string> _previousPreviews = new();
         private readonly List<WatchResult> _current = new();
@@ -178,7 +186,7 @@ namespace RoslynRepl.Editor.Core
                 if (path == "_" || path.StartsWith("_.", StringComparison.Ordinal) || path.StartsWith("_[", StringComparison.Ordinal))
                     return false;
 
-                if (!TryEvaluateGlobalPath(path, out value, out var matchedEntry)) return false;
+                if (!TryEvaluateGlobalPath(path, out value, out var matchedEntry, out var capHit)) return false;
                 SetResolvedResult(result, value);
                 // Tell the user *which* live instance the value came from.
                 // The previous behaviour of just dropping a value into the
@@ -186,7 +194,16 @@ namespace RoslynRepl.Editor.Core
                 // ambiguous: multiple managers may all have `count`, and
                 // first-match wins is a coin flip. Showing source means
                 // the user can spot "wrong owner" failures at a glance.
-                result.SourceDescription = DescribeSource(matchedEntry);
+                var sourceDesc = DescribeSource(matchedEntry);
+                if (capHit)
+                {
+                    // The instance pool was capped; the picked owner may
+                    // not be the closest match. Phrase the hint as an
+                    // action — qualifying owner is the user's escape
+                    // hatch — rather than a vague "many matches".
+                    sourceDesc += $" — search capped at {GlobalSearchMaxEntries}; qualify the owner (TypeName.Path) if this is wrong";
+                }
+                result.SourceDescription = sourceDesc;
                 return true;
             }
             catch
@@ -236,11 +253,19 @@ namespace RoslynRepl.Editor.Core
             return TryResolvePathFromIndex(current, path, index, out value, allowProperty: true);
         }
 
-        private static bool TryEvaluateGlobalPath(string path, out object value, out InstanceEntry matched)
+        private static bool TryEvaluateGlobalPath(string path, out object value, out InstanceEntry matched, out bool capHit)
         {
             value = null;
             matched = null;
             var entries = InstanceLocator.Find(InstanceCategory.All, string.Empty, GlobalSearchMaxEntries);
+            // Approximate "the cap stopped us" as "we filled the
+            // requested budget exactly". InstanceLocator doesn't tell
+            // us whether more entries existed beyond the cap, but in
+            // practice a Unity project with exactly 1000 browseable
+            // instances is vanishingly rare and the false-positive on
+            // the hint side just nudges the user to qualify the owner
+            // anyway, which is the right reflex.
+            capHit = entries.Count >= GlobalSearchMaxEntries;
             if (entries.Count == 0) return false;
 
             TryReadIdentifier(path, 0, out var rootName);
