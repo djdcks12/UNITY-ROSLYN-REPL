@@ -180,12 +180,17 @@ namespace RoslynRepl.Editor.Patches
         }
 
         // Resolve every TypeDeclarationSyntax in the file whose simple
-        // name + ancestor chain matches the target type. For partial
-        // classes a single file can declare the same type multiple
-        // times (or split across files — we'd be invoked once per
-        // path). For nested types we walk the syntactic ancestors so
-        // an unrelated outer type that happens to contain a nested
-        // class with the same simple name doesn't get conflated.
+        // name + ancestor type chain + enclosing namespace matches the
+        // target type. For partial classes a single file can declare
+        // the same type multiple times (or split across files — we'd
+        // be invoked once per path). For nested types we walk the
+        // syntactic ancestors so an unrelated outer type sharing a
+        // nested class name doesn't get conflated. The namespace check
+        // covers the case where one file holds `namespace A { class
+        // Player { void Hit() {…} } }` and `namespace B { class Player
+        // { void Hit() {…} } }` — without it, both syntactic Player
+        // declarations pass on simple name + (empty) type chain and
+        // the candidate at source-order index 0 silently wins.
         private static List<TypeDeclarationSyntax> FindMatchingTypeDeclarations(SyntaxNode root, Type declaringType)
         {
             // Build the simple-name chain Outer → Inner ignoring generics
@@ -196,37 +201,68 @@ namespace RoslynRepl.Editor.Patches
                 nameChain.Add(StripGenericArity(cur.Name));
             nameChain.Reverse(); // outermost first
 
+            // Type.Namespace returns the namespace of the outermost
+            // declaring type even for nested types (good — that's the
+            // only namespace level expressible in C# syntax). null for
+            // global namespace; normalize to "" so the comparison is a
+            // straight string equality.
+            string expectedNamespace = declaringType.Namespace ?? string.Empty;
+
             var matches = new List<TypeDeclarationSyntax>();
             foreach (var td in root.DescendantNodes().OfType<TypeDeclarationSyntax>())
             {
                 if (td.Identifier.ValueText != nameChain[nameChain.Count - 1]) continue;
-                if (!AncestorChainMatches(td, nameChain)) continue;
+                if (!AncestorChainMatches(td, nameChain, expectedNamespace)) continue;
                 matches.Add(td);
             }
             return matches;
         }
 
-        private static bool AncestorChainMatches(TypeDeclarationSyntax leaf, List<string> nameChain)
+        private static bool AncestorChainMatches(TypeDeclarationSyntax leaf, List<string> nameChain, string expectedNamespace)
         {
-            // Walk syntactic parents collecting enclosing type names.
-            // Stop when we reach a non-type ancestor (namespace / file
-            // scope). Then compare bottom-up to the expected chain.
-            var actual = new List<string>();
-            actual.Add(leaf.Identifier.ValueText);
+            // Walk syntactic parents collecting both the enclosing type
+            // chain and the enclosing namespace chain. We deliberately
+            // walk all the way to CompilationUnitSyntax (rather than
+            // breaking at the first namespace) so a chain like
+            // `namespace A { namespace B { class X } }` produces parts
+            // ["B", "A"] which reverse to "A.B".
+            var actualTypes = new List<string>();
+            actualTypes.Add(leaf.Identifier.ValueText);
+            var nsParts = new List<string>(); // innermost-first
+
             for (var p = leaf.Parent; p != null; p = p.Parent)
             {
-                if (p is TypeDeclarationSyntax pt) actual.Add(pt.Identifier.ValueText);
-                else if (p is NamespaceDeclarationSyntax || p is CompilationUnitSyntax
-                         // FileScopedNamespaceDeclarationSyntax exists in newer Roslyn — pattern-match by name to keep older builds compiling
-                         || p.GetType().Name == "FileScopedNamespaceDeclarationSyntax")
+                if (p is TypeDeclarationSyntax pt)
+                {
+                    actualTypes.Add(pt.Identifier.ValueText);
+                }
+                else if (p is NamespaceDeclarationSyntax pn)
+                {
+                    nsParts.Add(pn.Name.ToString());
+                }
+                else if (p.GetType().Name == "FileScopedNamespaceDeclarationSyntax")
+                {
+                    // File-scoped namespace lives in newer Roslyn; access
+                    // its `.Name` via reflection so the package still
+                    // compiles against older Microsoft.CodeAnalysis builds
+                    // that lack the type altogether.
+                    var nameNode = p.GetType().GetProperty("Name")?.GetValue(p);
+                    if (nameNode != null) nsParts.Add(nameNode.ToString());
+                }
+                else if (p is CompilationUnitSyntax)
+                {
                     break;
+                }
             }
-            // actual is innermost-first; reverse to outer-first
-            actual.Reverse();
-            if (actual.Count != nameChain.Count) return false;
+
+            actualTypes.Reverse(); // outer-first
+            if (actualTypes.Count != nameChain.Count) return false;
             for (int i = 0; i < nameChain.Count; i++)
-                if (actual[i] != nameChain[i]) return false;
-            return true;
+                if (actualTypes[i] != nameChain[i]) return false;
+
+            nsParts.Reverse(); // outer-first
+            string actualNamespace = nsParts.Count == 0 ? string.Empty : string.Join(".", nsParts);
+            return actualNamespace == expectedNamespace;
         }
 
         private static string StripGenericArity(string name)
