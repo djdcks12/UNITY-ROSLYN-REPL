@@ -230,7 +230,10 @@ namespace RoslynRepl.Editor.Core
                 index = 1;
             }
 
-            return TryResolvePathFromIndex(current, path, index, out value);
+            // `_` is the user's explicit, single carry-over slot — there's
+            // no ambiguity over which owner this came from. Property
+            // getters are allowed because the user typed the path.
+            return TryResolvePathFromIndex(current, path, index, out value, allowProperty: true);
         }
 
         private static bool TryEvaluateGlobalPath(string path, out object value, out InstanceEntry matched)
@@ -259,7 +262,12 @@ namespace RoslynRepl.Editor.Core
 
                     if (path[index] == '.' || path[index] == '[')
                     {
-                        if (TryResolvePathFromIndex(root, path, index, out value))
+                        // Owner-qualified path: the user explicitly named
+                        // *this* instance via TypeName / DisplayName, so
+                        // property getter invocation is consistent with
+                        // the user's intent. e.g. `GameManager.Config`
+                        // resolves Config as a property if needed.
+                        if (TryResolvePathFromIndex(root, path, index, out value, allowProperty: true))
                         {
                             matched = entry;
                             return true;
@@ -267,7 +275,16 @@ namespace RoslynRepl.Editor.Core
                     }
                 }
 
-                if (TryResolvePathFromIndex(root, path, 0, out value))
+                // Unqualified path: the user typed `Count` / `IsReady` /
+                // `_data` and we're guessing which live instance they
+                // meant. First-match wins, so allowing property getters
+                // here would silently invoke arbitrary user code on the
+                // first owner whose type happens to declare `Count` as
+                // a property — every Run, every refresh, with no
+                // breadcrumb to which object actually fired. Restrict
+                // to fields-only; users who want a property must
+                // qualify the owner.
+                if (TryResolvePathFromIndex(root, path, 0, out value, allowProperty: false))
                 {
                     matched = entry;
                     return true;
@@ -277,7 +294,7 @@ namespace RoslynRepl.Editor.Core
             return false;
         }
 
-        private static bool TryResolvePathFromIndex(object root, string path, int index, out object value)
+        private static bool TryResolvePathFromIndex(object root, string path, int index, out object value, bool allowProperty)
         {
             value = null;
             object current = root;
@@ -303,7 +320,7 @@ namespace RoslynRepl.Editor.Core
                 }
 
                 if (!TryReadIdentifier(path, ref index, out var memberName)) return false;
-                if (!TryResolveMember(current, memberName, out current)) return false;
+                if (!TryResolveMember(current, memberName, out current, allowProperty)) return false;
 
                 while (index < path.Length && path[index] == '[')
                 {
@@ -402,7 +419,7 @@ namespace RoslynRepl.Editor.Core
             return true;
         }
 
-        private static bool TryResolveMember(object target, string memberName, out object value)
+        private static bool TryResolveMember(object target, string memberName, out object value, bool allowProperty)
         {
             value = null;
             if (target == null || IsDestroyedUnityObject(target)) return false;
@@ -416,6 +433,8 @@ namespace RoslynRepl.Editor.Core
                     value = field.GetValue(target);
                     return true;
                 }
+
+                if (!allowProperty) continue;
 
                 var property = t.GetProperty(memberName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
                 if (property == null || property.GetIndexParameters().Length != 0) continue;
