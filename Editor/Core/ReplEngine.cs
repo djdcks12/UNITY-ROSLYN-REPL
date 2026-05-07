@@ -26,11 +26,7 @@ namespace RoslynRepl.Editor.Core
     /// enabled) <c>CancelAfter(TimeoutMs)</c>. The combined token is exposed
     /// to user snippets as the static property <c>ct</c> on the wrapper
     /// class, so cooperative loops can call <c>ct.ThrowIfCancellationRequested()</c>
-    /// to bail out cleanly. Hard kill of a synchronous snippet that ignores
-    /// the token isn't supported on Editor's main thread (Thread.Abort is
-    /// unavailable); see README "Known limitations".
-    ///
-    /// async/await inside snippets is deferred — see README.
+    /// to bail out cleanly.
     /// </summary>
     public static class ReplEngine
     {
@@ -43,6 +39,15 @@ namespace RoslynRepl.Editor.Core
 
         /// <summary>Clears the carry-over <c>_</c> value.</summary>
         public static void ResetLastResult() => LastResult = null;
+
+        /// <summary>
+        /// Replaces the carry-over <c>_</c> value from editor UI flows that
+        /// surface an object without compiling user code, such as choosing a
+        /// row in the Object Browser. Those flows render the value exactly as
+        /// a snippet return would, so follow-up snippets and watches should
+        /// see the same object through <c>_</c>.
+        /// </summary>
+        public static void SetLastResult(object value) => LastResult = value;
 
         /// <summary>
         /// Cancellation token for the snippet currently executing. Read inside

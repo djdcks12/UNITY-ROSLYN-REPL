@@ -260,9 +260,11 @@ return UnityEngine.Application.unityVersion;";
                 return;
             }
 
+            ReplEngine.SetLastResult(value);
             AppendResult(SimpleObjectSerializer.ToTree(value));
             if (_durationLabel != null) _durationLabel.text = string.Empty;
             if (_outputSummary != null) _outputSummary.text = "Browsed";
+            _watch?.Refresh();
             ScrollOutputToBottom();
         }
 
@@ -401,9 +403,13 @@ return UnityEngine.Application.unityVersion;";
         private static MultiColumnTreeView BuildResultTree(ReplValueNode root)
         {
             var tv = new MultiColumnTreeView();
-            tv.style.maxHeight = 360;
-            tv.style.minHeight = 80;
+            tv.fixedItemHeight = 22;
+            var treeHeight = CalculateResultTreeHeight(root);
+            tv.style.height = treeHeight;
+            tv.style.minHeight = treeHeight;
+            tv.style.maxHeight = treeHeight;
             tv.style.flexGrow = 0;
+            tv.style.flexShrink = 0;
 
             // --- columns ---
             tv.columns.Add(MakeColumn("name",  "Name",  220, n => n?.Name     ?? string.Empty, "rr-treecell--name", tv));
@@ -420,6 +426,28 @@ return UnityEngine.Application.unityVersion;";
             tv.Rebuild();
             tv.ExpandRootItems();
             return tv;
+        }
+
+        private static float CalculateResultTreeHeight(ReplValueNode root)
+        {
+            const float HeaderHeight = 24f;
+            const float RowHeight = 22f;
+            const float MinHeight = 140f;
+            const float MaxHeight = 420f;
+
+            int rowCount = CountTreeRows(root);
+            return Mathf.Clamp(HeaderHeight + rowCount * RowHeight, MinHeight, MaxHeight);
+        }
+
+        private static int CountTreeRows(ReplValueNode node)
+        {
+            if (node == null) return 0;
+
+            int count = 1;
+            if (node.Children == null) return count;
+            foreach (var child in node.Children)
+                count += CountTreeRows(child);
+            return count;
         }
 
         private static Column MakeColumn(

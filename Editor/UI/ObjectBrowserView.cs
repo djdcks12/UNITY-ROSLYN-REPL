@@ -16,6 +16,8 @@ namespace RoslynRepl.Editor.UI
     /// </summary>
     public class ObjectBrowserView
     {
+        private const int MaxBrowserResults = int.MaxValue;
+
         private readonly VisualElement _root;
         private EnumField _categoryField;
         private ToolbarSearchField _searchField;
@@ -52,7 +54,7 @@ namespace RoslynRepl.Editor.UI
             _entries.Clear();
             try
             {
-                _entries.AddRange(InstanceLocator.Find(category, filter, 200));
+                _entries.AddRange(InstanceLocator.Find(category, filter, MaxBrowserResults));
             }
             catch (Exception ex)
             {
@@ -65,8 +67,8 @@ namespace RoslynRepl.Editor.UI
 
             _listView?.RefreshItems();
             if (_statusLabel != null)
-                _statusLabel.text = _entries.Count == 200
-                    ? "200+ items (truncated)"
+                _statusLabel.text = _entries.Count == MaxBrowserResults
+                    ? $"{MaxBrowserResults}+ items (truncated)"
                     : $"{_entries.Count} item(s)";
         }
 
