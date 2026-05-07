@@ -211,19 +211,23 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
                 SetStatus("No patch matching that target is registered.", error: true);
                 return;
             }
+            // Phase B contract: Revert flips the spec to Inactive but
+            // *keeps* it in the registry as a draft. Removing here
+            // would delete the persisted body — the README promises
+            // users can `Load` an Inactive spec back into the form
+            // later, so the body has to survive. PatchEngine.Revert
+            // already updates spec.Status = Inactive and re-persists.
             PatchEngine.Revert(spec);
-            // Phase A is in-memory only — once reverted there's no
-            // reason to keep the spec around. Phase B persistence will
-            // revisit.
-            PatchRegistry.Remove(spec);
-            SetStatus($"Reverted: {spec.TargetTypeName}.{spec.MethodName}", error: false);
+            SetStatus($"Reverted: {spec.TargetTypeName}.{spec.MethodName} (draft kept)", error: false);
         }
 
         private void OnRevertAllClicked()
         {
+            // Same contract as OnRevertClicked — drop every Harmony
+            // detour but keep the specs in the registry as Inactive
+            // drafts the user can reapply.
             int n = PatchEngine.RevertAll();
-            foreach (var s in PatchRegistry.Specs.ToList()) PatchRegistry.Remove(s);
-            SetStatus($"Reverted {n} patch{(n == 1 ? "" : "es")}.", error: false);
+            SetStatus($"Reverted {n} patch{(n == 1 ? "" : "es")} (drafts kept).", error: false);
         }
 
         private void SetStatus(string message, bool error)
@@ -316,8 +320,14 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
 
                 var revertBtn = new Button(() =>
                 {
+                    // Per-row Revert keeps the spec in the registry as
+                    // a draft, matching OnRevertClicked. To delete the
+                    // draft entirely the user can hit Apply with an
+                    // empty body and then Revert (or use Reset Project
+                    // Data for a clean slate). A dedicated "Delete"
+                    // affordance can land in a later phase if drafts
+                    // become heavy.
                     PatchEngine.Revert(s);
-                    PatchRegistry.Remove(s);
                 })
                 { text = "Revert" };
                 revertBtn.style.minWidth = 60;
