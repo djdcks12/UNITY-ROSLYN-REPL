@@ -550,7 +550,7 @@ Because this is `EditorPrefs` storage:
 - it is not committed to source control,
 - moving the project to a different path can create a fresh project-scoped bucket.
 
-To wipe everything for the current project (snippets, run history, watches, custom usings, and the in-memory `_` carry-over) in one click, use `Tools / Roslyn REPL / Reset Project Data`. The menu reports counts before and after, and never touches data for other Unity projects on the same machine.
+To wipe everything for the current project (snippets, run history, watches, custom usings, runtime method patches, and the in-memory `_` carry-over) in one click, use `Tools / Roslyn REPL / Reset Project Data`. The menu reverts every active Harmony detour, deletes the persisted patch list along with the other four stores, reports counts before and after, and never touches data for other Unity projects on the same machine.
 
 What `Reset Project Data` does and doesn't do:
 
