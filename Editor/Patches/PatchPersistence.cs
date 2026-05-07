@@ -61,6 +61,16 @@ namespace RoslynRepl.Editor.Patches
             Changed?.Invoke();
         }
 
+        /// <summary>
+        /// True iff the project has *any* persisted patch data — used by
+        /// <see cref="PatchRegistry.Clear"/> to detect stale-key cases
+        /// where the in-memory dictionary is empty but the EditorPrefs
+        /// entry still exists (e.g. an older package version wrote
+        /// SetString(key, "") instead of DeleteKey on Reset; the empty
+        /// blob deserializes back to zero specs but the key sticks).
+        /// </summary>
+        public static bool HasAny() => EditorPrefs.HasKey(PrefsKey);
+
         private static string EncodeOne(MethodPatchSpec s)
         {
             return string.Join("|",

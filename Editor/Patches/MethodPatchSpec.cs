@@ -113,15 +113,28 @@ namespace RoslynRepl.Editor.Patches
 
         public static void Clear()
         {
-            if (_byKey.Count == 0) return;
+            // Two independent buckets to consider:
+            //   • the live in-memory dictionary,
+            //   • the persisted EditorPrefs key.
+            // An older package version that wrote SetString(key, "")
+            // could leave the second bucket non-empty even when the
+            // first is empty after LoadFromPersistence. Bailing on
+            // _byKey.Count == 0 alone would skip the DeleteKey on
+            // those upgraded projects and break the README's
+            // "Reset removes every package-owned EditorPrefs key"
+            // promise.
+            bool hadInMemory  = _byKey.Count > 0;
+            bool hadPersisted = PatchPersistence.HasAny();
+            if (!hadInMemory && !hadPersisted) return;
+
             _byKey.Clear();
             // Use the dedicated DeleteKey path instead of Persist()'s
             // SetString-with-empty-list. SetString("") leaves an empty
-            // EditorPrefs key on disk, which technically doesn't retain
-            // any user data but contradicts the README's "Reset removes
-            // every package-owned EditorPrefs key" promise. Match the
-            // behavior the other stores ship (UsingsStore.Clear,
-            // RunHistoryStore.Clear, etc. all call DeleteKey directly).
+            // EditorPrefs key on disk, which contradicts the README's
+            // "Reset removes every package-owned EditorPrefs key"
+            // promise. Match the behavior the other stores ship
+            // (UsingsStore.Clear, RunHistoryStore.Clear, etc. all call
+            // DeleteKey directly).
             PatchPersistence.Clear();
             Changed?.Invoke();
         }
