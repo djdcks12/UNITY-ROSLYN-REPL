@@ -29,6 +29,12 @@ return UnityEngine.Application.unityVersion;";
         private Label _outputSummary;
         private ObjectBrowserView _browser;
         private WatchPanelView _watch;
+        private MethodPatchView _patchView;
+        private VisualElement _outputScrollHost;       // wraps the ScrollView
+        private VisualElement _patchPaneHost;
+        private Label _outputTab;
+        private Label _patchesTab;
+        private bool _patchesModeActive;
 
         [MenuItem("Tools/Roslyn REPL/Open", priority = 10)]
         public static void Open()
@@ -37,6 +43,17 @@ return UnityEngine.Application.unityVersion;";
             window.titleContent = new GUIContent("Roslyn REPL");
             window.minSize = new Vector2(720, 480);
             window.Show();
+        }
+
+        [MenuItem("Tools/Roslyn REPL/Patch Method…", priority = 40)]
+        public static void OpenPatchMode()
+        {
+            // Open (or focus) the main window, then flip the Output / Patches
+            // tab so the user lands directly on the patch UI. One menu, one
+            // window — see issue #14 review.
+            Open();
+            var win = GetWindow<RoslynReplWindow>();
+            win.SetPatchesModeActive(true);
         }
 
         [MenuItem("Tools/Roslyn REPL/Import Default Snippets", priority = 30)]
@@ -167,6 +184,36 @@ return UnityEngine.Application.unityVersion;";
             _modeLabel     = root.Q<Label>("mode-label");
             _outputSummary = root.Q<Label>("output-summary-label");
 
+            // Phase A4: Output / Patches mode tabs in the lower pane
+            // header. Clicking either label flips the visible host
+            // between the existing output ScrollView and the patch UI.
+            _outputScrollHost = _outputScroll;
+            _patchPaneHost = root.Q<VisualElement>("patch-pane-host");
+            _outputTab = root.Q<Label>("output-tab-output");
+            _patchesTab = root.Q<Label>("output-tab-patches");
+            if (_outputTab != null)
+            {
+                _outputTab.RegisterCallback<MouseDownEvent>(_ => SetPatchesModeActive(false));
+            }
+            if (_patchesTab != null)
+            {
+                _patchesTab.RegisterCallback<MouseDownEvent>(_ => SetPatchesModeActive(true));
+            }
+            // Mount the patch view (subscribes to PatchRegistry.Changed
+            // in its ctor; the previous instance is disposed first to
+            // avoid the same WatchPanelView-style handler leak Phase 10
+            // patched).
+            _patchView?.Dispose();
+            _patchView = null;
+            if (_patchPaneHost != null)
+            {
+                _patchView = new MethodPatchView(_patchPaneHost);
+            }
+            // Apply the current mode (Output by default; OpenPatchMode
+            // can flip to Patches before this returns by calling
+            // SetPatchesModeActive again).
+            SetPatchesModeActive(_patchesModeActive);
+
             // Mount the object browser into its host
             var browserHost = root.Q<VisualElement>("browser-host");
             if (browserHost != null)
@@ -270,6 +317,26 @@ return UnityEngine.Application.unityVersion;";
             // the next CreateGUI).
             _watch?.Dispose();
             _watch = null;
+            _patchView?.Dispose();
+            _patchView = null;
+        }
+
+        public void SetPatchesModeActive(bool active)
+        {
+            _patchesModeActive = active;
+            // The output/patch swap toggles DisplayStyle directly rather
+            // than relying on a CSS class — UIElements doesn't pick up
+            // class-based `display:none` cleanly across all 2022.3
+            // versions.
+            if (_outputScrollHost != null)
+                _outputScrollHost.style.display = active ? DisplayStyle.None : DisplayStyle.Flex;
+            if (_patchPaneHost != null)
+                _patchPaneHost.style.display = active ? DisplayStyle.Flex : DisplayStyle.None;
+
+            if (_outputTab != null)
+                _outputTab.EnableInClassList("rr-pane-tab--active", !active);
+            if (_patchesTab != null)
+                _patchesTab.EnableInClassList("rr-pane-tab--active", active);
         }
 
         private void LoadSnippetIntoEditor(string code)
