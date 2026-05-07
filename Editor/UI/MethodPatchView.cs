@@ -54,33 +54,60 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
 
         private void BuildLayout()
         {
+            // Layout philosophy after the "outer scroll feels weird"
+            // feedback: the host pane has its own boundaries, so don't
+            // wrap the whole view in a ScrollView (that moves form +
+            // body + list together when the user just wants to scroll
+            // the body text). Instead lay out form / body / actions /
+            // list as a flex column, with two specific elements that
+            // *do* scroll on their own:
+            //   • body field: multiline TextField inside a vertical
+            //     ScrollView so long edits scroll inside the editor
+            //     while the form/actions/list stay anchored.
+            //   • active patches list: its own vertical ScrollView at
+            //     the bottom, fixed height, so a long list doesn't
+            //     push the body off-screen.
             _host.Clear();
             _host.AddToClassList("rr-patch-view");
+            _host.style.flexDirection = FlexDirection.Column;
+            _host.style.flexGrow = 1;
             _host.style.paddingLeft = 6;
             _host.style.paddingRight = 6;
             _host.style.paddingTop = 4;
             _host.style.paddingBottom = 4;
-            _host.style.flexDirection = FlexDirection.Column;
 
-            var subtitle = new Label("Phase A MVP — redirect a void instance method's calls to a runtime-compiled body. Reverts cleanly. Survives until next domain reload.");
-            subtitle.style.color = new StyleColor(new Color(0.55f, 0.55f, 0.55f));
-            subtitle.style.fontSize = 10;
-            subtitle.style.whiteSpace = WhiteSpace.Normal;
-            subtitle.style.marginBottom = 4;
-            _host.Add(subtitle);
+            // Compact form row: Target / Method / Parameter types in
+            // one horizontal line. Saves ~3× the vertical space the
+            // stacked TextFields used to take.
+            var formRow = new VisualElement();
+            formRow.style.flexDirection = FlexDirection.Row;
+            formRow.style.alignItems = Align.Center;
+            formRow.style.marginBottom = 4;
+            formRow.style.flexShrink = 0;
 
-            _targetField = new TextField("Target type") { tooltip = "Full type name including namespace, e.g. MyGame.GameManager" };
-            _methodField = new TextField("Method name") { tooltip = "Method to redirect — must be a void instance method" };
-            _paramsField = new TextField("Parameter types") { tooltip = "Comma-joined full type names. Empty = no parameters. Example: System.Int32,System.String" };
-            _host.Add(_targetField);
-            _host.Add(_methodField);
-            _host.Add(_paramsField);
+            _targetField = new TextField("Type") { tooltip = "Full type name including namespace, e.g. MyGame.GameManager" };
+            _targetField.style.flexGrow = 2;
+            _targetField.style.marginRight = 4;
+            formRow.Add(_targetField);
 
+            _methodField = new TextField("Method") { tooltip = "Method to redirect — must be a void instance method" };
+            _methodField.style.flexGrow = 1;
+            _methodField.style.marginRight = 4;
+            formRow.Add(_methodField);
+
+            _paramsField = new TextField("Params") { tooltip = "Comma-joined full type names. Empty = no parameters. Example: System.Int32,System.String" };
+            _paramsField.style.flexGrow = 1;
+            formRow.Add(_paramsField);
+
+            _host.Add(formRow);
+
+            // Body header — Pull Original on the right.
             var bodyHeader = new VisualElement();
             bodyHeader.style.flexDirection = FlexDirection.Row;
             bodyHeader.style.alignItems = Align.Center;
-            bodyHeader.style.marginTop = 4;
+            bodyHeader.style.marginTop = 2;
             bodyHeader.style.marginBottom = 1;
+            bodyHeader.style.flexShrink = 0;
 
             var bodyLabel = new Label("Patch body");
             bodyLabel.style.fontSize = 10;
@@ -88,10 +115,6 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             bodyLabel.style.color = new StyleColor(new Color(0.7f, 0.7f, 0.7f));
             bodyHeader.Add(bodyLabel);
 
-            // Phase C: Pull Original — find the target method's source
-            // file and copy its body into the editor as the starting
-            // point for the user's edit. One-click "I want to add a
-            // log to the existing implementation" workflow.
             var pullBtn = new Button(OnPullOriginalClicked) { text = "Pull Original" };
             pullBtn.style.fontSize = 10;
             pullBtn.tooltip =
@@ -99,20 +122,37 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
                 "Use as the starting point for an in-place edit. Phase C MVP: void instance methods,\n" +
                 "block bodies (`{ … }`), source must live in Assets/ or Packages/.";
             bodyHeader.Add(pullBtn);
-
             _host.Add(bodyHeader);
 
-            _bodyField = new TextField { multiline = true, value = DefaultBody };
-            _bodyField.style.minHeight = 110;
-            _bodyField.style.flexGrow = 0;
-            _bodyField.style.whiteSpace = WhiteSpace.Normal;
-            _host.Add(_bodyField);
+            // Body editor: TextField inside a vertical ScrollView. The
+            // TextField itself doesn't constrain height, so a long
+            // patch body extends inside the ScrollView and the user
+            // scrolls *inside the editor* without the rest of the
+            // view moving. flex-grow=1 on the ScrollView absorbs the
+            // leftover pane height.
+            var bodyScroll = new ScrollView(ScrollViewMode.Vertical);
+            bodyScroll.style.flexGrow = 1;
+            bodyScroll.style.minHeight = 140;
+            bodyScroll.style.backgroundColor = new StyleColor(new Color(0.14f, 0.14f, 0.14f));
 
+            _bodyField = new TextField { multiline = true, value = DefaultBody };
+            _bodyField.style.whiteSpace = WhiteSpace.Normal;
+            _bodyField.style.flexGrow = 1;
+            // No explicit height — let the inner content drive it so
+            // the parent ScrollView is the one that scrolls. Some
+            // platforms cap unbounded TextField height at zero, so
+            // give it a sane minimum.
+            _bodyField.style.minHeight = 200;
+            bodyScroll.Add(_bodyField);
+            _host.Add(bodyScroll);
+
+            // Actions + status. Single row, doesn't scroll.
             var actionRow = new VisualElement();
             actionRow.style.flexDirection = FlexDirection.Row;
             actionRow.style.alignItems = Align.Center;
             actionRow.style.marginTop = 4;
             actionRow.style.marginBottom = 4;
+            actionRow.style.flexShrink = 0;
 
             var applyBtn = new Button(OnApplyClicked) { text = "Apply Patch" };
             applyBtn.style.marginRight = 4;
@@ -132,6 +172,8 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             _statusLabel = new Label("Status: idle");
             _statusLabel.style.color = new StyleColor(new Color(0.65f, 0.65f, 0.65f));
             _statusLabel.style.fontSize = 11;
+            _statusLabel.style.whiteSpace = WhiteSpace.Normal;
+            _statusLabel.style.flexShrink = 1;
             actionRow.Add(_statusLabel);
 
             _host.Add(actionRow);
@@ -142,16 +184,22 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             listTitle.style.fontSize = 10;
             listTitle.style.marginTop = 2;
             listTitle.style.marginBottom = 1;
+            listTitle.style.flexShrink = 0;
             _host.Add(listTitle);
 
-            var scroll = new ScrollView(ScrollViewMode.Vertical);
-            scroll.style.flexGrow = 1;
-            scroll.style.minHeight = 60;
-            scroll.style.backgroundColor = new StyleColor(new Color(0.14f, 0.14f, 0.14f));
+            // Active patches: own vertical ScrollView with a fixed
+            // max-height share so a long list doesn't push the body
+            // editor offscreen. flex-shrink=0 so the column layout
+            // doesn't squeeze it to zero when the body is large.
+            var listScroll = new ScrollView(ScrollViewMode.Vertical);
+            listScroll.style.flexShrink = 0;
+            listScroll.style.minHeight = 80;
+            listScroll.style.maxHeight = 160;
+            listScroll.style.backgroundColor = new StyleColor(new Color(0.14f, 0.14f, 0.14f));
 
             _activeListContainer = new VisualElement();
-            scroll.Add(_activeListContainer);
-            _host.Add(scroll);
+            listScroll.Add(_activeListContainer);
+            _host.Add(listScroll);
 
             RebuildActiveList();
         }
