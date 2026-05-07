@@ -22,6 +22,11 @@ namespace RoslynRepl.Editor.Core
         public bool Failed;             // true on compile/runtime error or cancel
         public string ErrorMessage;
         public bool JustChanged;        // true if Preview differs from last run
+        // Filled only when the value came from the global-search fallback
+        // (compile/runtime error → InstanceLocator sweep). Compile-success
+        // rows leave this null because their result is unambiguous —
+        // whatever the user's expression returned.
+        public string SourceDescription;
     }
 
     /// <summary>
@@ -163,20 +168,44 @@ namespace RoslynRepl.Editor.Core
                 if (TryEvaluateLastResultPath(path, out var value))
                 {
                     SetResolvedResult(result, value);
+                    // The user's `_` carry-over is unambiguous — there's
+                    // exactly one. The global-path branch below has the
+                    // multiple-match problem; this one doesn't.
+                    result.SourceDescription = "previous result (`_`)";
                     return true;
                 }
 
                 if (path == "_" || path.StartsWith("_.", StringComparison.Ordinal) || path.StartsWith("_[", StringComparison.Ordinal))
                     return false;
 
-                if (!TryEvaluateGlobalPath(path, out value)) return false;
+                if (!TryEvaluateGlobalPath(path, out value, out var matchedEntry)) return false;
                 SetResolvedResult(result, value);
+                // Tell the user *which* live instance the value came from.
+                // The previous behaviour of just dropping a value into the
+                // row left common-name fields (`items`, `count`, `_data`)
+                // ambiguous: multiple managers may all have `count`, and
+                // first-match wins is a coin flip. Showing source means
+                // the user can spot "wrong owner" failures at a glance.
+                result.SourceDescription = DescribeSource(matchedEntry);
                 return true;
             }
             catch
             {
                 return false;
             }
+        }
+
+        private static string DescribeSource(InstanceEntry entry)
+        {
+            if (entry == null) return "global search";
+            // SubLabel already encodes the rough origin (scene name,
+            // "ScriptableObject", "Singleton"); display name + type
+            // disambiguate within a category. Format:
+            //   "FriendListView (PopupFriend) — Scene: NewWorldMap"
+            //   "GameManager.Instance (GameManager) — Singleton"
+            string typePart = string.IsNullOrEmpty(entry.TypeName) ? string.Empty : $" ({entry.TypeName})";
+            string subPart = string.IsNullOrEmpty(entry.SubLabel) ? string.Empty : $" — {entry.SubLabel}";
+            return (entry.DisplayName ?? "?") + typePart + subPart;
         }
 
         private static bool TryEvaluateLastResultPath(string path, out object value)
@@ -204,9 +233,10 @@ namespace RoslynRepl.Editor.Core
             return TryResolvePathFromIndex(current, path, index, out value);
         }
 
-        private static bool TryEvaluateGlobalPath(string path, out object value)
+        private static bool TryEvaluateGlobalPath(string path, out object value, out InstanceEntry matched)
         {
             value = null;
+            matched = null;
             var entries = InstanceLocator.Find(InstanceCategory.All, string.Empty, GlobalSearchMaxEntries);
             if (entries.Count == 0) return false;
 
@@ -223,18 +253,25 @@ namespace RoslynRepl.Editor.Core
                     if (index == path.Length)
                     {
                         value = root;
+                        matched = entry;
                         return true;
                     }
 
                     if (path[index] == '.' || path[index] == '[')
                     {
                         if (TryResolvePathFromIndex(root, path, index, out value))
+                        {
+                            matched = entry;
                             return true;
+                        }
                     }
                 }
 
                 if (TryResolvePathFromIndex(root, path, 0, out value))
+                {
+                    matched = entry;
                     return true;
+                }
             }
 
             return false;
