@@ -99,6 +99,16 @@ return UnityEngine.Application.unityVersion;";
             UsingsStore.Clear();
             ReplEngine.ResetLastResult();
 
+            // Phase 11b: snippet/history/usings/watch popups already
+            // refresh themselves through their store Changed events.
+            // The host Output panel doesn't subscribe to anything —
+            // ClearOutputAfterReset is the explicit handshake so the
+            // visible UI matches the wiped data.
+            foreach (var w in Resources.FindObjectsOfTypeAll<RoslynReplWindow>())
+            {
+                if (w != null) w.ClearOutputAfterReset();
+            }
+
             EditorUtility.DisplayDialog(
                 "Roslyn REPL — Reset Project Data",
                 $"Cleared {total} entr{(total == 1 ? "y" : "ies")} across snippet library, run history, watches, and custom usings.",
@@ -416,6 +426,20 @@ return UnityEngine.Application.unityVersion;";
         {
             if (_outputContent != null) _outputContent.Clear();
             if (_outputSummary != null) _outputSummary.text = string.Empty;
+        }
+
+        // Called by ResetProjectData so the visible Output panel matches
+        // the wiped data state. Without this the cleared run gets a
+        // dialog confirmation, but the *previous* run's logs / result
+        // tree stayed on screen unchanged — visually contradicting the
+        // "everything was reset" message. Also nudges the duration
+        // label and gutter error markers back to their idle state.
+        public void ClearOutputAfterReset()
+        {
+            ClearOutput();
+            if (_durationLabel != null) _durationLabel.text = string.Empty;
+            _codeEditor?.ClearErrorMarkers();
+            ShowReadyMessage();
         }
 
         private void AppendOutput(string text, string severity)
