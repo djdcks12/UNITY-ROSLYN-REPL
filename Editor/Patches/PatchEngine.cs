@@ -66,16 +66,14 @@ namespace RoslynRepl.Editor.Patches
         {
             if (spec == null) throw new ArgumentNullException(nameof(spec));
 
-            // Already applied? Revert first so the user can iterate
-            // without manually unwinding state every edit.
-            if (_applied.ContainsKey(spec.Key)) Revert(spec);
-
-            // 1. Resolve the target MethodInfo.
+            // Phase 1 — resolve + compile. No mutations to existing
+            // state happen here, so a typo / missing type / missing
+            // method / compile error bubbles up before we touch the
+            // currently-applied patch (if any). Live Play Mode flow
+            // demands this: the user iterates by editing the body and
+            // re-Applying; an old "naively revert first, then compile"
+            // path would silently drop the working patch on every typo.
             var target = ResolveTargetMethod(spec);
-
-            // 2. Generate + compile the wrapper class. Compile errors
-            //    bubble up as a single Exception with the diagnostics
-            //    formatted; the UI surface throws a row-failure marker.
             var className = "__ReplPatch_" + Guid.NewGuid().ToString("N").Substring(0, 8);
             var source = PatchCodeGenerator.Generate(spec, target, className);
             var asm = CompileToAssembly(source);
@@ -84,10 +82,38 @@ namespace RoslynRepl.Editor.Patches
             var prefix = patchType.GetMethod("Prefix", BindingFlags.Public | BindingFlags.Static)
                 ?? throw new InvalidOperationException($"Compiled patch is missing static Prefix method");
 
-            // 3. Hand the prefix to Harmony.
-            HarmonyBridge.Patch(target, prefix);
+            // Phase 2 — atomic swap. Unpatch old (if any) → patch new.
+            // If patch-new fails, restore the old prefix so the user's
+            // working state is preserved. Both Unpatch/Patch run on
+            // the Editor main thread synchronously, so the window
+            // where neither prefix is active is bounded by a single
+            // Harmony call — not observable in practice.
+            _applied.TryGetValue(spec.Key, out var oldApplied);
+            if (oldApplied != null)
+            {
+                try { HarmonyBridge.Unpatch(oldApplied.Target, oldApplied.PrefixReplacement); }
+                catch (Exception ex) { UnityEngine.Debug.LogWarning($"[Roslyn REPL] Failed to remove previous patch: {ex.Message}"); }
+            }
 
-            // 4. Bookkeeping.
+            try
+            {
+                HarmonyBridge.Patch(target, prefix);
+            }
+            catch
+            {
+                // Roll back: re-install the prior prefix. Best-effort —
+                // a Harmony-level failure on restore is rare but
+                // logged so the user can spot a "lost patch" case
+                // instead of silently running unpatched code.
+                if (oldApplied != null)
+                {
+                    try { HarmonyBridge.Patch(oldApplied.Target, oldApplied.PrefixReplacement); }
+                    catch (Exception ex2) { UnityEngine.Debug.LogWarning($"[Roslyn REPL] Failed to restore previous patch after re-apply error: {ex2.Message}"); }
+                }
+                throw;
+            }
+
+            // Phase 3 — bookkeeping (only on success).
             _applied[spec.Key] = new AppliedPatch
             {
                 Target = target,
