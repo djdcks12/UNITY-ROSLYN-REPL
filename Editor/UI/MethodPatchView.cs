@@ -32,6 +32,20 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
         private Label _statusLabel;
         private VisualElement _activeListContainer;
 
+        // Phase C bridge: Pull Original drops the source body into the
+        // editor, but the user then edits it before Apply. To keep
+        // spec.OriginalBody (the unedited snapshot Phase E will diff
+        // against) accurate, remember the last successful pull keyed
+        // by the form's identity at pull time. If the form still
+        // matches that key when Apply runs, the snapshot ships into
+        // the spec; if the form drifted (user changed Type / Method /
+        // Params, picked a different method via Browse, etc.) the
+        // snapshot is stale and we leave OriginalBody empty rather
+        // than persist a body that doesn't belong to the target
+        // method.
+        private string _lastPulledKey;
+        private string _lastPulledOriginal;
+
         public MethodPatchView(VisualElement host)
         {
             _host = host ?? throw new ArgumentNullException(nameof(host));
@@ -252,6 +266,13 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             _paramsField.SetValueWithoutNotify(ps.Length == 0
                 ? string.Empty
                 : string.Join(",", ps.Select(p => p.ParameterType.FullName ?? p.ParameterType.Name)));
+
+            // Form just got rewritten to a different method — any
+            // previous Pull's snapshot belongs to the *old* form
+            // identity, so drop it. The user can hit Pull Original
+            // again to refresh against the new method.
+            _lastPulledKey = null;
+            _lastPulledOriginal = null;
         }
 
         private static System.Type ResolveTypeByName(string fullName)
@@ -314,6 +335,12 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             }
 
             _bodyField.SetValueWithoutNotify(pulled.Body);
+            // Remember the snapshot keyed by *this* form so the next
+            // Apply can ship it into spec.OriginalBody even after the
+            // user edits the body. Stale on Type/Method/Params change
+            // — handled in FillFormFromMethod / LoadIntoForm.
+            _lastPulledKey = MethodPatchSpec.Keyed(spec.TargetTypeName, spec.MethodName, spec.ParameterTypes);
+            _lastPulledOriginal = pulled.Body;
             SetStatus($"Pulled from {pulled.SourcePath} ({pulled.Body?.Length ?? 0} chars).", error: false);
         }
 
@@ -324,6 +351,23 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             _methodField.SetValueWithoutNotify(spec.MethodName);
             _paramsField.SetValueWithoutNotify(spec.ParameterTypes ?? string.Empty);
             _bodyField.SetValueWithoutNotify(spec.PatchBody ?? string.Empty);
+
+            // Restore the OriginalBody snapshot so a subsequent Apply
+            // re-persists it. The previous flow lost the snapshot the
+            // moment the user clicked Load on a stored spec — Pull's
+            // first run was permanent state, but every subsequent
+            // round-trip dropped it.
+            if (!string.IsNullOrEmpty(spec.OriginalBody))
+            {
+                _lastPulledKey = spec.Key;
+                _lastPulledOriginal = spec.OriginalBody;
+            }
+            else
+            {
+                _lastPulledKey = null;
+                _lastPulledOriginal = null;
+            }
+
             UpdateStatusForCurrentForm();
         }
 
@@ -341,6 +385,20 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             {
                 SetStatus("Target type and method name are required.", error: true);
                 return;
+            }
+
+            // Carry the most recent Pull's snapshot into the spec when
+            // it still belongs to *this* form identity. Stale snapshots
+            // (form changed since the last Pull) are dropped instead of
+            // persisted against the wrong target. Phase E will diff
+            // OriginalBody against PatchBody to surface the user's
+            // actual edits; without this hook the diff would always be
+            // "the entire patch body is new", which is wrong.
+            if (!string.IsNullOrEmpty(_lastPulledKey)
+                && _lastPulledKey == spec.Key
+                && _lastPulledOriginal != null)
+            {
+                spec.OriginalBody = _lastPulledOriginal;
             }
 
             try
