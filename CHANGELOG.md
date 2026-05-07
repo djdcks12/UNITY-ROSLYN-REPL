@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed (Phase 9 — discoverability rename)
+- `displayName` rebranded `Roslyn REPL` → `Unity Roslyn REPL` so OpenUPM and Package Manager UI searches for the literal `unity` keyword surface this package. The package id (`com.roslyn-repl`), C# namespaces (`RoslynRepl.Editor.*`), assembly definition, menu paths, and on-disk folder layout are all unchanged — anyone already depending on the package by name doesn't need to migrate, and nothing internal needs to be edited.
+- GitHub repository renamed `ROSLYN-REPL` → `UNITY-ROSLYN-REPL` for the same discoverability reason. All `repository.url`, `documentationUrl`, `changelogUrl`, `licensesUrl` references in `package.json`, README installation snippets (Git URL options, both `main` and tagged), and the OpenUPM descriptor (`Documentation~/openupm/com.roslyn-repl.yml`) point at the new URL. GitHub auto-redirects from the old slug, so existing clones, PR links, and outbound references keep resolving.
+- `unity` added to `package.json: keywords` and to the OpenUPM `topics` list.
+
 ### Added (Phase 7 — distribution)
 - `RoslynRepl.Editor.Core.DefaultSnippets`: bundled starter library of 8 snippets covering the most common Unity inspection scenarios — Unity version, editor time, active scene, root GameObjects, singleton lookup, memory snapshot, current Selection, and a `_` carry-over example. `ImportAll()` adds them to `SnippetStore`, skipping any name the user already has so re-running the import never overwrites edits the user made to a default.
 - `Tools / Roslyn REPL / Import Default Snippets` menu invokes the import and surfaces an `EditorUtility.DisplayDialog` summary (`X added, Y skipped`). If the Snippets popup is open, `SnippetLibraryWindow.NotifyChanged()` refreshes its list immediately.

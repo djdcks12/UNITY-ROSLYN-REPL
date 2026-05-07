@@ -40,7 +40,7 @@ Once the package is registered on OpenUPM, install it through the Unity Package 
     - **Name:** `OpenUPM`
     - **URL:** `https://package.openupm.com`
     - **Scopes:** `com.roslyn-repl`
-3. Open `Window / Package Manager`, switch the source dropdown to `My Registries`, find **Roslyn REPL**, and click `Install`.
+3. Open `Window / Package Manager`, switch the source dropdown to `My Registries`, find **Unity Roslyn REPL**, and click `Install`.
 
 The Package Manager UI will then show update notifications when a new version is published.
 
@@ -53,7 +53,7 @@ Add a single line to your project's `Packages/manifest.json`:
 ```json
 {
   "dependencies": {
-    "com.roslyn-repl": "https://github.com/djdcks12/ROSLYN-REPL.git"
+    "com.roslyn-repl": "https://github.com/djdcks12/UNITY-ROSLYN-REPL.git"
   }
 }
 ```
@@ -61,7 +61,7 @@ Add a single line to your project's `Packages/manifest.json`:
 Pin to a specific tag if you don't want bleeding-edge `main`:
 
 ```json
-"com.roslyn-repl": "https://github.com/djdcks12/ROSLYN-REPL.git#v0.7.0"
+"com.roslyn-repl": "https://github.com/djdcks12/UNITY-ROSLYN-REPL.git#v0.7.0"
 ```
 
 ### Option C: Put The Package In The Project

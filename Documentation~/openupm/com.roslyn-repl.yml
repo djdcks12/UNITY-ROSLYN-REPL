@@ -10,8 +10,8 @@
 # Reference: https://openupm.com/docs/adding-upm-package.html
 
 name: com.roslyn-repl
-displayName: Roslyn REPL
-repoUrl: https://github.com/djdcks12/ROSLYN-REPL
+displayName: Unity Roslyn REPL
+repoUrl: https://github.com/djdcks12/UNITY-ROSLYN-REPL
 parentRepoUrl: ""
 description: |
   Editor-only C# REPL for Unity, powered by Roslyn. Compile and execute
@@ -22,6 +22,7 @@ description: |
 licenseSpdxId: MIT
 licenseName: MIT License
 topics:
+  - unity
   - editor
   - tool
   - repl
