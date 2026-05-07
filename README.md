@@ -98,11 +98,12 @@ Shipped:
 
 - **Phase 4 — UX polish**: line-number gutter + caret position indicator, compile-error gutter markers with hover tooltips, `Usings…` editor popup that persists user-added namespaces via `EditorPrefs`. *Inline syntax highlighting is intentionally not shipped — see "Known limitations" below.*
 - **Phase 5 — Persistence + variable continuity**: `_` carries the previous successful non-null result into the next snippet (`return _ + 1;`); auto-saved run history (`History…`) — last 50 entries, double-click to reload; named snippet library (`Snippets…`) with save / load / rename / delete and overwrite confirmation. All persistence is project-scoped via a shared `ProjectScopedPrefs` helper so different Unity projects don't share state.
-- **Phase 6 — Watch panel + soft cancellation (in this release)**: in-window Watch panel below Output that auto-re-evaluates user expressions after every Run, with a green flash on rows whose preview changed; `ReplOptions.TimeoutMs` (default 5000ms) wires `CancellationTokenSource.CancelAfter`, and snippets observe the token via the new wrapper-class `ct` accessor (`for(...) { ct.ThrowIfCancellationRequested(); }`). Cancellation surfaces as a distinct `ReplResultKind.Cancelled` so the UI can render it as a warning instead of a runtime error. *`async / await` inside snippets is intentionally not shipped — see "Known limitations" below.*
+- **Phase 6 — Watch panel + soft cancellation**: in-window Watch panel below Output that auto-re-evaluates user expressions after every Run, with a green flash on rows whose preview changed; `ReplOptions.TimeoutMs` (default 5000ms) wires `CancellationTokenSource.CancelAfter`, and snippets observe the token via the new wrapper-class `ct` accessor (`for(...) { ct.ThrowIfCancellationRequested(); }`). Cancellation surfaces as a distinct `ReplResultKind.Cancelled` so the UI can render it as a warning instead of a runtime error. *`async / await` inside snippets is intentionally not shipped — see "Known limitations" below.*
+- **Phase 7 — Distribution (in this release)**: bundled `DefaultSnippets` library — 8 starter snippets one menu click away; expanded README with a quick-start, window guide, keyboard shortcuts, and troubleshooting.
 
-Planned (deferred):
+Open:
 
-- **Phase 7 — Distribution**: `Samples~` default snippet library, README polish + screenshots, OpenUPM submission.
+- **OpenUPM registry submission**. The package metadata is in shape; submission is a separate yaml PR against the OpenUPM repo plus a tagged GitHub release. Held until distribution is the priority.
 
 ## Known limitations
 

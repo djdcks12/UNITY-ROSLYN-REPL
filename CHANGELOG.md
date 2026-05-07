@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added (Phase 7 — distribution)
 - `RoslynRepl.Editor.Core.DefaultSnippets`: bundled starter library of 8 snippets covering the most common Unity inspection scenarios — Unity version, editor time, active scene, root GameObjects, singleton lookup, memory snapshot, current Selection, and a `_` carry-over example. `ImportAll()` adds them to `SnippetStore`, skipping any name the user already has so re-running the import never overwrites edits the user made to a default.
 - `Tools / Roslyn REPL / Import Default Snippets` menu invokes the import and surfaces an `EditorUtility.DisplayDialog` summary (`X added, Y skipped`). If the Snippets popup is open, `SnippetLibraryWindow.NotifyChanged()` refreshes its list immediately.
+- README expanded with Quick start, Window guide (ASCII layout + toolbar / side-panel reference tables), Inside snippets (`_` and `ct` accessors), Keyboard shortcuts table, Menus list, and a Troubleshooting section covering six recurring friction points. Roadmap marks Phase 7 shipped; OpenUPM submission moves to its own "Open" section since it's an external workflow rather than a code change.
 
 ### Added (Phase 6 — watch panel)
 - `RoslynRepl.Editor.Core.WatchStore`: project-scoped, `EditorPrefs`-backed list of watch expressions. Same base64-per-entry storage as `RunHistoryStore` so any character a user types is safe. De-dupes exact duplicates so accidental double-Enter doesn't add the same row twice.
