@@ -115,7 +115,14 @@ namespace RoslynRepl.Editor.Patches
         {
             if (_byKey.Count == 0) return;
             _byKey.Clear();
-            Persist();
+            // Use the dedicated DeleteKey path instead of Persist()'s
+            // SetString-with-empty-list. SetString("") leaves an empty
+            // EditorPrefs key on disk, which technically doesn't retain
+            // any user data but contradicts the README's "Reset removes
+            // every package-owned EditorPrefs key" promise. Match the
+            // behavior the other stores ship (UsingsStore.Clear,
+            // RunHistoryStore.Clear, etc. all call DeleteKey directly).
+            PatchPersistence.Clear();
             Changed?.Invoke();
         }
 
