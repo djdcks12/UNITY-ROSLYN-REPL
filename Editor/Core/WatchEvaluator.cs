@@ -257,6 +257,58 @@ namespace RoslynRepl.Editor.Core
         {
             value = null;
             matched = null;
+            capHit = false;
+
+            TryReadIdentifier(path, 0, out var rootName);
+
+            // Owner-qualified pass first, with the rootName threaded
+            // into the InstanceLocator filter. The previous shape did
+            // a single sweep with `filter = ""` and the 1000-entry cap,
+            // which silently dropped exact-owner matches whose entry
+            // sorted past the cap (a real failure mode in big scenes).
+            // Running the qualified pass against a name-filtered pool
+            // lets the cap apply to the *narrowed* set instead — a
+            // type called "GameManager" with a few candidate instances
+            // is virtually never going to overflow 1000, so the cap
+            // disappears as a concern for explicit paths.
+            if (!string.IsNullOrEmpty(rootName))
+            {
+                var qualified = InstanceLocator.Find(InstanceCategory.All, rootName, GlobalSearchMaxEntries);
+                foreach (var entry in qualified)
+                {
+                    var root = entry?.Value;
+                    if (root == null || IsDestroyedUnityObject(root)) continue;
+                    if (!IsEntryNameMatch(entry, rootName)) continue;
+
+                    int index = rootName.Length;
+                    if (index == path.Length)
+                    {
+                        value = root;
+                        matched = entry;
+                        return true;
+                    }
+
+                    if (path[index] == '.' || path[index] == '[')
+                    {
+                        // The user explicitly named *this* instance via
+                        // TypeName / DisplayName, so property getter
+                        // invocation is consistent with the user's intent.
+                        // e.g. `GameManager.Config` resolves Config as a
+                        // property if needed.
+                        if (TryResolvePathFromIndex(root, path, index, out value, allowProperty: true))
+                        {
+                            matched = entry;
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            // Unqualified fallback: the original path-against-everyone
+            // sweep, capped. Runs only after the owner-qualified pass
+            // didn't resolve, so an explicit `GameManager.Config` never
+            // races against a fields-only `Config` match somewhere
+            // earlier in the pool.
             var entries = InstanceLocator.Find(InstanceCategory.All, string.Empty, GlobalSearchMaxEntries);
             // Approximate "the cap stopped us" as "we filled the
             // requested budget exactly". InstanceLocator doesn't tell
@@ -268,47 +320,19 @@ namespace RoslynRepl.Editor.Core
             capHit = entries.Count >= GlobalSearchMaxEntries;
             if (entries.Count == 0) return false;
 
-            TryReadIdentifier(path, 0, out var rootName);
-
             foreach (var entry in entries)
             {
                 var root = entry?.Value;
                 if (root == null || IsDestroyedUnityObject(root)) continue;
 
-                if (!string.IsNullOrEmpty(rootName) && IsEntryNameMatch(entry, rootName))
-                {
-                    int index = rootName.Length;
-                    if (index == path.Length)
-                    {
-                        value = root;
-                        matched = entry;
-                        return true;
-                    }
-
-                    if (path[index] == '.' || path[index] == '[')
-                    {
-                        // Owner-qualified path: the user explicitly named
-                        // *this* instance via TypeName / DisplayName, so
-                        // property getter invocation is consistent with
-                        // the user's intent. e.g. `GameManager.Config`
-                        // resolves Config as a property if needed.
-                        if (TryResolvePathFromIndex(root, path, index, out value, allowProperty: true))
-                        {
-                            matched = entry;
-                            return true;
-                        }
-                    }
-                }
-
-                // Unqualified path: the user typed `Count` / `IsReady` /
-                // `_data` and we're guessing which live instance they
-                // meant. First-match wins, so allowing property getters
-                // here would silently invoke arbitrary user code on the
-                // first owner whose type happens to declare `Count` as
-                // a property — every Run, every refresh, with no
-                // breadcrumb to which object actually fired. Restrict
-                // to fields-only; users who want a property must
-                // qualify the owner.
+                // The user typed `Count` / `IsReady` / `_data` and we're
+                // guessing which live instance they meant. First-match
+                // wins, so allowing property getters here would silently
+                // invoke arbitrary user code on the first owner whose
+                // type happens to declare `Count` as a property — every
+                // Run, every refresh, with no breadcrumb to which object
+                // actually fired. Restrict to fields-only; users who
+                // want a property must qualify the owner.
                 if (TryResolvePathFromIndex(root, path, 0, out value, allowProperty: false))
                 {
                     matched = entry;
