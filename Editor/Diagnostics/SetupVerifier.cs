@@ -5,6 +5,7 @@ using System.Reflection;
 using System.Text;
 using UnityEditor;
 using UnityEngine;
+using RoslynRepl.Editor.Core;
 
 namespace RoslynRepl.Editor.Diagnostics
 {
@@ -148,7 +149,36 @@ namespace RoslynRepl.Editor.Diagnostics
                     sb.AppendLine($"             → Disable one Plugin Importer (Inspector → uncheck Editor) to resolve.");
                 }
             }
+
+            // Phase 11f: runtime diagnostics. Every Run / Watch refresh
+            // emits a `ReplDynamic_<guid>` assembly that can't be
+            // unloaded until the Editor reloads its AppDomain (Mono
+            // doesn't ship CollectibleAssemblyLoadContext). Surfacing
+            // the count makes the slow drift visible — handy for users
+            // tuning Watch panels with N expressions × M Runs and
+            // wondering why memory crept up.
+            sb.AppendLine();
+            sb.AppendLine($"  [diag]     Loaded REPL dynamic assemblies: {CountDynamicReplAssemblies()}");
+            sb.AppendLine($"             (cleared by domain reload — recompile any script or re-enter Play Mode)");
+            sb.AppendLine($"  [diag]     Cached MetadataReferences: {AssemblyReferenceCache.CountOrZero}");
             return sb.ToString();
+        }
+
+        private static int CountDynamicReplAssemblies()
+        {
+            // Assembly.Load(byte[]) produces a regular Assembly (not
+            // IsDynamic), so filter by name prefix. Matches the
+            // "ReplDynamic_<8 hex>" naming ReplEngine.Execute uses.
+            int count = 0;
+            foreach (var a in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                string name;
+                try { name = a.GetName().Name; }
+                catch { continue; }
+                if (name != null && name.StartsWith("ReplDynamic_", StringComparison.Ordinal))
+                    count++;
+            }
+            return count;
         }
     }
 
