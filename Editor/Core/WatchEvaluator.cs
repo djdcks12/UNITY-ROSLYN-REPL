@@ -1,5 +1,8 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
+using System.Reflection;
+using UnityEngine;
 
 namespace RoslynRepl.Editor.Core
 {
@@ -14,6 +17,8 @@ namespace RoslynRepl.Editor.Core
         public string Expression;
         public string Preview;          // ValueFormatter output of the value
         public string TypeName;         // for the row's type column
+        public object Value;            // raw value for expandable watch trees
+        public ReplValueNode Tree;      // serialized value tree for expanded rows
         public bool Failed;             // true on compile/runtime error or cancel
         public string ErrorMessage;
         public bool JustChanged;        // true if Preview differs from last run
@@ -32,6 +37,7 @@ namespace RoslynRepl.Editor.Core
         public event Action Changed;
 
         private const int WatchTimeoutMs = 1000;
+        private const int GlobalSearchMaxEntries = int.MaxValue;
 
         private readonly Dictionary<string, string> _previousPreviews = new();
         private readonly List<WatchResult> _current = new();
@@ -113,10 +119,14 @@ namespace RoslynRepl.Editor.Core
             switch (r.Kind)
             {
                 case ReplResultKind.Success:
-                    result.Preview = ValueFormatter.Format(r.Value);
-                    result.TypeName = r.Value == null ? "null" : TypeFormatter.Short(r.Value.GetType());
+                    SetResolvedResult(result, r.Value);
                     break;
                 case ReplResultKind.CompileError:
+                    if (TryEvaluateFallbackPath(trimmed, result))
+                    {
+                        MarkChange(result);
+                        return result;
+                    }
                     result.Failed = true;
                     result.Preview = "<compile error>";
                     result.ErrorMessage = r.Diagnostics.Count > 0
@@ -124,6 +134,11 @@ namespace RoslynRepl.Editor.Core
                         : "Compile error";
                     break;
                 case ReplResultKind.RuntimeError:
+                    if (TryEvaluateFallbackPath(trimmed, result))
+                    {
+                        MarkChange(result);
+                        return result;
+                    }
                     result.Failed = true;
                     result.Preview = "<runtime error>";
                     result.ErrorMessage = r.ErrorMessage;
@@ -137,6 +152,333 @@ namespace RoslynRepl.Editor.Core
 
             MarkChange(result);
             return result;
+        }
+
+        private static bool TryEvaluateFallbackPath(string expression, WatchResult result)
+        {
+            try
+            {
+                if (!TryNormalizeOutputPath(expression, out var path)) return false;
+
+                if (TryEvaluateLastResultPath(path, out var value))
+                {
+                    SetResolvedResult(result, value);
+                    return true;
+                }
+
+                if (path == "_" || path.StartsWith("_.", StringComparison.Ordinal) || path.StartsWith("_[", StringComparison.Ordinal))
+                    return false;
+
+                if (!TryEvaluateGlobalPath(path, out value)) return false;
+                SetResolvedResult(result, value);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool TryEvaluateLastResultPath(string path, out object value)
+        {
+            value = null;
+            object current = ReplEngine.LastResult;
+            if (IsDestroyedUnityObject(current)) return false;
+
+            int index = 0;
+            if (path == "_")
+            {
+                value = current;
+                return true;
+            }
+
+            if (path.StartsWith("_.", StringComparison.Ordinal))
+            {
+                index = 2;
+            }
+            else if (path.StartsWith("_[", StringComparison.Ordinal))
+            {
+                index = 1;
+            }
+
+            return TryResolvePathFromIndex(current, path, index, out value);
+        }
+
+        private static bool TryEvaluateGlobalPath(string path, out object value)
+        {
+            value = null;
+            var entries = InstanceLocator.Find(InstanceCategory.All, string.Empty, GlobalSearchMaxEntries);
+            if (entries.Count == 0) return false;
+
+            TryReadIdentifier(path, 0, out var rootName);
+
+            foreach (var entry in entries)
+            {
+                var root = entry?.Value;
+                if (root == null || IsDestroyedUnityObject(root)) continue;
+
+                if (!string.IsNullOrEmpty(rootName) && IsEntryNameMatch(entry, rootName))
+                {
+                    int index = rootName.Length;
+                    if (index == path.Length)
+                    {
+                        value = root;
+                        return true;
+                    }
+
+                    if (path[index] == '.' || path[index] == '[')
+                    {
+                        if (TryResolvePathFromIndex(root, path, index, out value))
+                            return true;
+                    }
+                }
+
+                if (TryResolvePathFromIndex(root, path, 0, out value))
+                    return true;
+            }
+
+            return false;
+        }
+
+        private static bool TryResolvePathFromIndex(object root, string path, int index, out object value)
+        {
+            value = null;
+            object current = root;
+            if (index == path.Length)
+            {
+                value = current;
+                return true;
+            }
+
+            while (index < path.Length)
+            {
+                if (path[index] == '.')
+                {
+                    index++;
+                    if (index >= path.Length) return false;
+                }
+
+                if (path[index] == '[')
+                {
+                    if (!TryReadIndex(path, ref index, out var key)) return false;
+                    if (!TryResolveIndex(current, key, out current)) return false;
+                    continue;
+                }
+
+                if (!TryReadIdentifier(path, ref index, out var memberName)) return false;
+                if (!TryResolveMember(current, memberName, out current)) return false;
+
+                while (index < path.Length && path[index] == '[')
+                {
+                    if (!TryReadIndex(path, ref index, out var key)) return false;
+                    if (!TryResolveIndex(current, key, out current)) return false;
+                }
+            }
+
+            value = current;
+            return true;
+        }
+
+        private static bool IsEntryNameMatch(InstanceEntry entry, string rootName)
+        {
+            if (entry == null || string.IsNullOrEmpty(rootName)) return false;
+            return string.Equals(entry.TypeName, rootName, StringComparison.Ordinal)
+                || string.Equals(entry.DisplayName, rootName, StringComparison.Ordinal)
+                || string.Equals(entry.DeclaredType?.Name, rootName, StringComparison.Ordinal)
+                || string.Equals(entry.DeclaredType?.FullName, rootName, StringComparison.Ordinal);
+        }
+
+        private static bool TryNormalizeOutputPath(string expression, out string path)
+        {
+            path = expression?.Trim() ?? string.Empty;
+            if (path.StartsWith("return ", StringComparison.Ordinal) || path.StartsWith("return\t", StringComparison.Ordinal))
+                path = path.Substring(6).Trim();
+
+            if (path.EndsWith(";", StringComparison.Ordinal))
+                path = path.Substring(0, path.Length - 1).Trim();
+
+            if (string.IsNullOrEmpty(path)) return false;
+
+            foreach (char c in path)
+            {
+                if (char.IsWhiteSpace(c)) return false;
+                if (char.IsLetterOrDigit(c) || c == '_' || c == '.' || c == '[' || c == ']' || c == '"' || c == '\'')
+                    continue;
+                return false;
+            }
+
+            return true;
+        }
+
+        private static bool TryReadIdentifier(string path, ref int index, out string identifier)
+        {
+            identifier = null;
+            if (index >= path.Length) return false;
+
+            char first = path[index];
+            if (!(char.IsLetter(first) || first == '_')) return false;
+
+            int start = index++;
+            while (index < path.Length)
+            {
+                char c = path[index];
+                if (!(char.IsLetterOrDigit(c) || c == '_')) break;
+                index++;
+            }
+
+            identifier = path.Substring(start, index - start);
+            return true;
+        }
+
+        private static bool TryReadIdentifier(string path, int index, out string identifier)
+        {
+            return TryReadIdentifier(path, ref index, out identifier);
+        }
+
+        private static bool TryReadIndex(string path, ref int index, out object key)
+        {
+            key = null;
+            if (index >= path.Length || path[index] != '[') return false;
+            index++;
+            if (index >= path.Length) return false;
+
+            if (path[index] == '"' || path[index] == '\'')
+            {
+                char quote = path[index++];
+                int start = index;
+                while (index < path.Length && path[index] != quote) index++;
+                if (index >= path.Length) return false;
+                key = path.Substring(start, index - start);
+                index++;
+            }
+            else
+            {
+                int start = index;
+                while (index < path.Length && char.IsDigit(path[index])) index++;
+                if (start == index) return false;
+                if (!int.TryParse(path.Substring(start, index - start), out var numericKey)) return false;
+                key = numericKey;
+            }
+
+            if (index >= path.Length || path[index] != ']') return false;
+            index++;
+            return true;
+        }
+
+        private static bool TryResolveMember(object target, string memberName, out object value)
+        {
+            value = null;
+            if (target == null || IsDestroyedUnityObject(target)) return false;
+
+            var type = target.GetType();
+            for (var t = type; t != null; t = t.BaseType)
+            {
+                var field = t.GetField(memberName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
+                if (field != null)
+                {
+                    value = field.GetValue(target);
+                    return true;
+                }
+
+                var property = t.GetProperty(memberName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
+                if (property == null || property.GetIndexParameters().Length != 0) continue;
+
+                var getter = property.GetGetMethod(true);
+                if (getter == null) continue;
+
+                try
+                {
+                    value = getter.Invoke(target, null);
+                    return true;
+                }
+                catch
+                {
+                    return false;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool TryResolveIndex(object target, object key, out object value)
+        {
+            value = null;
+            if (target == null || IsDestroyedUnityObject(target)) return false;
+
+            if (target is IDictionary dictionary)
+            {
+                if (!dictionary.Contains(key)) return false;
+                value = dictionary[key];
+                return true;
+            }
+
+            if (!(key is int index)) return false;
+
+            if (target is Array array)
+            {
+                if (index < 0 || index >= array.Length) return false;
+                value = array.GetValue(index);
+                return true;
+            }
+
+            if (target is IList list)
+            {
+                if (index < 0 || index >= list.Count) return false;
+                value = list[index];
+                return true;
+            }
+
+            if (target is IEnumerable enumerable)
+            {
+                int i = 0;
+                foreach (var item in enumerable)
+                {
+                    if (i == index)
+                    {
+                        value = item;
+                        return true;
+                    }
+                    i++;
+                }
+            }
+
+            return false;
+        }
+
+        private static void SetResolvedResult(WatchResult result, object value)
+        {
+            if (IsDestroyedUnityObject(value))
+                value = null;
+
+            result.Value = value;
+            result.Preview = ValueFormatter.Format(value);
+            result.TypeName = value == null ? "null" : TypeFormatter.Short(value.GetType());
+            result.Tree = BuildTree(value);
+            result.Failed = false;
+            result.ErrorMessage = null;
+        }
+
+        private static ReplValueNode BuildTree(object value)
+        {
+            try
+            {
+                return SimpleObjectSerializer.ToTree(value);
+            }
+            catch (Exception ex)
+            {
+                return new ReplValueNode
+                {
+                    Name = "(result)",
+                    TypeName = "<error>",
+                    Preview = $"[error: {ex.GetBaseException().Message}]",
+                    IsExpandable = false
+                };
+            }
+        }
+
+        private static bool IsDestroyedUnityObject(object value)
+        {
+            return value is UnityEngine.Object unityObject && unityObject == null;
         }
 
         private void MarkChange(WatchResult result)

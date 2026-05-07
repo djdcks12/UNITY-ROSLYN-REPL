@@ -17,7 +17,7 @@
         <ui:TwoPaneSplitView orientation="Horizontal" fixed-pane-initial-dimension="280" fixed-pane-index="0">
             <ui:VisualElement name="browser-host" class="rr-pane rr-pane--browser" />
 
-            <ui:TwoPaneSplitView orientation="Vertical" fixed-pane-initial-dimension="320" fixed-pane-index="1">
+            <ui:TwoPaneSplitView orientation="Vertical" fixed-pane-initial-dimension="360" fixed-pane-index="1">
                 <ui:VisualElement name="code-pane" class="rr-pane">
                     <ui:VisualElement class="rr-pane-header">
                         <ui:Label text="Code" class="rr-pane-title" />
@@ -27,7 +27,7 @@
                     <ui:VisualElement name="code-editor-host" class="rr-code-editor-host" />
                 </ui:VisualElement>
 
-                <ui:TwoPaneSplitView orientation="Vertical" fixed-pane-initial-dimension="120" fixed-pane-index="1">
+                <ui:TwoPaneSplitView orientation="Vertical" fixed-pane-initial-dimension="100" fixed-pane-index="1">
                     <ui:VisualElement name="output-pane" class="rr-pane">
                         <ui:VisualElement class="rr-pane-header">
                             <ui:Label text="Output" class="rr-pane-title" />

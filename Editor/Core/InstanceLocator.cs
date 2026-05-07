@@ -40,18 +40,18 @@ namespace RoslynRepl.Editor.Core
             string filter,
             int maxResults = 200)
         {
-            // "All" intentionally excludes Singleton scanning — that path does
-            // a domain-wide reflection sweep for self-returning static members,
-            // which can be expensive and (depending on the project) read user
-            // backing fields whose graphs are heavy. The user must opt in by
-            // selecting the Singleton category explicitly.
+            // "All" includes every browseable source the window exposes. The
+            // singleton scanner uses cached reflection metadata, so the first
+            // All refresh after a domain reload may do more work, but users
+            // expect singleton-style managers to appear in the catch-all view.
             IEnumerable<InstanceEntry> pool = category switch
             {
                 InstanceCategory.MonoBehaviour    => FindMonoBehaviours(),
                 InstanceCategory.ScriptableObject => FindScriptableObjects(),
                 InstanceCategory.Singleton        => SingletonScanner.Find(),
                 _                                 => FindMonoBehaviours()
-                                                       .Concat(FindScriptableObjects()),
+                                                       .Concat(FindScriptableObjects())
+                                                       .Concat(SingletonScanner.Find()),
             };
 
             if (!string.IsNullOrEmpty(filter))

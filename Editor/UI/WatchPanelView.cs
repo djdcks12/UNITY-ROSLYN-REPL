@@ -22,6 +22,7 @@ namespace RoslynRepl.Editor.UI
         private VisualElement _rowsContainer;
         private TextField _addField;
         private Label _statusLabel;
+        private readonly HashSet<string> _expanded = new();
 
         // Highlight state — when an expression's preview differs from its
         // previous snapshot, the row gets a "changed" CSS class for a
@@ -147,21 +148,35 @@ namespace RoslynRepl.Editor.UI
             }
 
             int changed = 0;
+            var liveExpressions = new HashSet<string>();
             foreach (var r in rows)
             {
+                liveExpressions.Add(r.Expression);
+                if (!CanExpand(r)) _expanded.Remove(r.Expression);
                 var row = BuildRow(r);
                 _rowsContainer.Add(row);
                 if (r.JustChanged) { _highlighted.Add(r.Expression); changed++; }
             }
+            _expanded.RemoveWhere(expression => !liveExpressions.Contains(expression));
             _statusLabel.text = changed > 0 ? $"{rows.Count} watches • {changed} changed" : $"{rows.Count} watches";
         }
 
         private VisualElement BuildRow(WatchResult r)
         {
+            var block = new VisualElement();
+            block.AddToClassList("rr-watch-row-block");
+
             var row = new VisualElement();
             row.AddToClassList("rr-watch-row");
             if (r.Failed) row.AddToClassList("rr-watch-row--failed");
             if (r.JustChanged) row.AddToClassList("rr-watch-row--changed");
+
+            bool canExpand = CanExpand(r);
+            bool expanded = canExpand && _expanded.Contains(r.Expression);
+            var expandBtn = new Button(() => ToggleExpanded(r.Expression)) { text = canExpand ? (expanded ? "▾" : "▸") : string.Empty };
+            expandBtn.AddToClassList("rr-watch-expand-btn");
+            expandBtn.SetEnabled(canExpand);
+            row.Add(expandBtn);
 
             var expr = new Label(r.Expression);
             expr.AddToClassList("rr-watch-cell-expr");
@@ -179,6 +194,14 @@ namespace RoslynRepl.Editor.UI
             var removeBtn = new Button(() => WatchStore.Remove(r.Expression)) { text = "✕" };
             removeBtn.AddToClassList("rr-watch-cell-remove");
             row.Add(removeBtn);
+            block.Add(row);
+
+            if (expanded)
+            {
+                var tree = BuildWatchTree(r.Tree);
+                tree.AddToClassList("rr-watch-tree");
+                block.Add(tree);
+            }
 
             // Schedule a clear of the change-highlight class after a
             // short delay so the user has time to notice the change
@@ -194,7 +217,110 @@ namespace RoslynRepl.Editor.UI
                 }).StartingIn(1500);
             }
 
-            return row;
+            return block;
+        }
+
+        private void ToggleExpanded(string expression)
+        {
+            if (!_expanded.Add(expression))
+                _expanded.Remove(expression);
+            RebuildRows();
+        }
+
+        private static bool CanExpand(WatchResult result)
+        {
+            return result != null
+                && !result.Failed
+                && result.Tree != null
+                && result.Tree.IsExpandable
+                && result.Tree.Children.Count > 0;
+        }
+
+        private static MultiColumnTreeView BuildWatchTree(ReplValueNode root)
+        {
+            var tv = new MultiColumnTreeView();
+            tv.fixedItemHeight = 22;
+            var treeHeight = CalculateWatchTreeHeight(root);
+            tv.style.height = treeHeight;
+            tv.style.minHeight = treeHeight;
+            tv.style.maxHeight = treeHeight;
+            tv.style.flexGrow = 0;
+            tv.style.flexShrink = 0;
+
+            tv.columns.Add(MakeColumn("name", "Name", 180, n => n?.Name ?? string.Empty, "rr-treecell--name", tv));
+            tv.columns.Add(MakeColumn("type", "Type", 130, n => n?.TypeName ?? string.Empty, "rr-treecell--type", tv));
+            tv.columns.Add(MakeColumn("value", "Value", 260, n => n?.Preview ?? string.Empty, "rr-treecell--value", tv));
+
+            int nextId = 0;
+            tv.SetRootItems(new List<TreeViewItemData<ReplValueNode>>
+            {
+                ToItemData(root, ref nextId)
+            });
+            tv.Rebuild();
+            tv.ExpandRootItems();
+            return tv;
+        }
+
+        private static float CalculateWatchTreeHeight(ReplValueNode root)
+        {
+            const float HeaderHeight = 24f;
+            const float RowHeight = 22f;
+            const float MinHeight = 96f;
+            const float MaxHeight = 260f;
+
+            int rowCount = CountTreeRows(root);
+            return Mathf.Clamp(HeaderHeight + rowCount * RowHeight, MinHeight, MaxHeight);
+        }
+
+        private static int CountTreeRows(ReplValueNode node)
+        {
+            if (node == null) return 0;
+
+            int count = 1;
+            if (node.Children == null) return count;
+            foreach (var child in node.Children)
+                count += CountTreeRows(child);
+            return count;
+        }
+
+        private static Column MakeColumn(
+            string name, string title, float width,
+            System.Func<ReplValueNode, string> getter,
+            string extraClass,
+            MultiColumnTreeView tv)
+        {
+            var col = new Column
+            {
+                name = name,
+                title = title,
+                width = width,
+                minWidth = 70,
+                stretchable = true
+            };
+            col.makeCell = () =>
+            {
+                var lbl = new Label();
+                lbl.AddToClassList("rr-treecell");
+                if (!string.IsNullOrEmpty(extraClass)) lbl.AddToClassList(extraClass);
+                return lbl;
+            };
+            col.bindCell = (ve, idx) =>
+            {
+                var node = tv.GetItemDataForIndex<ReplValueNode>(idx);
+                ((Label)ve).text = getter(node);
+            };
+            return col;
+        }
+
+        private static TreeViewItemData<ReplValueNode> ToItemData(ReplValueNode node, ref int nextId)
+        {
+            var children = new List<TreeViewItemData<ReplValueNode>>();
+            if (node.Children != null)
+            {
+                foreach (var child in node.Children)
+                    children.Add(ToItemData(child, ref nextId));
+            }
+            return new TreeViewItemData<ReplValueNode>(nextId++, node, children);
         }
     }
 }

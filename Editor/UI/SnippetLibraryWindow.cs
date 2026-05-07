@@ -105,6 +105,8 @@ namespace RoslynRepl.Editor.UI
 
             _nameField = new TextField();
             _nameField.style.flexGrow = 1;
+            _nameField.style.flexShrink = 1;
+            _nameField.style.minWidth = 0;
             _nameField.style.marginRight = 4;
             _nameField.RegisterCallback<KeyDownEvent>(evt =>
             {
@@ -117,6 +119,7 @@ namespace RoslynRepl.Editor.UI
             saveRow.Add(_nameField);
 
             var saveBtn = new Button(SubmitSave) { text = "Save" };
+            ConfigureTextButton(saveBtn, minWidth: 64);
             saveRow.Add(saveBtn);
             saveBox.Add(saveRow);
 
@@ -179,6 +182,8 @@ namespace RoslynRepl.Editor.UI
             var info = new VisualElement();
             info.AddToClassList("rrs-row-info");
             info.style.flexGrow = 1;
+            info.style.flexShrink = 1;
+            info.style.minWidth = 0;
             info.style.flexDirection = FlexDirection.Column;
 
             var name = new Label();
@@ -200,20 +205,30 @@ namespace RoslynRepl.Editor.UI
 
             var loadBtn = new Button { text = "Load" };
             loadBtn.AddToClassList("rrs-row-load");
-            loadBtn.style.minWidth = 50;
+            ConfigureTextButton(loadBtn, minWidth: 58);
             row.Add(loadBtn);
 
             var renameBtn = new Button { text = "Rename" };
             renameBtn.AddToClassList("rrs-row-rename");
-            renameBtn.style.minWidth = 60;
+            ConfigureTextButton(renameBtn, minWidth: 78);
             row.Add(renameBtn);
 
             var deleteBtn = new Button { text = "✕" };
             deleteBtn.AddToClassList("rrs-row-delete");
             deleteBtn.style.minWidth = 22;
+            deleteBtn.style.flexShrink = 0;
             row.Add(deleteBtn);
 
             return row;
+        }
+
+        private static void ConfigureTextButton(Button button, float minWidth)
+        {
+            button.style.minWidth = minWidth;
+            button.style.flexShrink = 0;
+            button.style.paddingLeft = 10;
+            button.style.paddingRight = 10;
+            button.style.unityTextAlign = TextAnchor.MiddleCenter;
         }
 
         private void BindRow(VisualElement element, int index)
