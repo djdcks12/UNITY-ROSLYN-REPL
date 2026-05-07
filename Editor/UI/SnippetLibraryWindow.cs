@@ -134,7 +134,27 @@ namespace RoslynRepl.Editor.UI
             Refresh();
         }
 
+        private void OnEnable()
+        {
+            // Subscribe at the EditorWindow lifecycle level so the live
+            // ListView refreshes whenever the store changes — most
+            // importantly when the user runs Tools / Roslyn REPL /
+            // Reset Project Data while this popup is open. Without the
+            // subscription the popup keeps showing the cleared rows
+            // and would re-persist them if the user then edits a row.
+            // Mirrors RunHistoryWindow's Phase 5 fix.
+            SnippetStore.Changed -= OnStoreChanged;
+            SnippetStore.Changed += OnStoreChanged;
+        }
+
+        private void OnDisable()
+        {
+            SnippetStore.Changed -= OnStoreChanged;
+        }
+
         private void OnDestroy() => _instance = null;
+
+        private void OnStoreChanged() => Refresh();
 
         private void Refresh()
         {
