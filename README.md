@@ -570,18 +570,26 @@ What `Reset Project Data` does and doesn't do:
 
 ## Security and Data Handling
 
-The REPL is a power tool. Read this section before pasting things into snippets or watches that you wouldn't comfortably paste into a plain text file on disk.
+The REPL is a power tool. Read this section before pasting things into snippets, watches, or method patches that you wouldn't comfortably paste into a plain text file on disk.
 
 ### Plain-text storage
 
-Snippets, run history, watch expressions, and custom usings are written to `EditorPrefs` as plain text:
+The following data is written to `EditorPrefs` as plain text:
+
+- snippets,
+- run history,
+- watch expressions,
+- custom usings,
+- runtime method patch bodies (Phase B onward — `__get<T>("hp")` style helper calls are part of the body and end up here verbatim).
+
+Storage location:
 
 - on Windows, that's `HKEY_CURRENT_USER\Software\Unity Technologies\Unity Editor 5.x` in the registry;
 - on macOS / Linux, the corresponding `~/Library/Preferences/...` plist or `~/.config/unity3d/...` files.
 
-Anyone with read access to the current OS user can read the values. Tokens, server URLs, account ids, and any string the user types into a snippet end up there until cleared. Treat the storage like a `.bash_history`, not like a secrets vault.
+Anyone with read access to the current OS user can read the values. Tokens, server URLs, account ids, and any string the user types into a snippet, a watch, or a patch body end up there until cleared. Treat the storage like a `.bash_history`, not like a secrets vault.
 
-If something sensitive ends up in the data, run `Tools / Roslyn REPL / Reset Project Data` — it removes the four EditorPrefs keys and resets the carry-over.
+If something sensitive ends up in the data, run `Tools / Roslyn REPL / Reset Project Data` — it removes every `EditorPrefs` key the package owns (snippets, run history, watches, custom usings, runtime method patch list), reverts every active Harmony detour, and resets the in-memory `_` carry-over.
 
 ### Arbitrary editor code execution
 
@@ -597,6 +605,13 @@ This is intentional — the REPL exists to do these things — but it means **on
 ### Watch side-effects
 
 Watch expressions re-evaluate after every Run. A watch like `MyManager.SpawnNextEnemy()` runs the call **once per Run, every Run**, until removed. Watches that mutate state, allocate, log, or talk to the network compound those costs across the whole session. From Phase 10 the Watch tree no longer walks property getters of the returned object (so a passive `Manager.Counter` watch is safe), but the *expression itself* still runs whatever the user wrote.
+
+### Runtime method patches outlive the session
+
+Method patches are persisted across domain reloads and Editor restarts (Phase B). That has two implications:
+
+- The patch body sits in `EditorPrefs` until you Revert (which keeps the draft) or use Reset Project Data (which deletes it). Same plain-text caveats as snippets — don't paste secrets in there.
+- Active patches re-install themselves on every Editor launch and Play Mode toggle. A `Player.Damage` redirect you applied last week will still be redirecting this week unless you reverted or reset it. Check the Patches list (or `Tools / Roslyn REPL / Verify Setup`) if you can't reproduce a bug from a clean source repo — a stale patch from earlier debugging may still be live.
 
 ### Editor hang from non-cooperative loops
 
