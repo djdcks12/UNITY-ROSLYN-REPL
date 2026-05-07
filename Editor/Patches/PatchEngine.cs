@@ -180,6 +180,19 @@ namespace RoslynRepl.Editor.Patches
         }
 
         /// <summary>
+        /// Public-facing wrapper around <see cref="ResolveTargetMethod"/>.
+        /// Phase C's "Pull Original" UI needs the same MethodInfo
+        /// resolution the engine uses, but without throwing — failure
+        /// just means "can't pull, show the user a hint".
+        /// </summary>
+        public static MethodInfo TryResolveTargetMethod(MethodPatchSpec spec, out string error)
+        {
+            error = null;
+            try { return ResolveTargetMethod(spec); }
+            catch (Exception ex) { error = ex.Message; return null; }
+        }
+
+        /// <summary>
         /// Look up <paramref name="spec"/>'s target method. Errors are
         /// thrown with messages the UI can show as the row's LastError.
         /// </summary>

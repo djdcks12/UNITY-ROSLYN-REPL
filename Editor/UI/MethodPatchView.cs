@@ -76,12 +76,31 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             _host.Add(_methodField);
             _host.Add(_paramsField);
 
+            var bodyHeader = new VisualElement();
+            bodyHeader.style.flexDirection = FlexDirection.Row;
+            bodyHeader.style.alignItems = Align.Center;
+            bodyHeader.style.marginTop = 4;
+            bodyHeader.style.marginBottom = 1;
+
             var bodyLabel = new Label("Patch body");
-            bodyLabel.style.marginTop = 4;
-            bodyLabel.style.marginBottom = 1;
             bodyLabel.style.fontSize = 10;
+            bodyLabel.style.flexGrow = 1;
             bodyLabel.style.color = new StyleColor(new Color(0.7f, 0.7f, 0.7f));
-            _host.Add(bodyLabel);
+            bodyHeader.Add(bodyLabel);
+
+            // Phase C: Pull Original — find the target method's source
+            // file and copy its body into the editor as the starting
+            // point for the user's edit. One-click "I want to add a
+            // log to the existing implementation" workflow.
+            var pullBtn = new Button(OnPullOriginalClicked) { text = "Pull Original" };
+            pullBtn.style.fontSize = 10;
+            pullBtn.tooltip =
+                "Locate the target method's .cs source and copy its body into the editor.\n" +
+                "Use as the starting point for an in-place edit. Phase C MVP: void instance methods,\n" +
+                "block bodies (`{ … }`), source must live in Assets/ or Packages/.";
+            bodyHeader.Add(pullBtn);
+
+            _host.Add(bodyHeader);
 
             _bodyField = new TextField { multiline = true, value = DefaultBody };
             _bodyField.style.minHeight = 110;
@@ -135,6 +154,57 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             _host.Add(scroll);
 
             RebuildActiveList();
+        }
+
+        private void OnPullOriginalClicked()
+        {
+            var spec = new MethodPatchSpec
+            {
+                TargetTypeName = _targetField.value?.Trim() ?? string.Empty,
+                MethodName     = _methodField.value?.Trim() ?? string.Empty,
+                ParameterTypes = _paramsField.value?.Trim() ?? string.Empty,
+            };
+            if (string.IsNullOrEmpty(spec.TargetTypeName) || string.IsNullOrEmpty(spec.MethodName))
+            {
+                SetStatus("Target type and method name are required to pull source.", error: true);
+                return;
+            }
+
+            var method = PatchEngine.TryResolveTargetMethod(spec, out var resolveErr);
+            if (method == null)
+            {
+                SetStatus($"Pull failed — {resolveErr}", error: true);
+                return;
+            }
+
+            var pulled = PatchSourcePuller.TryPullMethodBody(method);
+            if (!pulled.Success)
+            {
+                SetStatus($"Pull failed — {pulled.Error}", error: true);
+                return;
+            }
+
+            // Don't silently overwrite a non-default body — the user may
+            // already be mid-edit. The default starter snippet is
+            // recognizable; anything else gets a confirm dialog. (No
+            // Editor dialog support inside ShowUtility-style panels?
+            // EditorUtility.DisplayDialog works from the main editor
+            // window's context, which is where this view lives.)
+            bool currentIsDefault = string.IsNullOrEmpty(_bodyField.value)
+                                 || _bodyField.value == DefaultBody
+                                 || _bodyField.value.TrimStart().StartsWith("// Phase A MVP scope: void instance methods.");
+            if (!currentIsDefault)
+            {
+                bool overwrite = UnityEditor.EditorUtility.DisplayDialog(
+                    "Pull Original",
+                    "The patch body is non-empty. Overwrite it with the original method body from " + pulled.SourcePath + "?",
+                    "Overwrite",
+                    "Cancel");
+                if (!overwrite) { SetStatus("Pull cancelled — body unchanged.", error: false); return; }
+            }
+
+            _bodyField.SetValueWithoutNotify(pulled.Body);
+            SetStatus($"Pulled from {pulled.SourcePath} ({pulled.Body?.Length ?? 0} chars).", error: false);
         }
 
         public void LoadIntoForm(MethodPatchSpec spec)
