@@ -444,6 +444,50 @@ Because this is `EditorPrefs` storage:
 - it is not committed to source control,
 - moving the project to a different path can create a fresh project-scoped bucket.
 
+To wipe everything for the current project (snippets, run history, watches, custom usings, and the in-memory `_` carry-over) in one click, use `Tools / Roslyn REPL / Reset Project Data`. The menu reports counts before and after, and never touches data for other Unity projects on the same machine.
+
+## Security and Data Handling
+
+The REPL is a power tool. Read this section before pasting things into snippets or watches that you wouldn't comfortably paste into a plain text file on disk.
+
+### Plain-text storage
+
+Snippets, run history, watch expressions, and custom usings are written to `EditorPrefs` as plain text:
+
+- on Windows, that's `HKEY_CURRENT_USER\Software\Unity Technologies\Unity Editor 5.x` in the registry;
+- on macOS / Linux, the corresponding `~/Library/Preferences/...` plist or `~/.config/unity3d/...` files.
+
+Anyone with read access to the current OS user can read the values. Tokens, server URLs, account ids, and any string the user types into a snippet end up there until cleared. Treat the storage like a `.bash_history`, not like a secrets vault.
+
+If something sensitive ends up in the data, run `Tools / Roslyn REPL / Reset Project Data` — it removes the four EditorPrefs keys and resets the carry-over.
+
+### Arbitrary editor code execution
+
+Snippets compile and run as Editor C#. They can:
+
+- read and mutate any in-memory game state during Play Mode,
+- modify scenes, prefabs, and assets through `AssetDatabase`,
+- call out to the file system, network, and reflection,
+- import / delete Unity packages.
+
+This is intentional — the REPL exists to do these things — but it means **only run snippets you trust**. Pasting a snippet from chat or the web carries the same risk as running an unaudited Editor script.
+
+### Watch side-effects
+
+Watch expressions re-evaluate after every Run. A watch like `MyManager.SpawnNextEnemy()` runs the call **once per Run, every Run**, until removed. Watches that mutate state, allocate, log, or talk to the network compound those costs across the whole session. From Phase 10 the Watch tree no longer walks property getters of the returned object (so a passive `Manager.Counter` watch is safe), but the *expression itself* still runs whatever the user wrote.
+
+### Editor hang from non-cooperative loops
+
+Soft cancellation only stops snippets that observe `ct`. A snippet like `while (true) { }` or `for (long i = 0; i < long.MaxValue; i++) { }` with no `ct.ThrowIfCancellationRequested()` call will hang the Editor main thread until the OS kills the process. There is no hard kill — `Thread.Abort` is unavailable on Mono / .NET 6+. When in doubt, write loops as:
+
+```csharp
+for (long i = 0; i < N; i++)
+{
+    if ((i & 0xFFFF) == 0) ct.ThrowIfCancellationRequested();
+    // ...
+}
+```
+
 ## Menus
 
 Main menus:
@@ -451,9 +495,18 @@ Main menus:
 ```text
 Tools / Roslyn REPL / Open
 Tools / Roslyn REPL / Import Default Snippets
+Tools / Roslyn REPL / Reset Project Data
 Tools / Roslyn REPL / Verify Setup
 Tools / Roslyn REPL / Install Roslyn DLLs
 ```
+
+Use `Reset Project Data` when:
+
+- a project's snippet/history/watch list contains stale or sensitive entries,
+- you're decommissioning a project and want to leave nothing behind in `EditorPrefs`,
+- a teammate is taking over the machine.
+
+The menu shows counts before deletion and asks for confirmation. Other projects on the same machine are unaffected.
 
 Use `Verify Setup` when:
 
