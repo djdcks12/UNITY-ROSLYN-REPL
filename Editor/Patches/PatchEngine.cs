@@ -439,16 +439,44 @@ namespace RoslynRepl.Editor.Patches
             sb.AppendLine("    private static object __BaseInvokeFromDerived(object instance, System.Type derivedDecl, string name, object[] args)");
             sb.AppendLine("    {");
             sb.AppendLine("        args = args ?? new object[0];");
-            sb.AppendLine("        System.Reflection.MethodInfo m = null;");
+            // Collect ALL matching name+arity candidates across the
+            // base chain (instead of stopping at the first) so we can
+            // disambiguate same-arity overloads at runtime by their
+            // argument types. A first-hit-wins walk would silently
+            // pick `Apply(int)` for `base.Apply("hi")` when both
+            // overloads live on the same base class.
             sb.AppendLine("        var bf = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.DeclaredOnly;");
-            sb.AppendLine("        for (var bt = derivedDecl.BaseType; bt != null && m == null; bt = bt.BaseType)");
+            sb.AppendLine("        var ms = new System.Collections.Generic.List<System.Reflection.MethodInfo>();");
+            sb.AppendLine("        for (var bt = derivedDecl.BaseType; bt != null; bt = bt.BaseType)");
             sb.AppendLine("        {");
             sb.AppendLine("            foreach (var mm in bt.GetMethods(bf))");
             sb.AppendLine("            {");
-            sb.AppendLine("                if (mm.Name == name && mm.GetParameters().Length == args.Length) { m = mm; break; }");
+            sb.AppendLine("                if (mm.Name == name && mm.GetParameters().Length == args.Length) ms.Add(mm);");
             sb.AppendLine("            }");
+            sb.AppendLine("            if (ms.Count > 0) break;"); // first level that has any match wins (matches C# `base` shadowing)
             sb.AppendLine("        }");
-            sb.AppendLine("        if (m == null) throw new System.InvalidOperationException(\"Base method '\" + name + \"(\" + args.Length + \" args)' not found on the base chain of \" + derivedDecl.Name);");
+            sb.AppendLine("        if (ms.Count == 0) throw new System.InvalidOperationException(\"Base method '\" + name + \"(\" + args.Length + \" args)' not found on the base chain of \" + derivedDecl.Name);");
+            sb.AppendLine();
+            sb.AppendLine("        System.Reflection.MethodInfo m;");
+            sb.AppendLine("        if (ms.Count == 1) { m = ms[0]; }");
+            sb.AppendLine("        else");
+            sb.AppendLine("        {");
+            sb.AppendLine("            var argTypes = new System.Type[args.Length];");
+            sb.AppendLine("            for (int i = 0; i < args.Length; i++) argTypes[i] = args[i] == null ? typeof(object) : args[i].GetType();");
+            sb.AppendLine("            System.Reflection.MethodInfo best = null;");
+            sb.AppendLine("            foreach (var c in ms)");
+            sb.AppendLine("            {");
+            sb.AppendLine("                var pars = c.GetParameters();");
+            sb.AppendLine("                bool ok = true;");
+            sb.AppendLine("                for (int i = 0; i < pars.Length; i++)");
+            sb.AppendLine("                {");
+            sb.AppendLine("                    if (args[i] == null) continue;");
+            sb.AppendLine("                    if (!pars[i].ParameterType.IsAssignableFrom(argTypes[i])) { ok = false; break; }");
+            sb.AppendLine("                }");
+            sb.AppendLine("                if (ok) { best = c; break; }");
+            sb.AppendLine("            }");
+            sb.AppendLine("            m = best ?? ms[0];");
+            sb.AppendLine("        }");
             sb.AppendLine();
             sb.AppendLine("        System.Func<object, object[], object> del;");
             sb.AppendLine("        lock (__BaseInvokerCache) { __BaseInvokerCache.TryGetValue(m, out del); }");
@@ -746,9 +774,31 @@ namespace RoslynRepl.Editor.Patches
             sb.AppendLine("            if (__ms.Count == 1) { __m = __ms[0]; }");
             sb.AppendLine("            else");
             sb.AppendLine("            {");
+            // Candidate-list narrowing instead of `type.GetMethod`
+            // tie-break. The original tie-breaker called
+            // type.GetMethod(name, DeclaredOnly bf, null, argTypes, null)
+            // which only inspects `type` itself — never walks the
+            // base chain. Inherited private overloads at the same
+            // arity ended up tied and the code fell back to
+            // `__ms[0]`, picking the first one regardless of arg
+            // compatibility. Walk our own __ms list instead so the
+            // same chain that produced candidates also produces the
+            // disambiguation.
             sb.AppendLine("                var __argTypes = new System.Type[args.Length];");
             sb.AppendLine("                for (int __i = 0; __i < args.Length; __i++) __argTypes[__i] = args[__i] == null ? typeof(object) : args[__i].GetType();");
-            sb.AppendLine("                __m = type.GetMethod(name, __bf, null, __argTypes, null) ?? __ms[0];");
+            sb.AppendLine("                System.Reflection.MethodInfo __best = null;");
+            sb.AppendLine("                foreach (var __c in __ms)");
+            sb.AppendLine("                {");
+            sb.AppendLine("                    var __pars = __c.GetParameters();");
+            sb.AppendLine("                    bool __ok = true;");
+            sb.AppendLine("                    for (int __i = 0; __i < __pars.Length; __i++)");
+            sb.AppendLine("                    {");
+            sb.AppendLine("                        if (args[__i] == null) continue;");
+            sb.AppendLine("                        if (!__pars[__i].ParameterType.IsAssignableFrom(__argTypes[__i])) { __ok = false; break; }");
+            sb.AppendLine("                    }");
+            sb.AppendLine("                    if (__ok) { __best = __c; break; }");
+            sb.AppendLine("                }");
+            sb.AppendLine("                __m = __best ?? __ms[0];");
             sb.AppendLine("            }");
             sb.AppendLine("            return __m.Invoke(instance, args);");
             sb.AppendLine("        }");

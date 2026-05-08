@@ -152,6 +152,17 @@ namespace RoslynRepl.Editor.Patches
                 .ToArray();
             if (baseInvocations.Length > 0)
             {
+                // Build a SemanticModel early so we can infer each
+                // argument's CLR type for overload narrowing — same
+                // base-class can have `Apply(int)` and `Apply(string)`,
+                // and the helper's `<R>` (return type) needs to come
+                // from the *correct* overload. Without this we'd
+                // pick the first arity match and embed a wrong
+                // return-type token in the wrapper, then the runtime
+                // helper's `__r is T cast` bracket would silently
+                // produce `default(T)` for value types whose actual
+                // returned object is the right type but the wrong T.
+                var preModel = compilation.GetSemanticModel(tree);
                 var preReplace = new Dictionary<SyntaxNode, SyntaxNode>(baseInvocations.Length);
                 foreach (var inv in baseInvocations)
                 {
@@ -162,13 +173,14 @@ namespace RoslynRepl.Editor.Patches
                     var argsText = string.Join(", ", argsList.Select(a => a.ToFullString()));
                     var argsBlob = arity == 0 ? string.Empty : ", " + argsText;
 
-                    // Walk the base chain (declaringType.BaseType up)
-                    // to find a method matching name + arity. Use its
-                    // declared return type for the helper's <R>; fall
-                    // back to `object` for void or when the base
-                    // method isn't reachable via reflection (e.g.,
-                    // method is in an unloaded assembly).
-                    var baseM = FindBaseMethod(declaringType, name, arity);
+                    // Infer argument types from syntax — falls back to
+                    // null per argument when the SemanticModel can't
+                    // resolve (e.g., the arg is itself an unbound name
+                    // we'll rewrite later). Nulls are treated as
+                    // "accept anything" by FindBaseMethodByArgs, which
+                    // matches the runtime helper's null-arg policy.
+                    var argTypes = InferArgTypes(preModel, inv.ArgumentList);
+                    var baseM = FindBaseMethodByArgs(declaringType, name, argTypes);
                     string rArg = baseM != null && baseM.ReturnType != typeof(void)
                         ? TypeRef(baseM.ReturnType)
                         : "object";
@@ -773,6 +785,17 @@ namespace RoslynRepl.Editor.Patches
             var argsText = string.Join(", ", argsList.Select(a => a.ToFullString()));
             string argsBlob = arity == 0 ? string.Empty : ", " + argsText;
 
+            // Compile-time argument types for overload narrowing.
+            // SemanticModel can usually resolve literals + parameters
+            // even when the surrounding member access fails to bind;
+            // unresolved entries are null and treated as "accept
+            // anything" by FindMethodInfo's narrowing path. The
+            // important case is `Apply(int)` vs `Apply(string)` —
+            // without arg-type narrowing the rewriter would pick the
+            // first arity match and embed a wrong return type into
+            // the helper's `<R>`.
+            var argTypes = InferArgTypes(model, invocation.ArgumentList);
+
             // Pull generic info off whichever shape the access takes.
             // SimpleNameSyntax covers both IdentifierName ("Foo") and
             // GenericName ("Foo<X, Y>"); MemberAccess.Name is always a
@@ -808,7 +831,7 @@ namespace RoslynRepl.Editor.Patches
             // the declaring type.
             if (lhsForMember == null)
             {
-                var minfo = FindMethodInfo(declaringType, memberName, arity, includeStatic: false, staticOnly: false, genericArity: genericArity);
+                var minfo = FindMethodInfo(declaringType, memberName, arity, includeStatic: false, staticOnly: false, genericArity: genericArity, argTypes: argTypes);
                 if (minfo != null)
                 {
                     var rArg = ReturnTypeArg(minfo, genericArgSyntaxes);
@@ -826,7 +849,7 @@ namespace RoslynRepl.Editor.Patches
                     replacements[invocation] = SyntaxFactory.ParseExpression(call).WithTriviaFrom(invocation);
                     return true;
                 }
-                minfo = FindMethodInfo(declaringType, memberName, arity, includeStatic: true, staticOnly: true, genericArity: genericArity);
+                minfo = FindMethodInfo(declaringType, memberName, arity, includeStatic: true, staticOnly: true, genericArity: genericArity, argTypes: argTypes);
                 if (minfo != null)
                 {
                     var rArg = ReturnTypeArg(minfo, genericArgSyntaxes);
@@ -856,7 +879,7 @@ namespace RoslynRepl.Editor.Patches
             {
                 var staticType = ResolveTypeFromSymbol(nts);
                 if (staticType == null) return false;
-                var minfo = FindMethodInfo(staticType, memberName, arity, includeStatic: true, staticOnly: true, genericArity: genericArity);
+                var minfo = FindMethodInfo(staticType, memberName, arity, includeStatic: true, staticOnly: true, genericArity: genericArity, argTypes: argTypes);
                 if (minfo == null) return false;
                 var rArg = ReturnTypeArg(minfo, genericArgSyntaxes);
                 var typeRef = nts.ToDisplayString();
@@ -883,7 +906,7 @@ namespace RoslynRepl.Editor.Patches
             var lhsTypeInfo = model.GetTypeInfo(lhsForMember);
             Type lhsType = ResolveTypeFromSymbol(lhsTypeInfo.Type);
             MethodInfo extMinfo = lhsType != null
-                ? FindMethodInfo(lhsType, memberName, arity, includeStatic: false, staticOnly: false, genericArity: genericArity)
+                ? FindMethodInfo(lhsType, memberName, arity, includeStatic: false, staticOnly: false, genericArity: genericArity, argTypes: argTypes)
                 : null;
             string extRArg = ReturnTypeArg(extMinfo, genericArgSyntaxes);
             string extCall;
@@ -923,21 +946,131 @@ namespace RoslynRepl.Editor.Patches
             }
         }
 
-        // Find the first method matching name + arity on the
-        // declaring type's base chain (skipping declaringType itself).
-        // Walks DeclaredOnly + BaseType so private inherited members
-        // are visible — `base.X(...)` semantically targets a method
-        // declared *above* the current class, so we start at
-        // declaringType.BaseType.
-        private static MethodInfo FindBaseMethod(Type declaringType, string name, int arity)
+        // Find the matching method on the declaring type's base chain
+        // (skipping declaringType itself), narrowing same-arity
+        // overloads by argument types. Walks DeclaredOnly + BaseType
+        // so private inherited members are visible — `base.X(...)`
+        // semantically targets a method declared *above* the current
+        // class, so we start at declaringType.BaseType.
+        //
+        // argTypes entries can be null when SemanticModel couldn't
+        // resolve a particular argument's type (rewriter pre-pass
+        // runs against a tree that still has unresolved names from
+        // the user body); a null is treated as "accept anything",
+        // matching the runtime helper's null-arg fallback.
+        private static MethodInfo FindBaseMethodByArgs(Type declaringType, string name, Type[] argTypes)
         {
+            int arity = argTypes.Length;
             var bf = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
+
             for (var bt = declaringType?.BaseType; bt != null; bt = bt.BaseType)
             {
+                var candidates = new List<MethodInfo>();
                 foreach (var m in bt.GetMethods(bf))
                 {
-                    if (m.Name == name && m.GetParameters().Length == arity) return m;
+                    if (m.Name == name && m.GetParameters().Length == arity)
+                        candidates.Add(m);
                 }
+                if (candidates.Count == 0) continue;
+                if (candidates.Count == 1) return candidates[0];
+
+                // Narrow by argument type assignability. The first
+                // candidate whose parameter types are all assignable
+                // from the inferred arg types wins.
+                foreach (var c in candidates)
+                {
+                    if (ArgTypesMatch(c, argTypes)) return c;
+                }
+                return candidates[0];
+            }
+            return null;
+        }
+
+        // Arg-type assignability check shared by FindBaseMethodByArgs
+        // and FindMethodInfoByArgs. `null` arg types pass through
+        // (runtime helper has the same policy).
+        private static bool ArgTypesMatch(MethodInfo m, Type[] argTypes)
+        {
+            var pars = m.GetParameters();
+            for (int i = 0; i < argTypes.Length; i++)
+            {
+                if (argTypes[i] == null) continue;
+                if (!pars[i].ParameterType.IsAssignableFrom(argTypes[i])) return false;
+            }
+            return true;
+        }
+
+        // Infer argument expression types. Hybrid:
+        //   1. Literals are classified by SyntaxKind first — those
+        //      always resolve and don't depend on SemanticModel
+        //      cooperation. The base.X pre-pass runs against a
+        //      compilation that has unresolved `base` references,
+        //      and Roslyn's SemanticModel can return empty TypeInfo
+        //      for arguments inside a not-yet-bound invocation. A
+        //      direct literal classifier sidesteps that.
+        //   2. Non-literals fall through to SemanticModel.GetTypeInfo
+        //      — covers parameter references, local variables,
+        //      member accesses, etc.
+        //   3. ConvertedType is preferred over Type so implicit
+        //      conversions (`int → long`, `Foo → IFoo`) bind to the
+        //      most-specific resolvable target type.
+        // null entries are treated as "accept anything" by callers,
+        // matching the runtime helpers' null-arg policy.
+        private static Type[] InferArgTypes(SemanticModel model, ArgumentListSyntax argList)
+        {
+            if (argList == null) return Type.EmptyTypes;
+            var args = argList.Arguments;
+            var types = new Type[args.Count];
+            for (int i = 0; i < types.Length; i++)
+            {
+                types[i] = InferArgType(args[i].Expression, model);
+            }
+            return types;
+        }
+
+        private static Type InferArgType(ExpressionSyntax expr, SemanticModel model)
+        {
+            // Literal classification by syntax kind — robust against
+            // missing SemanticModel binding for the enclosing call.
+            if (expr is LiteralExpressionSyntax lit)
+            {
+                if (lit.IsKind(SyntaxKind.StringLiteralExpression)) return typeof(string);
+                if (lit.IsKind(SyntaxKind.CharacterLiteralExpression)) return typeof(char);
+                if (lit.IsKind(SyntaxKind.TrueLiteralExpression) || lit.IsKind(SyntaxKind.FalseLiteralExpression)) return typeof(bool);
+                if (lit.IsKind(SyntaxKind.NullLiteralExpression)) return null; // accept-anything sentinel
+                if (lit.IsKind(SyntaxKind.NumericLiteralExpression))
+                {
+                    // Suffix-based numeric typing. Matches C#
+                    // grammar: trailing L/UL/U/F/D/M, decimal point,
+                    // or scientific exponent. No suffix + integer →
+                    // int.
+                    var text = lit.Token.Text;
+                    if (text.EndsWith("UL", StringComparison.OrdinalIgnoreCase) || text.EndsWith("LU", StringComparison.OrdinalIgnoreCase))
+                        return typeof(ulong);
+                    if (text.EndsWith("L", StringComparison.OrdinalIgnoreCase)) return typeof(long);
+                    if (text.EndsWith("U", StringComparison.OrdinalIgnoreCase)) return typeof(uint);
+                    if (text.EndsWith("F", StringComparison.OrdinalIgnoreCase)) return typeof(float);
+                    if (text.EndsWith("D", StringComparison.OrdinalIgnoreCase)) return typeof(double);
+                    if (text.EndsWith("M", StringComparison.OrdinalIgnoreCase)) return typeof(decimal);
+                    if (text.IndexOf('.') >= 0 || text.IndexOf('e') >= 0 || text.IndexOf('E') >= 0)
+                        return typeof(double);
+                    return typeof(int);
+                }
+            }
+
+            // Anything else — defer to SemanticModel. This still
+            // covers the common cases (parameters, locals,
+            // member-access reads) when the wrapper happens to bind
+            // those even with base-context errors elsewhere.
+            if (model != null)
+            {
+                try
+                {
+                    var ti = model.GetTypeInfo(expr);
+                    var sym = ti.ConvertedType ?? ti.Type;
+                    return ResolveTypeFromSymbol(sym);
+                }
+                catch { /* SemanticModel can throw on broken trees — fall through */ }
             }
             return null;
         }
@@ -951,13 +1084,22 @@ namespace RoslynRepl.Editor.Patches
         // mirror that or it'd never recognize a `Heal(50)` call
         // whose Heal is declared on a base class and emit the
         // helper rewrite for it.
+        //
+        // When `argTypes` is supplied (non-empty + non-null Type[]),
+        // we collect candidates per inheritance level and narrow by
+        // argument type assignability so the rewriter picks the
+        // matching overload's return type for the helper's `<R>` —
+        // not the first arity match's. argTypes entries can each be
+        // null (unresolved arg expression); those slots are treated
+        // as "accept anything", matching the runtime helper.
         private static MethodInfo FindMethodInfo(
             Type t,
             string name,
             int arity,
             bool includeStatic,
             bool staticOnly = false,
-            int genericArity = 0)
+            int genericArity = 0,
+            Type[] argTypes = null)
         {
             BindingFlags bf = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
             if (!staticOnly) bf |= BindingFlags.Instance;
@@ -965,6 +1107,7 @@ namespace RoslynRepl.Editor.Patches
 
             for (var cur = t; cur != null; cur = cur.BaseType)
             {
+                var candidates = new List<MethodInfo>();
                 foreach (var m in cur.GetMethods(bf))
                 {
                     if (m.Name != name) continue;
@@ -975,8 +1118,17 @@ namespace RoslynRepl.Editor.Patches
                         if (m.GetGenericArguments().Length != genericArity) continue;
                     }
                     else if (m.IsGenericMethodDefinition) continue;
-                    return m;
+                    candidates.Add(m);
                 }
+                if (candidates.Count == 0) continue;
+                if (candidates.Count == 1 || argTypes == null || argTypes.Length != arity)
+                    return candidates[0];
+
+                foreach (var c in candidates)
+                {
+                    if (ArgTypesMatch(c, argTypes)) return c;
+                }
+                return candidates[0];
             }
             return null;
         }
