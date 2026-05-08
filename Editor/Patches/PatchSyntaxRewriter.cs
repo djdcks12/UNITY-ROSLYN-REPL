@@ -874,31 +874,79 @@ namespace RoslynRepl.Editor.Patches
         //   we can't resolve at rewrite time). Default to `object`
         //   and let the helper return default(T).
         //
-        // - When `m`'s return type is concrete (`int`, `Foo`,
-        //   `List<int>`), render it via TypeRef — same as a non-
-        //   generic call.
+        // - When `m`'s return type contains the method's open generic
+        //   parameters anywhere — directly (`T GetCache<T>()`) or
+        //   nested (`List<T> GetAll<T>()`, `Dictionary<string,T>
+        //   GetMap<T>()`, `Nullable<T> Read<T>()`) — substitute every
+        //   occurrence with the matching user-supplied TypeSyntax.
+        //   The wrapper's Prefix is non-generic so any leftover open
+        //   parameter would render `T` and break compilation.
         //
-        // - When `m`'s return type is itself a generic parameter
-        //   (`T GetCache<T>()`), substitute the matching user-supplied
-        //   type argument syntax. We index the method's generic
-        //   parameters and use the user's TypeSyntax at the same
-        //   index, ToFullString'd. That covers the canonical
-        //   `T Foo<T>()` shape; for `int Foo<T>()` (return type
-        //   independent of T) we fall through to TypeRef on the
-        //   concrete return type.
+        // - When the return type has no method-level type parameters,
+        //   render via TypeRef as a normal closed type.
         private static string ReturnTypeArg(MethodInfo m, TypeSyntax[] genericArgSyntaxes)
         {
             if (m == null) return "object";
             var ret = m.ReturnType;
             if (ret == typeof(void)) return "object";
-            if (ret.IsGenericParameter && genericArgSyntaxes != null && genericArgSyntaxes.Length > 0)
+
+            if (m.IsGenericMethodDefinition && genericArgSyntaxes != null && genericArgSyntaxes.Length > 0)
             {
                 var typeParams = m.GetGenericArguments();
-                int idx = Array.IndexOf(typeParams, ret);
-                if (idx >= 0 && idx < genericArgSyntaxes.Length)
-                    return genericArgSyntaxes[idx].ToFullString().Trim();
+                var sub = new Dictionary<Type, string>();
+                for (int i = 0; i < typeParams.Length && i < genericArgSyntaxes.Length; i++)
+                {
+                    sub[typeParams[i]] = genericArgSyntaxes[i].ToFullString().Trim();
+                }
+                return RenderCSharpTypeWithSubstitution(ret, sub);
             }
+
             return TypeRef(ret);
+        }
+
+        // Recursive C# type renderer that replaces method generic
+        // parameters with the user's type-argument syntax wherever
+        // they appear. Mirrors RenderCSharpType but consults the
+        // substitution map at each step. Falls back to RenderCSharpType
+        // when the type has no substitutable parameter (so the cost
+        // for non-generic method return types is zero).
+        private static string RenderCSharpTypeWithSubstitution(Type t, Dictionary<Type, string> sub)
+        {
+            if (t == null) return "object";
+            if (t.IsByRef) t = t.GetElementType();
+
+            // Direct parameter hit — emit the user's TypeSyntax.
+            if (t.IsGenericParameter && sub.TryGetValue(t, out var direct))
+                return direct;
+
+            if (t.IsArray)
+            {
+                var elem = t.GetElementType();
+                int rank = t.GetArrayRank();
+                var brackets = "[" + new string(',', rank - 1) + "]";
+                return RenderCSharpTypeWithSubstitution(elem, sub) + brackets;
+            }
+            if (t.IsPointer)
+                return RenderCSharpTypeWithSubstitution(t.GetElementType(), sub) + "*";
+
+            // Unsubstituted generic parameter (e.g., a class-level T
+            // we don't have a binding for). Shouldn't happen for the
+            // method-level case, but emit the name so the failure is
+            // a clear "T" rather than a silent typeof(object) cast.
+            if (t.IsGenericParameter) return t.Name;
+
+            if (t.IsGenericType)
+            {
+                var def = t.GetGenericTypeDefinition();
+                var rawName = def.FullName ?? def.Name;
+                int tick = rawName.IndexOf('`');
+                var head = (tick >= 0 ? rawName.Substring(0, tick) : rawName).Replace('+', '.');
+                var args = t.GetGenericArguments();
+                if (args.Length == 0) return head;
+                return head + "<" + string.Join(", ", args.Select(a => RenderCSharpTypeWithSubstitution(a, sub))) + ">";
+            }
+
+            return (t.FullName ?? t.Name).Replace('+', '.');
         }
 
         // ─── Helpers ──────────────────────────────────────────────
