@@ -18,6 +18,36 @@ namespace RoslynRepl.Editor.Patches
     }
 
     /// <summary>
+    /// What the UI should render for a spec right now. Computed by
+    /// <see cref="PatchRegistry.GetDisplayState"/> from the persisted
+    /// <see cref="MethodPatchSpec.Status"/>, the live
+    /// <see cref="PatchEngine.IsApplied"/> map, and the
+    /// session-only dormancy set. Centralizing this decision in one
+    /// helper means UI surfaces — toolbar badge, active-list row,
+    /// form status line, Apply failure handling — never reach into
+    /// the raw fields and assemble their own variant of "is this
+    /// row really live right now". Reviewer-driven separation
+    /// (issue #22 rounds three / four PR review): UI must not
+    /// interpret <c>spec.Status == Active</c> directly because
+    /// auto-off-dormant specs keep that field at Active for
+    /// persistence reasons.
+    /// </summary>
+    public enum PatchDisplayState
+    {
+        /// <summary>Persisted draft, no detour expected.</summary>
+        Inactive,
+
+        /// <summary>Persisted Active and a Harmony detour really is installed right now.</summary>
+        Active,
+
+        /// <summary>Persisted Active intent kept on disk, but no detour is installed for the current session — auto-reapply is off, or the spec hasn't been Apply'd in this session yet. UI should render this distinct from Active so a user can tell "the row I see won't intercept calls right now".</summary>
+        DormantAutoOff,
+
+        /// <summary>Last Apply attempt failed; <see cref="MethodPatchSpec.LastError"/> carries the diagnostic.</summary>
+        Failed,
+    }
+
+    /// <summary>
     /// Identification + content of a single method patch.
     ///
     /// The triple (TargetTypeName, MethodName, ParameterTypes) uniquely
@@ -72,9 +102,92 @@ namespace RoslynRepl.Editor.Patches
 
         private static readonly Dictionary<string, MethodPatchSpec> _byKey = new();
 
+        // Session-only dormancy bookkeeping (issue #22 follow-up). The
+        // auto-reapply opt-out path needs a way to say "treat this
+        // spec as Inactive for the current process" without ever
+        // touching <see cref="MethodPatchSpec.Status"/> or
+        // persistence — because the same spec instance lives in
+        // _byKey and Persist serializes _byKey.Values, mutating
+        // Status would leak into the next save the *moment* any
+        // other operation in the session calls AddOrUpdate / Remove
+        // / Clear and triggers a Persist over every value. Storing
+        // the dormancy state in a separate set keyed on
+        // <see cref="MethodPatchSpec.Key"/> guarantees the live
+        // process can shadow the persisted desired status without
+        // losing it.
+        private static readonly HashSet<string> _sessionDormantKeys = new();
+
         public static IReadOnlyCollection<MethodPatchSpec> Specs => _byKey.Values;
 
         public static int Count => _byKey.Count;
+
+        /// <summary>True when the spec with this key is shown as
+        /// dormant in the live process — auto-reapply opted out
+        /// for this session — even though its persisted Status is
+        /// still Active. Most UI code should prefer
+        /// <see cref="GetDisplayState"/>, which folds dormancy and
+        /// installed-detour state into a single enum so callers
+        /// don't have to compose the rules themselves.</summary>
+        public static bool IsSessionDormant(string key) =>
+            !string.IsNullOrEmpty(key) && _sessionDormantKeys.Contains(key);
+
+        /// <summary>
+        /// Single source of truth for what the UI should render for
+        /// this spec right now. Combines the persisted
+        /// <see cref="MethodPatchSpec.Status"/> with the live
+        /// <see cref="PatchEngine.IsApplied"/> map and the session
+        /// dormancy set so callers never re-derive the rules
+        /// (and never miss a case when the rules change).
+        ///
+        /// Mapping:
+        ///   • Status=Failed                                 → Failed
+        ///   • Status=Inactive                               → Inactive
+        ///   • Status=Active && IsSessionDormant             → DormantAutoOff
+        ///   • Status=Active && PatchEngine.IsApplied        → Active
+        ///   • Status=Active && !IsApplied && !dormant       → DormantAutoOff
+        ///         (the persisted intent is Active but no detour
+        ///          is installed — usually a transient state right
+        ///          before Apply runs, or a manual registry mutation
+        ///          from outside the engine. Treating it like the
+        ///          dormant case gives the user the same install
+        ///          affordance instead of falsely claiming the row
+        ///          is live.)
+        /// </summary>
+        public static PatchDisplayState GetDisplayState(MethodPatchSpec spec)
+        {
+            if (spec == null) return PatchDisplayState.Inactive;
+            switch (spec.Status)
+            {
+                case PatchStatus.Failed:   return PatchDisplayState.Failed;
+                case PatchStatus.Inactive: return PatchDisplayState.Inactive;
+                case PatchStatus.Active:
+                    if (IsSessionDormant(spec.Key))    return PatchDisplayState.DormantAutoOff;
+                    if (PatchEngine.IsApplied(spec))   return PatchDisplayState.Active;
+                    return PatchDisplayState.DormantAutoOff;
+                default:                   return PatchDisplayState.Inactive;
+            }
+        }
+
+        /// <summary>Mark the spec with this key dormant for the
+        /// current process. Persistence is not touched. Caller is
+        /// expected to follow up with
+        /// <see cref="NotifyInMemoryMutation"/> so subscribers
+        /// re-render against the updated dormancy view.</summary>
+        public static void MarkSessionDormant(string key)
+        {
+            if (string.IsNullOrEmpty(key)) return;
+            _sessionDormantKeys.Add(key);
+        }
+
+        /// <summary>Drop every dormancy mark — used when the user
+        /// flips auto-reapply back on (so a follow-up reload sees
+        /// no dormancy carryover) and during Clear.</summary>
+        public static void ClearSessionDormancy()
+        {
+            if (_sessionDormantKeys.Count == 0) return;
+            _sessionDormantKeys.Clear();
+            Changed?.Invoke();
+        }
 
         public static MethodPatchSpec Find(string typeName, string methodName, string parameterTypes)
         {
@@ -89,15 +202,45 @@ namespace RoslynRepl.Editor.Patches
             if (string.IsNullOrEmpty(spec.MethodName))     throw new ArgumentException("MethodName is required",     nameof(spec));
             spec.ParameterTypes ??= string.Empty;
             _byKey[spec.Key] = spec;
+            // Any explicit registry write — Apply, Revert, save a
+            // draft from the form — is the user's intent for this
+            // spec, so the session-only dormancy mark gets cleared.
+            // Apply leaves the spec at Active and we want the
+            // toolbar badge / Patches list to recognize it
+            // immediately; Revert leaves the spec at Inactive
+            // (regardless of the dormancy state) and dropping the
+            // mark keeps the registry view consistent with the
+            // persisted desired status.
+            _sessionDormantKeys.Remove(spec.Key);
             Persist();
             Changed?.Invoke();
         }
+
+        /// <summary>
+        /// Raise <see cref="Changed"/> for callers that updated some
+        /// in-memory view of the registry without going through
+        /// <see cref="AddOrUpdate"/>. The driving use case is the
+        /// auto-reapply opt-out path: after Bootstrap calls
+        /// <see cref="MarkSessionDormant"/> on every Active spec,
+        /// the UI needs to redraw against the new dormancy view
+        /// even though no spec field changed. Persistence is left
+        /// untouched on purpose — the persisted Status stays Active
+        /// so the toggle remains a reload policy, not a one-way
+        /// deactivation, and the inline-toggle setter installs
+        /// every dormant spec immediately on its OFF→ON edge.
+        ///
+        /// Callers must have mutated either the dormancy set or a
+        /// spec instance already in <see cref="Specs"/>; this
+        /// method only fires the event.
+        /// </summary>
+        public static void NotifyInMemoryMutation() => Changed?.Invoke();
 
         public static bool Remove(string typeName, string methodName, string parameterTypes)
         {
             var key = MethodPatchSpec.Keyed(typeName, methodName, parameterTypes);
             if (_byKey.Remove(key))
             {
+                _sessionDormantKeys.Remove(key);
                 Persist();
                 Changed?.Invoke();
                 return true;
@@ -128,6 +271,7 @@ namespace RoslynRepl.Editor.Patches
             if (!hadInMemory && !hadPersisted) return;
 
             _byKey.Clear();
+            _sessionDormantKeys.Clear();
             // Use the dedicated DeleteKey path instead of Persist()'s
             // SetString-with-empty-list. SetString("") leaves an empty
             // EditorPrefs key on disk, which contradicts the README's

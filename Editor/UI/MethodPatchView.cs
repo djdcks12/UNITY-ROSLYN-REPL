@@ -47,6 +47,7 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
         private Button _applyToFileBtn;
         private Label _statusLabel;
         private VisualElement _activeListContainer;
+        private Toggle _autoReapplyToggle;
 
         // Pull Original drops the source body into the editor, but
         // the user then edits it before Apply. To keep
@@ -70,11 +71,27 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
 
             PatchRegistry.Changed -= OnRegistryChanged;
             PatchRegistry.Changed += OnRegistryChanged;
+            // Subscribe so the Patches-tab toggle reflects external
+            // flips of the same setting — the Tools menu item, a
+            // programmatic setter, or another window mutating the
+            // pref directly. SetValueWithoutNotify avoids re-firing
+            // our own RegisterValueChangedCallback.
+            PatchAutoReapply.SettingsChanged -= OnAutoReapplySettingsChanged;
+            PatchAutoReapply.SettingsChanged += OnAutoReapplySettingsChanged;
         }
 
         public void Dispose()
         {
             PatchRegistry.Changed -= OnRegistryChanged;
+            PatchAutoReapply.SettingsChanged -= OnAutoReapplySettingsChanged;
+        }
+
+        private void OnAutoReapplySettingsChanged()
+        {
+            if (_autoReapplyToggle == null) return;
+            var current = PatchAutoReapply.AutoReapplyEnabled;
+            if (_autoReapplyToggle.value != current)
+                _autoReapplyToggle.SetValueWithoutNotify(current);
         }
 
         private void OnRegistryChanged()
@@ -297,6 +314,32 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             _targetField.RegisterValueChangedCallback(_ => RefreshDiff());
             _methodField.RegisterValueChangedCallback(_ => RefreshDiff());
             _paramsField.RegisterValueChangedCallback(_ => RefreshDiff());
+
+            // Auto-reapply toggle. Same setting as the Tools menu
+            // item, exposed inline here so users browsing the
+            // Patches tab can flip it without leaving the panel.
+            // The setter on PatchAutoReapply.AutoReapplyEnabled
+            // fires SettingsChanged, which our subscription mirrors
+            // back into the toggle (and the toolbar badge), so the
+            // two control surfaces stay in sync regardless of which
+            // one the user clicked.
+            _autoReapplyToggle = new Toggle("Auto-reapply patches on reload");
+            _autoReapplyToggle.value = PatchAutoReapply.AutoReapplyEnabled;
+            _autoReapplyToggle.tooltip =
+                "On (default): Active patches re-install themselves on every domain reload.\n" +
+                "Off: persisted patches still load but stay dormant — no detour is installed.\n" +
+                "Flipping this back on installs every dormant patch immediately, no reload needed;\n" +
+                "or click Apply on individual rows to install just those.";
+            _autoReapplyToggle.style.fontSize = 10;
+            _autoReapplyToggle.style.marginTop = 4;
+            _autoReapplyToggle.style.marginBottom = 2;
+            _autoReapplyToggle.style.flexShrink = 0;
+            _autoReapplyToggle.RegisterValueChangedCallback(evt =>
+            {
+                if (PatchAutoReapply.AutoReapplyEnabled != evt.newValue)
+                    PatchAutoReapply.AutoReapplyEnabled = evt.newValue;
+            });
+            _host.Add(_autoReapplyToggle);
 
             var listTitle = new Label("Active patches");
             listTitle.style.unityFontStyleAndWeight = FontStyle.Bold;
@@ -719,21 +762,26 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
                 // broken body and a Failed status — the UI would then
                 // lie: red "Failed" row in the active list while the
                 // method is still being detoured by the original
-                // working prefix. Suppress the upsert when an active
-                // spec already lives at this key; just surface the
-                // compile error as transient status. The form keeps
-                // the user's edit so they can fix it and retry.
+                // working prefix. Suppress the upsert only when a
+                // detour really is installed right now —
+                // PatchRegistry.GetDisplayState resolves to
+                // PatchDisplayState.Active iff IsApplied, so dormant
+                // specs that look Active on disk no longer trip this
+                // preservation branch.
                 var existing = PatchRegistry.Find(
                     spec.TargetTypeName, spec.MethodName, spec.ParameterTypes);
-                if (existing != null && existing.Status == PatchStatus.Active)
+                if (existing != null
+                    && PatchRegistry.GetDisplayState(existing) == PatchDisplayState.Active)
                 {
                     SetStatus($"compile failed; previous patch still active. {ex.Message}", error: true);
                 }
                 else
                 {
-                    // No prior active patch — record the failed attempt
-                    // so the user can read the error from the active
-                    // list row and iterate.
+                    // Nothing actually patched right now — record the
+                    // failed attempt so the user can read the error
+                    // from the active list row and iterate. Covers
+                    // both "no prior spec" and "dormant prior spec",
+                    // since neither case has a live detour to protect.
                     spec.Status = PatchStatus.Failed;
                     spec.LastError = ex.Message;
                     PatchRegistry.AddOrUpdate(spec);
@@ -788,11 +836,27 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
                 _methodField?.value?.Trim() ?? string.Empty,
                 _paramsField?.value?.Trim() ?? string.Empty);
             if (spec == null) return;
-            switch (spec.Status)
+
+            // Route through the same single source of truth the
+            // toolbar badge and the active-list row use. "Active in
+            // the registry but not actually installed" (auto-off, or
+            // any other detour-less state) renders distinct from a
+            // truly live row, so the form status line can never
+            // lie about whether the patch is intercepting calls.
+            switch (PatchRegistry.GetDisplayState(spec))
             {
-                case PatchStatus.Active:   SetStatus($"Active on {spec.TargetTypeName}.{spec.MethodName}", error: false); break;
-                case PatchStatus.Failed:   SetStatus(spec.LastError ?? "failed", error: true); break;
-                case PatchStatus.Inactive: SetStatus("idle", error: false); break;
+                case PatchDisplayState.Active:
+                    SetStatus($"Active on {spec.TargetTypeName}.{spec.MethodName}", error: false);
+                    break;
+                case PatchDisplayState.DormantAutoOff:
+                    SetStatus($"{spec.TargetTypeName}.{spec.MethodName} (auto-off — Apply to install now)", error: false);
+                    break;
+                case PatchDisplayState.Failed:
+                    SetStatus(spec.LastError ?? "failed", error: true);
+                    break;
+                case PatchDisplayState.Inactive:
+                    SetStatus("idle", error: false);
+                    break;
             }
         }
 
@@ -834,26 +898,42 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
                 row.style.paddingTop = 3;
                 row.style.paddingBottom = 3;
 
+                // PatchRegistry.GetDisplayState is the single source
+                // of truth for what this row should look like. The
+                // raw spec.Status / IsSessionDormant / IsApplied
+                // composition lives in that helper now — the row
+                // only switches on the resulting enum.
+                var displayState = PatchRegistry.GetDisplayState(s);
+
                 var dot = new VisualElement();
                 dot.style.width = 8;
                 dot.style.height = 8;
                 dot.style.marginRight = 6;
                 dot.style.borderTopLeftRadius = dot.style.borderTopRightRadius =
                 dot.style.borderBottomLeftRadius = dot.style.borderBottomRightRadius = 4;
-                dot.style.backgroundColor = new StyleColor(s.Status switch
+                dot.style.backgroundColor = new StyleColor(displayState switch
                 {
-                    PatchStatus.Active   => new Color(0.5f, 0.8f, 0.5f),
-                    PatchStatus.Failed   => new Color(0.95f, 0.55f, 0.55f),
-                    _                    => new Color(0.55f, 0.55f, 0.55f),
+                    PatchDisplayState.Active         => new Color(0.5f, 0.8f, 0.5f),
+                    PatchDisplayState.Failed         => new Color(0.95f, 0.55f, 0.55f),
+                    PatchDisplayState.DormantAutoOff => new Color(0.55f, 0.55f, 0.55f),
+                    _                                => new Color(0.55f, 0.55f, 0.55f),
                 });
                 row.Add(dot);
 
-                var info = new Label($"{s.TargetTypeName}.{s.MethodName}({s.ParameterTypes})");
+                bool dormantAutoOff = displayState == PatchDisplayState.DormantAutoOff;
+                var infoText = dormantAutoOff
+                    ? $"{s.TargetTypeName}.{s.MethodName}({s.ParameterTypes})  (auto-off)"
+                    : $"{s.TargetTypeName}.{s.MethodName}({s.ParameterTypes})";
+                var info = new Label(infoText);
                 info.style.flexGrow = 1;
-                info.style.color = new StyleColor(new Color(0.88f, 0.88f, 0.88f));
-                info.tooltip = s.Status == PatchStatus.Failed && !string.IsNullOrEmpty(s.LastError)
+                info.style.color = new StyleColor(dormantAutoOff
+                    ? new Color(0.65f, 0.65f, 0.65f)
+                    : new Color(0.88f, 0.88f, 0.88f));
+                info.tooltip = displayState == PatchDisplayState.Failed && !string.IsNullOrEmpty(s.LastError)
                     ? s.LastError
-                    : null;
+                    : (dormantAutoOff
+                        ? "Auto-reapply is off — Apply this row to install now, or turn 'Auto-reapply patches on reload' back on to install every dormant row immediately."
+                        : null);
                 row.Add(info);
 
                 var loadBtn = new Button(() => LoadIntoForm(s)) { text = "Load" };

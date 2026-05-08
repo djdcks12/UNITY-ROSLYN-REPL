@@ -40,6 +40,7 @@ return UnityEngine.Application.unityVersion;";
         private ScrollView _outputScroll;
         private Label _durationLabel;
         private Label _modeLabel;
+        private Label _patchBadge;
         private Label _outputSummary;
         private ObjectBrowserView _browser;
         private WatchPanelView _watch;
@@ -251,7 +252,30 @@ return UnityEngine.Application.unityVersion;";
             _outputScroll  = root.Q<ScrollView>("output-scroll");
             _durationLabel = root.Q<Label>("duration-label");
             _modeLabel     = root.Q<Label>("mode-label");
+            _patchBadge    = root.Q<Label>("patch-badge");
             _outputSummary = root.Q<Label>("output-summary-label");
+
+            // Issue #22: keep the toolbar badge live against
+            // PatchRegistry mutations (Apply, Revert, Reset). Pure
+            // Plain-C# event with no MonoBehaviour, so subscribing
+            // here and unsubscribing in OnDisable is the matching
+            // pair — CreateGUI re-runs on domain reload, so we
+            // unhook first to avoid stacking handlers across
+            // rebuilds. Same lesson as WatchPanelView's leak fix.
+            RoslynRepl.Editor.Patches.PatchRegistry.Changed -= UpdatePatchBadge;
+            RoslynRepl.Editor.Patches.PatchRegistry.Changed += UpdatePatchBadge;
+            RoslynRepl.Editor.Patches.PatchAutoReapply.SettingsChanged -= UpdatePatchBadge;
+            RoslynRepl.Editor.Patches.PatchAutoReapply.SettingsChanged += UpdatePatchBadge;
+            if (_patchBadge != null)
+            {
+                _patchBadge.RegisterCallback<MouseDownEvent>(_ => SetPatchesModeActive(true));
+                _patchBadge.tooltip =
+                    "Click to open the Patches view.\n" +
+                    "Shows the count of currently active runtime patches that\n" +
+                    "are diverting Editor / Play Mode behavior. Source files are\n" +
+                    "unchanged — Apply ↔ Revert from the Patches view.";
+            }
+            UpdatePatchBadge();
 
             // Note: Output / Patches mode tabs in the lower pane
             // header. Clicking either label flips the visible host
@@ -396,6 +420,8 @@ return UnityEngine.Application.unityVersion;";
             RunHistoryWindow.OnSnippetChosen -= LoadSnippetIntoEditor;
             SnippetLibraryWindow.OnSnippetChosen -= LoadSnippetIntoEditor;
             SnippetLibraryWindow.OnSaveRequested -= SaveCurrentEditorAsSnippet;
+            RoslynRepl.Editor.Patches.PatchRegistry.Changed -= UpdatePatchBadge;
+            RoslynRepl.Editor.Patches.PatchAutoReapply.SettingsChanged -= UpdatePatchBadge;
             // Drop the watch panel's WatchStore subscription so this
             // window's instance doesn't keep refreshing in the
             // background after it's closed (or before it's rebuilt by
@@ -404,6 +430,47 @@ return UnityEngine.Application.unityVersion;";
             _watch = null;
             _patchView?.Dispose();
             _patchView = null;
+        }
+
+        private void UpdatePatchBadge()
+        {
+            if (_patchBadge == null) return;
+
+            // PatchRegistry.GetDisplayState owns the rule for what
+            // each spec is rendered as. We just count the two states
+            // the toolbar cares about. Active specs that aren't
+            // really installed (auto-off, manual registry mutation)
+            // come back as DormantAutoOff and contribute to the
+            // auto-off count, never the active count — so the badge
+            // can never claim "N active" for rows that don't have a
+            // live detour.
+            int activeCount = 0;
+            int dormantCount = 0;
+            foreach (var spec in RoslynRepl.Editor.Patches.PatchRegistry.Specs)
+            {
+                switch (RoslynRepl.Editor.Patches.PatchRegistry.GetDisplayState(spec))
+                {
+                    case RoslynRepl.Editor.Patches.PatchDisplayState.Active:         activeCount++; break;
+                    case RoslynRepl.Editor.Patches.PatchDisplayState.DormantAutoOff: dormantCount++; break;
+                }
+            }
+
+            if (activeCount > 0)
+            {
+                _patchBadge.text = $"🔧 {activeCount} active";
+                _patchBadge.RemoveFromClassList("rr-patch-badge--auto-off");
+                _patchBadge.style.display = DisplayStyle.Flex;
+            }
+            else if (dormantCount > 0)
+            {
+                _patchBadge.text = $"🔧 {dormantCount} (auto-off)";
+                _patchBadge.AddToClassList("rr-patch-badge--auto-off");
+                _patchBadge.style.display = DisplayStyle.Flex;
+            }
+            else
+            {
+                _patchBadge.style.display = DisplayStyle.None;
+            }
         }
 
         public void SetPatchesModeActive(bool active)
