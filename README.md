@@ -411,7 +411,7 @@ To clear REPL data for the current project:
 Tools / Roslyn REPL / Reset Project Data
 ```
 
-Reset clears snippets, history, watches, custom usings, previous result `_`, visible Output, and stored runtime patch specs. Active Harmony patches are reverted as part of the reset.
+Reset clears snippets, history, watches, custom usings, previous result `_`, visible Output, stored runtime patch specs, and the in-memory compiled-watch cache. Active Harmony patches are reverted as part of the reset.
 
 ## Safety Notes
 

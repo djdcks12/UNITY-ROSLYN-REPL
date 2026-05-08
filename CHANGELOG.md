@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed (Watch compile cache — review notes)
+- `RoslynReplWindow.ResetProjectData` now invalidates `ReplEngine`'s compile cache and includes `ReplEngine.CompileCacheCount` in the reset scope check + dialog counts. The previous flow cleared `WatchStore` (which holds the user's expression list) but left the cache dictionary intact — and the dictionary keys are the full wrapped source (usings + user expression text) plus a strongly referenced `Assembly` and `MethodInfo`. After running sensitive watches, Reset would tell the user "watches cleared" while that exact text stayed alive in process memory until the next `AppDomain.AssemblyLoad`. Reported in PR review for #13. The early-return "nothing to clear" branch now also checks `compileCacheCount == 0`, the confirm dialog lists cached compiled watches as a separate row, and the success dialog's tally includes them in the cleared total.
+
 ### Added (Watch compile cache)
 - `RoslynRepl.Editor.Core.ReplOptions.UseCompileCache`: opt-in flag that lets `ReplEngine.Execute` reuse a previously compiled dynamic assembly + entry-point `MethodInfo` when the wrapped source — usings, class shell, user expression — matches an earlier call byte-for-byte. The Watch panel turns it on so a refresh of N rows over many user Runs amortizes to one compile per row instead of N×Run compiles. Off by default for the main editor: each Run stays a fresh compile against the latest editor state.
 - Cache keyed on `WrappedCode.Source` (full wrapped source including effective usings list). Different snippet *or* different usings ⇒ different key ⇒ fresh compile by construction, so a hit never rebinds against stale namespace state.
