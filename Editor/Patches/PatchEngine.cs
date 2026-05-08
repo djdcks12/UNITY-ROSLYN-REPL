@@ -269,20 +269,28 @@ namespace RoslynRepl.Editor.Patches
                 throw new InvalidOperationException(
                     $"Method not found: {spec.TargetTypeName}.{spec.MethodName}({spec.ParameterTypes ?? ""})");
             }
+            // Order matters: report the most-recognizable
+            // "what category am I patching" reason first. A user
+            // who picked `static int Foo()` is more interested in
+            // "statics aren't supported" than "non-void isn't
+            // supported" — both are true, but the static one is
+            // likely the proximate reason they hit the dialog.
+            // Same logic for generics: a generic non-void method
+            // surfaces the generic gap, not the void gap.
             if (method.IsGenericMethod || method.IsGenericMethodDefinition)
             {
                 throw new InvalidOperationException(
                     $"Runtime patch does not support generic methods yet; {method.Name} declares type parameters.");
             }
-            if (method.ReturnType != typeof(void))
-            {
-                throw new InvalidOperationException(
-                    $"Runtime patch only supports void methods; {method.Name} returns {method.ReturnType.Name}.");
-            }
             if (method.IsStatic)
             {
                 throw new InvalidOperationException(
                     $"Runtime patch only supports instance methods; {method.Name} is static.");
+            }
+            if (method.ReturnType != typeof(void))
+            {
+                throw new InvalidOperationException(
+                    $"Runtime patch only supports void methods; {method.Name} returns {method.ReturnType.Name}.");
             }
             foreach (var p in method.GetParameters())
             {

@@ -89,6 +89,22 @@ namespace RoslynRepl.Editor.Patches
                 if (node is AwaitExpressionSyntax)
                     return Result.Fail("Runtime patch does not support `await` / async syntax yet.");
 
+                // `async` lambdas / anonymous methods + async local
+                // functions even without an inner `await`. The
+                // AwaitExpressionSyntax check above misses these
+                // because the body never `await`s — but the async
+                // shape itself still produces a state machine and
+                // detaches execution from the synchronous Harmony
+                // Prefix model. Reject for the same reason `await`
+                // is rejected: Prefix has to stay sync to drive
+                // Harmony's bool-skip return value.
+                if (node is AnonymousFunctionExpressionSyntax af
+                    && af.AsyncKeyword.RawKind != 0)
+                    return Result.Fail("Runtime patch does not support `async` lambdas / anonymous methods yet.");
+                if (node is LocalFunctionStatementSyntax lf
+                    && lf.Modifiers.Any(m => m.IsKind(SyntaxKind.AsyncKeyword)))
+                    return Result.Fail("Runtime patch does not support `async` local functions yet.");
+
                 if (node is YieldStatementSyntax)
                     return Result.Fail("Runtime patch does not support `yield return` / `yield break` syntax yet.");
 
