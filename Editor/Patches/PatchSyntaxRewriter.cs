@@ -841,11 +841,19 @@ namespace RoslynRepl.Editor.Patches
                     + " }";
             }
 
+            // Resolve the user's generic type arguments to CLR Types
+            // so PickMostSpecific can close each generic candidate
+            // before scoring. Open `T` parameters can't be compared
+            // to concrete arg types (typeof(T).IsAssignableFrom(...)
+            // is always false), so without substitution `Get<T>(T)`
+            // would lose to `Get<T>(object)` for any concrete arg.
+            var genericArgClrTypes = ResolveGenericArgClrTypes(model, genericArgSyntaxes);
+
             // Unqualified — try instance, then static fall-back on
             // the declaring type.
             if (lhsForMember == null)
             {
-                var minfo = FindMethodInfo(declaringType, memberName, arity, includeStatic: false, staticOnly: false, genericArity: genericArity, argTypes: argTypes);
+                var minfo = FindMethodInfo(declaringType, memberName, arity, includeStatic: false, staticOnly: false, genericArity: genericArity, argTypes: argTypes, genericArgClrTypes: genericArgClrTypes);
                 if (minfo != null)
                 {
                     var rArg = ReturnTypeArg(minfo, genericArgSyntaxes);
@@ -865,7 +873,7 @@ namespace RoslynRepl.Editor.Patches
                     replacements[invocation] = SyntaxFactory.ParseExpression(call).WithTriviaFrom(invocation);
                     return true;
                 }
-                minfo = FindMethodInfo(declaringType, memberName, arity, includeStatic: true, staticOnly: true, genericArity: genericArity, argTypes: argTypes);
+                minfo = FindMethodInfo(declaringType, memberName, arity, includeStatic: true, staticOnly: true, genericArity: genericArity, argTypes: argTypes, genericArgClrTypes: genericArgClrTypes);
                 if (minfo != null)
                 {
                     var rArg = ReturnTypeArg(minfo, genericArgSyntaxes);
@@ -897,7 +905,7 @@ namespace RoslynRepl.Editor.Patches
             {
                 var staticType = ResolveTypeFromSymbol(nts);
                 if (staticType == null) return false;
-                var minfo = FindMethodInfo(staticType, memberName, arity, includeStatic: true, staticOnly: true, genericArity: genericArity, argTypes: argTypes);
+                var minfo = FindMethodInfo(staticType, memberName, arity, includeStatic: true, staticOnly: true, genericArity: genericArity, argTypes: argTypes, genericArgClrTypes: genericArgClrTypes);
                 if (minfo == null) return false;
                 var rArg = ReturnTypeArg(minfo, genericArgSyntaxes);
                 var typeRef = nts.ToDisplayString();
@@ -926,7 +934,7 @@ namespace RoslynRepl.Editor.Patches
             var lhsTypeInfo = model.GetTypeInfo(lhsForMember);
             Type lhsType = ResolveTypeFromSymbol(lhsTypeInfo.Type);
             MethodInfo extMinfo = lhsType != null
-                ? FindMethodInfo(lhsType, memberName, arity, includeStatic: false, staticOnly: false, genericArity: genericArity, argTypes: argTypes)
+                ? FindMethodInfo(lhsType, memberName, arity, includeStatic: false, staticOnly: false, genericArity: genericArity, argTypes: argTypes, genericArgClrTypes: genericArgClrTypes)
                 : null;
             string extRArg = ReturnTypeArg(extMinfo, genericArgSyntaxes);
             string extCall;
@@ -1135,17 +1143,73 @@ namespace RoslynRepl.Editor.Patches
         // would normally compile-error on ambiguity, but we have
         // to pick *something*, and first-found at least matches
         // pre-fix behavior in that edge case.
-        private static MethodInfo PickMostSpecific(List<MethodInfo> candidates, Type[] argTypes)
+        //
+        // For generic candidates, supplying `genericArgClrTypes`
+        // closes each candidate via MakeGenericMethod *before*
+        // scoring. Without this, an open `T` parameter type is
+        // compared element-wise against the concrete arg type and
+        // gets rejected (typeof(T).IsAssignableFrom(string) is
+        // false), so `Get<T>(T)` would lose to `Get<T>(object)`
+        // for `Get<string>("x")` despite C# preferring the more-
+        // specific `Get<T>(T)` instantiation. The closed score
+        // sees `string` (post-substitution) ↔ `string` arg as an
+        // exact match (score 2). The MethodInfo we *return* stays
+        // the open definition — caller paths (RenderExactCallArgs,
+        // ReturnTypeArg) substitute via the same syntax map and
+        // the runtime helpers re-instantiate via MakeGenericMethod.
+        private static MethodInfo PickMostSpecific(
+            List<MethodInfo> candidates,
+            Type[] argTypes,
+            Type[] genericArgClrTypes = null)
         {
             MethodInfo best = null;
             int bestScore = -1;
             foreach (var c in candidates)
             {
-                var s = ScoreCandidate(c, argTypes);
+                MethodInfo scoreTarget = c;
+                if (c.IsGenericMethodDefinition
+                    && genericArgClrTypes != null
+                    && c.GetGenericArguments().Length == genericArgClrTypes.Length)
+                {
+                    try { scoreTarget = c.MakeGenericMethod(genericArgClrTypes); }
+                    catch { continue; /* constraint violation — candidate unviable */ }
+                }
+                var s = ScoreCandidate(scoreTarget, argTypes);
                 if (s < 0) continue;
                 if (s > bestScore) { best = c; bestScore = s; }
             }
             return best ?? candidates[0];
+        }
+
+        // Resolve the user's generic type-argument syntax to a CLR
+        // Type[] for `MakeGenericMethod`. Returns null when any
+        // syntactic argument can't be bound (broken SemanticModel
+        // state, unreferenced type, etc.) — `PickMostSpecific` then
+        // falls back to scoring against the open generic parameter
+        // types, which is the pre-fix behavior. Bound mostly happens
+        // via the caller's pre-built SemanticModel; we don't try
+        // anything fancy here.
+        private static Type[] ResolveGenericArgClrTypes(
+            SemanticModel model,
+            TypeSyntax[] genericArgSyntaxes)
+        {
+            if (model == null || genericArgSyntaxes == null || genericArgSyntaxes.Length == 0)
+                return null;
+            var result = new Type[genericArgSyntaxes.Length];
+            for (int i = 0; i < result.Length; i++)
+            {
+                Type t = null;
+                try
+                {
+                    var ti = model.GetTypeInfo(genericArgSyntaxes[i]);
+                    var sym = ti.Type ?? ti.ConvertedType;
+                    t = ResolveTypeFromSymbol(sym);
+                }
+                catch { /* fall through to the partial-resolution check below */ }
+                if (t == null) return null;
+                result[i] = t;
+            }
+            return result;
         }
 
         // Infer argument expression types. Hybrid:
@@ -1247,7 +1311,8 @@ namespace RoslynRepl.Editor.Patches
             bool includeStatic,
             bool staticOnly = false,
             int genericArity = 0,
-            Type[] argTypes = null)
+            Type[] argTypes = null,
+            Type[] genericArgClrTypes = null)
         {
             BindingFlags bf = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
             if (!staticOnly) bf |= BindingFlags.Instance;
@@ -1272,7 +1337,7 @@ namespace RoslynRepl.Editor.Patches
                 if (candidates.Count == 1 || argTypes == null || argTypes.Length != arity)
                     return candidates[0];
 
-                return PickMostSpecific(candidates, argTypes);
+                return PickMostSpecific(candidates, argTypes, genericArgClrTypes);
             }
             return null;
         }
