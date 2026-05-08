@@ -13,16 +13,32 @@ namespace RoslynRepl.Editor.Patches
     /// the snippet / history / watch stores already use, so cross-project
     /// leakage is impossible by construction.
     ///
-    /// Format: each spec is six base64-encoded fields joined by `|`,
-    /// specs joined by `\n`. Order matches the spec's authoring order
-    /// (TargetTypeName | MethodName | ParameterTypes | OriginalBody |
-    /// PatchBody | Status). Decode failure on a single line is swallowed
-    /// — a malformed entry shouldn't take down the whole patch set.
+    /// Format: each spec is seven base64-encoded fields joined by `|`,
+    /// specs joined by `\n`. Order:
+    ///   TargetTypeName | MethodName | ParameterTypes |
+    ///   OriginalBody | PatchBody | Status | HasOriginalBody
     ///
-    /// LastError is intentionally not persisted: it's transient diagnostic
-    /// state from the last apply attempt, valid only for the current
-    /// session. the bootstrap path re-runs Apply on the next boot for any spec
-    /// stored as Active and refreshes LastError from that attempt.
+    /// HasOriginalBody is the explicit "did Pull Original ever run
+    /// for this spec?" signal. It's a separate field because
+    /// `OriginalBody == ""` is a real valid snapshot (a method
+    /// declared as `void Foo() {}` pulls as an empty string body),
+    /// and we'd otherwise have no way to tell that apart from
+    /// "no snapshot taken — OriginalBody is empty by default".
+    ///
+    /// Six-field legacy data still loads: when HasOriginalBody is
+    /// missing, `IsNullOrEmpty(OriginalBody)` decides. Empty bodies
+    /// in legacy data are treated as "no snapshot" because that's
+    /// the overwhelmingly common case in pre-source-export drafts.
+    /// New writes always emit seven fields.
+    ///
+    /// Decode failure on a single line is swallowed — a malformed
+    /// entry shouldn't take down the whole patch set.
+    ///
+    /// LastError is intentionally not persisted: it's transient
+    /// diagnostic state from the last apply attempt, valid only for
+    /// the current session. The bootstrap path re-runs Apply on the
+    /// next boot for any spec stored as Active and refreshes
+    /// LastError from that attempt.
     /// </summary>
     public static class PatchPersistence
     {
@@ -79,7 +95,8 @@ namespace RoslynRepl.Editor.Patches
                 B64(s.ParameterTypes ?? string.Empty),
                 B64(s.OriginalBody   ?? string.Empty),
                 B64(s.PatchBody      ?? string.Empty),
-                B64(s.Status.ToString()));
+                B64(s.Status.ToString()),
+                B64(s.OriginalBody != null ? "1" : "0"));
         }
 
         private static MethodPatchSpec TryDecode(string line)
@@ -88,12 +105,30 @@ namespace RoslynRepl.Editor.Patches
             {
                 var parts = line.Split('|');
                 if (parts.Length < 6) return null;
+                var origBody = D64(parts[3]);
+
+                // 7-field format carries an explicit HasOriginalBody
+                // flag so we can keep `null` (no Pull yet) and `""`
+                // (empty-body Pull) distinct across reload. Legacy
+                // 6-field reads collapse `""` to `null` because that's
+                // the overwhelmingly common pre-Phase-E meaning of
+                // "OriginalBody empty by default".
+                bool hasOriginal;
+                if (parts.Length >= 7)
+                {
+                    hasOriginal = D64(parts[6]) == "1";
+                }
+                else
+                {
+                    hasOriginal = !string.IsNullOrEmpty(origBody);
+                }
+
                 return new MethodPatchSpec
                 {
                     TargetTypeName = D64(parts[0]),
                     MethodName     = D64(parts[1]),
                     ParameterTypes = D64(parts[2]),
-                    OriginalBody   = D64(parts[3]),
+                    OriginalBody   = hasOriginal ? origBody : null,
                     PatchBody      = D64(parts[4]),
                     Status         = Enum.TryParse<PatchStatus>(D64(parts[5]), out var st)
                                        ? st

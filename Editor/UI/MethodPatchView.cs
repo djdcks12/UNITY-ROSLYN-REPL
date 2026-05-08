@@ -654,7 +654,13 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             // moment the user clicked Load on a stored spec — Pull's
             // first run was permanent state, but every subsequent
             // round-trip dropped it.
-            if (!string.IsNullOrEmpty(spec.OriginalBody))
+            //
+            // null vs "" matters: a method declared `void Foo() {}`
+            // pulls as an empty string body, which is a *real*
+            // snapshot. `IsNullOrEmpty` would have classified that
+            // the same as "no snapshot" and dropped the cache on
+            // every Load → Apply round-trip.
+            if (spec.OriginalBody != null)
             {
                 _lastPulledKey = spec.Key;
                 _lastPulledOriginal = spec.OriginalBody;
