@@ -461,19 +461,28 @@ namespace RoslynRepl.Editor.Patches
             sb.AppendLine("        if (ms.Count == 1) { m = ms[0]; }");
             sb.AppendLine("        else");
             sb.AppendLine("        {");
+            // Specificity scoring across same-arity base candidates.
+            // Same policy as __InvokeReflective so `base.Foo("x")`
+            // routing matches the rewriter's compile-time pick.
             sb.AppendLine("            var argTypes = new System.Type[args.Length];");
-            sb.AppendLine("            for (int i = 0; i < args.Length; i++) argTypes[i] = args[i] == null ? typeof(object) : args[i].GetType();");
+            sb.AppendLine("            for (int i = 0; i < args.Length; i++) argTypes[i] = args[i] == null ? null : args[i].GetType();");
             sb.AppendLine("            System.Reflection.MethodInfo best = null;");
+            sb.AppendLine("            int bestScore = -1;");
             sb.AppendLine("            foreach (var c in ms)");
             sb.AppendLine("            {");
             sb.AppendLine("                var pars = c.GetParameters();");
+            sb.AppendLine("                int score = 0;");
             sb.AppendLine("                bool ok = true;");
             sb.AppendLine("                for (int i = 0; i < pars.Length; i++)");
             sb.AppendLine("                {");
-            sb.AppendLine("                    if (args[i] == null) continue;");
-            sb.AppendLine("                    if (!pars[i].ParameterType.IsAssignableFrom(argTypes[i])) { ok = false; break; }");
+            sb.AppendLine("                    if (argTypes[i] == null) continue;");
+            sb.AppendLine("                    var pt = pars[i].ParameterType;");
+            sb.AppendLine("                    if (pt == argTypes[i]) score += 2;");
+            sb.AppendLine("                    else if (pt.IsAssignableFrom(argTypes[i])) score += 1;");
+            sb.AppendLine("                    else { ok = false; break; }");
             sb.AppendLine("                }");
-            sb.AppendLine("                if (ok) { best = c; break; }");
+            sb.AppendLine("                if (!ok) continue;");
+            sb.AppendLine("                if (score > bestScore) { best = c; bestScore = score; }");
             sb.AppendLine("            }");
             sb.AppendLine("            m = best ?? ms[0];");
             sb.AppendLine("        }");
@@ -774,29 +783,35 @@ namespace RoslynRepl.Editor.Patches
             sb.AppendLine("            if (__ms.Count == 1) { __m = __ms[0]; }");
             sb.AppendLine("            else");
             sb.AppendLine("            {");
-            // Candidate-list narrowing instead of `type.GetMethod`
-            // tie-break. The original tie-breaker called
-            // type.GetMethod(name, DeclaredOnly bf, null, argTypes, null)
-            // which only inspects `type` itself — never walks the
-            // base chain. Inherited private overloads at the same
-            // arity ended up tied and the code fell back to
-            // `__ms[0]`, picking the first one regardless of arg
-            // compatibility. Walk our own __ms list instead so the
-            // same chain that produced candidates also produces the
-            // disambiguation.
+            // Specificity-based tie-break. The previous policy was
+            // "first candidate whose params are all assignable from
+            // arg runtime types" — but `Foo(object)` and `Foo(string)`
+            // are *both* assignable for a string argument, so
+            // first-match leaked the more-general overload through
+            // whenever GetMethods returned it first. Score each
+            // candidate (exact = 2, assignable = 1, mismatch =
+            // reject) and keep the highest. Mirrors C#'s "more
+            // specific wins" overload resolution and stays in lock-
+            // step with the rewriter's compile-time overload pick.
             sb.AppendLine("                var __argTypes = new System.Type[args.Length];");
-            sb.AppendLine("                for (int __i = 0; __i < args.Length; __i++) __argTypes[__i] = args[__i] == null ? typeof(object) : args[__i].GetType();");
+            sb.AppendLine("                for (int __i = 0; __i < args.Length; __i++) __argTypes[__i] = args[__i] == null ? null : args[__i].GetType();");
             sb.AppendLine("                System.Reflection.MethodInfo __best = null;");
+            sb.AppendLine("                int __bestScore = -1;");
             sb.AppendLine("                foreach (var __c in __ms)");
             sb.AppendLine("                {");
             sb.AppendLine("                    var __pars = __c.GetParameters();");
+            sb.AppendLine("                    int __score = 0;");
             sb.AppendLine("                    bool __ok = true;");
             sb.AppendLine("                    for (int __i = 0; __i < __pars.Length; __i++)");
             sb.AppendLine("                    {");
-            sb.AppendLine("                        if (args[__i] == null) continue;");
-            sb.AppendLine("                        if (!__pars[__i].ParameterType.IsAssignableFrom(__argTypes[__i])) { __ok = false; break; }");
+            sb.AppendLine("                        if (__argTypes[__i] == null) continue;");
+            sb.AppendLine("                        var __pt = __pars[__i].ParameterType;");
+            sb.AppendLine("                        if (__pt == __argTypes[__i]) __score += 2;");
+            sb.AppendLine("                        else if (__pt.IsAssignableFrom(__argTypes[__i])) __score += 1;");
+            sb.AppendLine("                        else { __ok = false; break; }");
             sb.AppendLine("                    }");
-            sb.AppendLine("                    if (__ok) { __best = __c; break; }");
+            sb.AppendLine("                    if (!__ok) continue;");
+            sb.AppendLine("                    if (__score > __bestScore) { __best = __c; __bestScore = __score; }");
             sb.AppendLine("                }");
             sb.AppendLine("                __m = __best ?? __ms[0];");
             sb.AppendLine("            }");
@@ -843,26 +858,31 @@ namespace RoslynRepl.Editor.Patches
             sb.AppendLine("            else");
             sb.AppendLine("            {");
             // Multiple overloads sharing name + arity + generic arity.
-            // Disambiguate by argument types — but for generic
-            // candidates the parameters become concrete only after
-            // MakeGenericMethod, so instantiate per-candidate first
-            // and then compare. `null` arguments match anything since
-            // we have no static type info; non-null arguments must be
-            // assignable to the candidate's parameter type.
+            // Specificity scoring (exact = 2, assignable = 1,
+            // mismatch = reject) — same policy as the non-generic
+            // helper. For generic candidates, instantiate per-
+            // candidate with typeArgs *first* so the parameter types
+            // are concrete; then score the same way.
             sb.AppendLine("                var __argTypes = new System.Type[args.Length];");
-            sb.AppendLine("                for (int __i = 0; __i < args.Length; __i++) __argTypes[__i] = args[__i] == null ? typeof(object) : args[__i].GetType();");
+            sb.AppendLine("                for (int __i = 0; __i < args.Length; __i++) __argTypes[__i] = args[__i] == null ? null : args[__i].GetType();");
             sb.AppendLine("                System.Reflection.MethodInfo __best = null;");
+            sb.AppendLine("                int __bestScore = -1;");
             sb.AppendLine("                foreach (var __c in __ms)");
             sb.AppendLine("                {");
             sb.AppendLine("                    var __inst = (typeArgs.Length > 0 && __c.IsGenericMethodDefinition) ? __c.MakeGenericMethod(typeArgs) : __c;");
             sb.AppendLine("                    var __pars = __inst.GetParameters();");
+            sb.AppendLine("                    int __score = 0;");
             sb.AppendLine("                    bool __ok = true;");
             sb.AppendLine("                    for (int __i = 0; __i < __pars.Length; __i++)");
             sb.AppendLine("                    {");
-            sb.AppendLine("                        if (args[__i] == null) continue;");
-            sb.AppendLine("                        if (!__pars[__i].ParameterType.IsAssignableFrom(__argTypes[__i])) { __ok = false; break; }");
+            sb.AppendLine("                        if (__argTypes[__i] == null) continue;");
+            sb.AppendLine("                        var __pt = __pars[__i].ParameterType;");
+            sb.AppendLine("                        if (__pt == __argTypes[__i]) __score += 2;");
+            sb.AppendLine("                        else if (__pt.IsAssignableFrom(__argTypes[__i])) __score += 1;");
+            sb.AppendLine("                        else { __ok = false; break; }");
             sb.AppendLine("                    }");
-            sb.AppendLine("                    if (__ok) { __best = __c; break; }");
+            sb.AppendLine("                    if (!__ok) continue;");
+            sb.AppendLine("                    if (__score > __bestScore) { __best = __c; __bestScore = __score; }");
             sb.AppendLine("                }");
             sb.AppendLine("                __m = __best ?? __ms[0];");
             sb.AppendLine("            }");

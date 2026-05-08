@@ -974,30 +974,64 @@ namespace RoslynRepl.Editor.Patches
                 if (candidates.Count == 0) continue;
                 if (candidates.Count == 1) return candidates[0];
 
-                // Narrow by argument type assignability. The first
-                // candidate whose parameter types are all assignable
-                // from the inferred arg types wins.
-                foreach (var c in candidates)
-                {
-                    if (ArgTypesMatch(c, argTypes)) return c;
-                }
-                return candidates[0];
+                // Narrow by specificity: exact-match parameters
+                // outscore assignable-only matches, so
+                // `base.Foo("x")` against `Foo(object)` + `Foo(string)`
+                // picks `Foo(string)` regardless of GetMethods order.
+                return PickMostSpecific(candidates, argTypes);
             }
             return null;
         }
 
-        // Arg-type assignability check shared by FindBaseMethodByArgs
-        // and FindMethodInfoByArgs. `null` arg types pass through
-        // (runtime helper has the same policy).
-        private static bool ArgTypesMatch(MethodInfo m, Type[] argTypes)
+        // Specificity score for an overload candidate. Returns -1
+        // when the candidate is not callable with these arg types
+        // (any non-null arg type is incompatible). Otherwise the
+        // score is 2 per exact-type match and 1 per assignable
+        // match — so `Foo(string)` outscores `Foo(object)` for a
+        // string argument, mirroring C#'s "more specific wins"
+        // overload resolution. `null` arg types contribute zero
+        // (we don't know enough to reward or penalize), matching
+        // the runtime helper's null-arg policy.
+        //
+        // Scoring is the lever the rewriter and the runtime helpers
+        // both pull on: a first-assignable match could pick
+        // `Foo(object)` purely because it appeared first in
+        // GetMethods order, even though `Foo(string)` is the
+        // overload C# would compile to. The score forces exact
+        // matches to win and assignable-only matches to fall in
+        // behind them.
+        private static int ScoreCandidate(MethodInfo m, Type[] argTypes)
         {
             var pars = m.GetParameters();
+            int score = 0;
             for (int i = 0; i < argTypes.Length; i++)
             {
                 if (argTypes[i] == null) continue;
-                if (!pars[i].ParameterType.IsAssignableFrom(argTypes[i])) return false;
+                var pt = pars[i].ParameterType;
+                if (pt == argTypes[i]) score += 2;
+                else if (pt.IsAssignableFrom(argTypes[i])) score += 1;
+                else return -1;
             }
-            return true;
+            return score;
+        }
+
+        // Pick the candidate with the highest specificity score.
+        // Falls back to candidates[0] when all candidates score -1
+        // (no compatible overload). Ties go to first-found — C#
+        // would normally compile-error on ambiguity, but we have
+        // to pick *something*, and first-found at least matches
+        // pre-fix behavior in that edge case.
+        private static MethodInfo PickMostSpecific(List<MethodInfo> candidates, Type[] argTypes)
+        {
+            MethodInfo best = null;
+            int bestScore = -1;
+            foreach (var c in candidates)
+            {
+                var s = ScoreCandidate(c, argTypes);
+                if (s < 0) continue;
+                if (s > bestScore) { best = c; bestScore = s; }
+            }
+            return best ?? candidates[0];
         }
 
         // Infer argument expression types. Hybrid:
@@ -1124,11 +1158,7 @@ namespace RoslynRepl.Editor.Patches
                 if (candidates.Count == 1 || argTypes == null || argTypes.Length != arity)
                     return candidates[0];
 
-                foreach (var c in candidates)
-                {
-                    if (ArgTypesMatch(c, argTypes)) return c;
-                }
-                return candidates[0];
+                return PickMostSpecific(candidates, argTypes);
             }
             return null;
         }
