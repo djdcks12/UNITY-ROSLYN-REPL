@@ -128,6 +128,62 @@ namespace RoslynRepl.Editor.Patches
                 result.Notes.Add($"this → __instance ({thisNodes.Length} occurrence(s))");
             }
 
+            // ─── Pre-pass: `base.X(args)` → __callBase<R>("X", args) ──
+            // Pulled override bodies routinely begin with
+            // `base.OnEnable();`, `base.Init(...);`, etc. The wrapper's
+            // Prefix is a static method, so `base` itself doesn't
+            // compile and falls outside the diagnostic IDs Phase D
+            // handles. Replacing `base.X(args)` with the helper call
+            // routes the invocation through `__BaseInvokeFromDerived`,
+            // which walks the declaring type's base chain and
+            // dispatches via a non-virtual DynamicMethod delegate.
+            // Without this, the override would re-enter the patched
+            // vtable slot and infinite-loop.
+            //
+            // Only invocation form is rewritten — `base.someField` /
+            // `base.SomeProperty` reads aren't standard pulled
+            // patterns and would need a separate non-virtual
+            // accessor helper. They're left to surface as compile
+            // errors so the user explicitly sees the limitation.
+            preRoot = result.Tree.GetRoot();
+            var baseInvocations = preRoot.DescendantNodes().OfType<InvocationExpressionSyntax>()
+                .Where(inv => inv.Expression is MemberAccessExpressionSyntax ma
+                              && ma.Expression is BaseExpressionSyntax)
+                .ToArray();
+            if (baseInvocations.Length > 0)
+            {
+                var preReplace = new Dictionary<SyntaxNode, SyntaxNode>(baseInvocations.Length);
+                foreach (var inv in baseInvocations)
+                {
+                    var ma = (MemberAccessExpressionSyntax)inv.Expression;
+                    var name = ma.Name.Identifier.ValueText;
+                    var argsList = inv.ArgumentList.Arguments;
+                    int arity = argsList.Count;
+                    var argsText = string.Join(", ", argsList.Select(a => a.ToFullString()));
+                    var argsBlob = arity == 0 ? string.Empty : ", " + argsText;
+
+                    // Walk the base chain (declaringType.BaseType up)
+                    // to find a method matching name + arity. Use its
+                    // declared return type for the helper's <R>; fall
+                    // back to `object` for void or when the base
+                    // method isn't reachable via reflection (e.g.,
+                    // method is in an unloaded assembly).
+                    var baseM = FindBaseMethod(declaringType, name, arity);
+                    string rArg = baseM != null && baseM.ReturnType != typeof(void)
+                        ? TypeRef(baseM.ReturnType)
+                        : "object";
+
+                    var helper = SyntaxFactory.ParseExpression(
+                        $"__callBase<{rArg}>(\"{name}\"{argsBlob})");
+                    preReplace[inv] = helper.WithTriviaFrom(inv);
+                }
+                preRoot = preRoot.ReplaceNodes(preReplace.Keys, (orig, _) => preReplace[orig]);
+                tree = CSharpSyntaxTree.Create((CSharpSyntaxNode)preRoot, (CSharpParseOptions)tree.Options, tree.FilePath, tree.Encoding);
+                compilation = compilation.RemoveAllSyntaxTrees().AddSyntaxTrees(tree);
+                result.Tree = tree;
+                result.Notes.Add($"base.X(...) → __callBase ({baseInvocations.Length} call(s))");
+            }
+
             var model = compilation.GetSemanticModel(tree);
             var root = tree.GetRoot();
 
@@ -867,12 +923,34 @@ namespace RoslynRepl.Editor.Patches
             }
         }
 
+        // Find the first method matching name + arity on the
+        // declaring type's base chain (skipping declaringType itself).
+        // Walks DeclaredOnly + BaseType so private inherited members
+        // are visible — `base.X(...)` semantically targets a method
+        // declared *above* the current class, so we start at
+        // declaringType.BaseType.
+        private static MethodInfo FindBaseMethod(Type declaringType, string name, int arity)
+        {
+            var bf = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
+            for (var bt = declaringType?.BaseType; bt != null; bt = bt.BaseType)
+            {
+                foreach (var m in bt.GetMethods(bf))
+                {
+                    if (m.Name == name && m.GetParameters().Length == arity) return m;
+                }
+            }
+            return null;
+        }
+
         // Find a method by name + arity (+ generic arity) and return
-        // the matching MethodInfo. Picks the first matching overload
-        // — we can't bind by argument types statically here, so the
-        // helper does the runtime tie-breaking. The MethodInfo is
-        // returned (not just the return type) so the caller can read
-        // generic parameters for type-argument substitution.
+        // the matching MethodInfo. Walks DeclaredOnly + BaseType so
+        // private inherited methods are visible to the rewriter at
+        // compile-time the same way the runtime helpers find them
+        // — the runtime side fixed FlattenHierarchy's blind spot for
+        // private inherited members in D15; the rewriter has to
+        // mirror that or it'd never recognize a `Heal(50)` call
+        // whose Heal is declared on a base class and emit the
+        // helper rewrite for it.
         private static MethodInfo FindMethodInfo(
             Type t,
             string name,
@@ -881,21 +959,24 @@ namespace RoslynRepl.Editor.Patches
             bool staticOnly = false,
             int genericArity = 0)
         {
-            BindingFlags bf = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.FlattenHierarchy;
+            BindingFlags bf = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
             if (!staticOnly) bf |= BindingFlags.Instance;
             if (includeStatic || staticOnly) bf |= BindingFlags.Static;
 
-            foreach (var m in t.GetMethods(bf))
+            for (var cur = t; cur != null; cur = cur.BaseType)
             {
-                if (m.Name != name) continue;
-                if (m.GetParameters().Length != arity) continue;
-                if (genericArity > 0)
+                foreach (var m in cur.GetMethods(bf))
                 {
-                    if (!m.IsGenericMethodDefinition) continue;
-                    if (m.GetGenericArguments().Length != genericArity) continue;
+                    if (m.Name != name) continue;
+                    if (m.GetParameters().Length != arity) continue;
+                    if (genericArity > 0)
+                    {
+                        if (!m.IsGenericMethodDefinition) continue;
+                        if (m.GetGenericArguments().Length != genericArity) continue;
+                    }
+                    else if (m.IsGenericMethodDefinition) continue;
+                    return m;
                 }
-                else if (m.IsGenericMethodDefinition) continue;
-                return m;
             }
             return null;
         }
@@ -1053,9 +1134,11 @@ namespace RoslynRepl.Editor.Patches
         }
 
         // Find a field/property on the type and return its CLR type, or
-        // null when no such member exists. Walks base types via
-        // FlattenHierarchy. instance/static filtering is opt-in so the
-        // same routine handles both same-instance and Type.X cases.
+        // null when no such member exists. Walks DeclaredOnly +
+        // BaseType so private inherited members are visible — same
+        // reasoning as FindMethodInfo above. instance/static
+        // filtering is opt-in so the same routine handles both
+        // same-instance and Type.X cases.
         private static Type ResolveMemberType(
             Type t,
             string name,
@@ -1063,14 +1146,17 @@ namespace RoslynRepl.Editor.Patches
             bool instanceOnly = false,
             bool staticOnly = false)
         {
-            BindingFlags bf = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.FlattenHierarchy;
+            BindingFlags bf = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
             if (!staticOnly) bf |= BindingFlags.Instance;
             if (!instanceOnly && (includeStatic || staticOnly)) bf |= BindingFlags.Static;
 
-            var f = t.GetField(name, bf);
-            if (f != null) return f.FieldType;
-            var p = t.GetProperty(name, bf);
-            if (p != null) return p.PropertyType;
+            for (var cur = t; cur != null; cur = cur.BaseType)
+            {
+                var f = cur.GetField(name, bf);
+                if (f != null) return f.FieldType;
+                var p = cur.GetProperty(name, bf);
+                if (p != null) return p.PropertyType;
+            }
             return null;
         }
 

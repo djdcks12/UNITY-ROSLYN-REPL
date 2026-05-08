@@ -425,6 +425,89 @@ namespace RoslynRepl.Editor.Patches
             sb.AppendLine($"public static class {className}");
             sb.AppendLine("{");
 
+            // Wrapper-level static helpers + cache for `base.X(...)`
+            // non-virtual invocation. The cache lives on the wrapper
+            // (one per Apply, recycled per re-apply) and stores
+            // delegates built via Reflection.Emit so repeated
+            // `base.OnEnable()` calls within one patch session reuse
+            // the same DynamicMethod. Phase D's rewriter pre-pass
+            // replaces `base.X(args)` with `__callBase<R>("X", args)`,
+            // which routes through __BaseInvokeFromDerived → either
+            // the cached delegate or a freshly emitted one.
+            sb.AppendLine("    private static readonly System.Collections.Generic.Dictionary<System.Reflection.MethodInfo, System.Func<object, object[], object>> __BaseInvokerCache = new System.Collections.Generic.Dictionary<System.Reflection.MethodInfo, System.Func<object, object[], object>>();");
+            sb.AppendLine();
+            sb.AppendLine("    private static object __BaseInvokeFromDerived(object instance, System.Type derivedDecl, string name, object[] args)");
+            sb.AppendLine("    {");
+            sb.AppendLine("        args = args ?? new object[0];");
+            sb.AppendLine("        System.Reflection.MethodInfo m = null;");
+            sb.AppendLine("        var bf = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.DeclaredOnly;");
+            sb.AppendLine("        for (var bt = derivedDecl.BaseType; bt != null && m == null; bt = bt.BaseType)");
+            sb.AppendLine("        {");
+            sb.AppendLine("            foreach (var mm in bt.GetMethods(bf))");
+            sb.AppendLine("            {");
+            sb.AppendLine("                if (mm.Name == name && mm.GetParameters().Length == args.Length) { m = mm; break; }");
+            sb.AppendLine("            }");
+            sb.AppendLine("        }");
+            sb.AppendLine("        if (m == null) throw new System.InvalidOperationException(\"Base method '\" + name + \"(\" + args.Length + \" args)' not found on the base chain of \" + derivedDecl.Name);");
+            sb.AppendLine();
+            sb.AppendLine("        System.Func<object, object[], object> del;");
+            sb.AppendLine("        lock (__BaseInvokerCache) { __BaseInvokerCache.TryGetValue(m, out del); }");
+            sb.AppendLine("        if (del == null)");
+            sb.AppendLine("        {");
+            sb.AppendLine("            del = __BuildBaseInvoker(m);");
+            sb.AppendLine("            lock (__BaseInvokerCache) { __BaseInvokerCache[m] = del; }");
+            sb.AppendLine("        }");
+            sb.AppendLine("        return del(instance, args);");
+            sb.AppendLine("    }");
+            sb.AppendLine();
+
+            // Build a Func<object, object[], object> delegate that
+            // invokes `m` *non-virtually* (IL `call`, not `callvirt`).
+            // MethodInfo.Invoke + Delegate.CreateDelegate both go
+            // through virtual dispatch for non-final virtual methods,
+            // which would re-enter the patched override and infinite-
+            // loop. DynamicMethod with EmitCall(OpCodes.Call, ...) is
+            // the only standard path that explicitly calls the base
+            // implementation.
+            sb.AppendLine("    private static System.Func<object, object[], object> __BuildBaseInvoker(System.Reflection.MethodInfo m)");
+            sb.AppendLine("    {");
+            sb.AppendLine("        var dyn = new System.Reflection.Emit.DynamicMethod(");
+            sb.AppendLine("            \"RrCallBase_\" + m.Name + \"_\" + System.Guid.NewGuid().ToString(\"N\").Substring(0, 8),");
+            sb.AppendLine("            typeof(object),");
+            sb.AppendLine("            new System.Type[] { typeof(object), typeof(object[]) },");
+            sb.AppendLine("            m.DeclaringType,");
+            sb.AppendLine("            true);");
+            sb.AppendLine("        var il = dyn.GetILGenerator();");
+            sb.AppendLine();
+            sb.AppendLine("        // load instance, cast to declaring type");
+            sb.AppendLine("        il.Emit(System.Reflection.Emit.OpCodes.Ldarg_0);");
+            sb.AppendLine("        if (m.DeclaringType.IsValueType) il.Emit(System.Reflection.Emit.OpCodes.Unbox_Any, m.DeclaringType);");
+            sb.AppendLine("        else il.Emit(System.Reflection.Emit.OpCodes.Castclass, m.DeclaringType);");
+            sb.AppendLine();
+            sb.AppendLine("        // load each arg from the object[] and unbox/cast as appropriate");
+            sb.AppendLine("        var pars = m.GetParameters();");
+            sb.AppendLine("        for (int i = 0; i < pars.Length; i++)");
+            sb.AppendLine("        {");
+            sb.AppendLine("            il.Emit(System.Reflection.Emit.OpCodes.Ldarg_1);");
+            sb.AppendLine("            il.Emit(System.Reflection.Emit.OpCodes.Ldc_I4, i);");
+            sb.AppendLine("            il.Emit(System.Reflection.Emit.OpCodes.Ldelem_Ref);");
+            sb.AppendLine("            var pt = pars[i].ParameterType;");
+            sb.AppendLine("            if (pt.IsValueType) il.Emit(System.Reflection.Emit.OpCodes.Unbox_Any, pt);");
+            sb.AppendLine("            else il.Emit(System.Reflection.Emit.OpCodes.Castclass, pt);");
+            sb.AppendLine("        }");
+            sb.AppendLine();
+            sb.AppendLine("        // non-virtual call");
+            sb.AppendLine("        il.EmitCall(System.Reflection.Emit.OpCodes.Call, m, null);");
+            sb.AppendLine();
+            sb.AppendLine("        // return: void → ldnull, valuetype → box, reference → as-is");
+            sb.AppendLine("        if (m.ReturnType == typeof(void)) il.Emit(System.Reflection.Emit.OpCodes.Ldnull);");
+            sb.AppendLine("        else if (m.ReturnType.IsValueType) il.Emit(System.Reflection.Emit.OpCodes.Box, m.ReturnType);");
+            sb.AppendLine("        il.Emit(System.Reflection.Emit.OpCodes.Ret);");
+            sb.AppendLine();
+            sb.AppendLine("        return (System.Func<object, object[], object>)dyn.CreateDelegate(typeof(System.Func<object, object[], object>));");
+            sb.AppendLine("    }");
+            sb.AppendLine();
+
             // Build the parameter list. First param is `__instance` — the
             // Harmony convention for instance method targets — typed as
             // the declaring type so the user's body can write
@@ -587,6 +670,18 @@ namespace RoslynRepl.Editor.Patches
             sb.AppendLine("        {");
             sb.AppendLine("            if (type == null) throw new System.ArgumentNullException(nameof(type));");
             sb.AppendLine("            var __r = __InvokeReflective(type, null, name, args);");
+            sb.AppendLine("            return __r is T __cast ? __cast : default;");
+            sb.AppendLine("        }");
+
+            // `base.X(args)` → __callBase<R>("X", args). Routes through
+            // __BaseInvokeFromDerived which walks the declaring type's
+            // base chain and dispatches via a non-virtual DynamicMethod
+            // delegate. Without this the override would re-enter
+            // itself and infinite-loop, since Harmony's Prefix
+            // intercepts the patched method's normal vtable slot.
+            sb.AppendLine("        T __callBase<T>(string name, params object[] args)");
+            sb.AppendLine("        {");
+            sb.AppendLine($"            var __r = __BaseInvokeFromDerived(__instance, typeof({declType}), name, args);");
             sb.AppendLine("            return __r is T __cast ? __cast : default;");
             sb.AppendLine("        }");
 
