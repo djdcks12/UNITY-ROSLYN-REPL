@@ -1097,7 +1097,15 @@ namespace RoslynRepl.Editor.Patches
                 var castedArgs = new List<string>(pars.Length);
                 for (int i = 0; i < pars.Length; i++)
                 {
-                    var argText = args[i].ToFullString();
+                    // Strip NameColon ("name:") + RefKindKeyword
+                    // ("ref"/"out"/"in") so the cast wraps the bare
+                    // value expression. The Validator should reject
+                    // these argument shapes up-front, but defensively
+                    // rendering only `Expression` keeps the generated
+                    // code valid even if the validator misses an
+                    // edge case — `(int)(name: value)` would be a
+                    // syntax error.
+                    var argText = args[i].Expression.ToFullString();
                     castedArgs.Add($"({RenderParamType(pars[i].ParameterType)})({argText})");
                 }
                 argsArr = "new object[] { " + string.Join(", ", castedArgs) + " }";

@@ -66,6 +66,17 @@ namespace RoslynRepl.Editor.Patches
         {
             if (spec == null) throw new ArgumentNullException(nameof(spec));
 
+            // Phase D pre-flight: catch unsupported body shapes
+            // (await/yield/named-arg/ref-out-in/base-field-read)
+            // before the compile pipeline runs. The validator emits
+            // a single user-readable line; the Patches UI surfaces
+            // it through the existing LastError path. This avoids
+            // burying the actual cause under a wall of Roslyn
+            // diagnostic codes.
+            var validation = PatchSyntaxValidator.Validate(spec.PatchBody);
+            if (!validation.Ok)
+                throw new InvalidOperationException(validation.Reason);
+
             // Phase 1 — resolve + compile. No mutations to existing
             // state happen here, so a typo / missing type / missing
             // method / compile error bubbles up before we touch the
@@ -205,30 +216,82 @@ namespace RoslynRepl.Editor.Patches
         /// <summary>
         /// Look up <paramref name="spec"/>'s target method. Errors are
         /// thrown with messages the UI can show as the row's LastError.
+        /// Constructors, generic methods, ref/out/in parameters,
+        /// non-void returns, and statics are all explicitly rejected
+        /// — the wrapper / Harmony bridge isn't equipped to handle
+        /// them, and a clear up-front error is friendlier than a
+        /// later compile-time crash.
         /// </summary>
         private static MethodInfo ResolveTargetMethod(MethodPatchSpec spec)
         {
             var type = ResolveType(spec.TargetTypeName)
                 ?? throw new InvalidOperationException($"Type not found: {spec.TargetTypeName}");
 
+            // Constructor names — `.ctor` / `.cctor` aren't reachable
+            // through Type.GetMethod, but a user-typed spec might try
+            // anyway. Catch them up front with a clear reason.
+            if (spec.MethodName == ".ctor" || spec.MethodName == ".cctor")
+            {
+                throw new InvalidOperationException(
+                    "Runtime patch does not support constructors yet.");
+            }
+
             var paramTypes = ResolveParamTypes(spec.ParameterTypes);
-            const BindingFlags bf = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+
+            // Look up across instance + static so a static-method
+            // spec lands a method (instead of falling out as
+            // "Method not found"). The shape checks below then
+            // reject statics with a clear reason. Same goes for
+            // generic methods: GetMethod with a Type[] only matches
+            // closed/non-generic signatures, so we walk all same-
+            // name candidates first to detect generic ones and
+            // emit a friendlier message than the bare "not found".
+            const BindingFlags bf = BindingFlags.Instance | BindingFlags.Static
+                                  | BindingFlags.Public | BindingFlags.NonPublic;
 
             var method = type.GetMethod(spec.MethodName, bf, null, paramTypes, null);
             if (method == null)
             {
+                // Search all same-name candidates (no type-list
+                // narrowing) so we can recognize generic / overload-
+                // shape cases that GetMethod's binder rejected.
+                var sameName = type.GetMethods(bf).Where(m => m.Name == spec.MethodName).ToArray();
+                if (sameName.Length > 0)
+                {
+                    if (sameName.Any(m => m.IsGenericMethod || m.IsGenericMethodDefinition))
+                    {
+                        throw new InvalidOperationException(
+                            $"Runtime patch does not support generic methods yet; {spec.MethodName} declares type parameters.");
+                    }
+                    throw new InvalidOperationException(
+                        $"Method '{spec.MethodName}' exists on {spec.TargetTypeName} but no overload matches parameter types ({spec.ParameterTypes ?? ""}).");
+                }
                 throw new InvalidOperationException(
                     $"Method not found: {spec.TargetTypeName}.{spec.MethodName}({spec.ParameterTypes ?? ""})");
+            }
+            if (method.IsGenericMethod || method.IsGenericMethodDefinition)
+            {
+                throw new InvalidOperationException(
+                    $"Runtime patch does not support generic methods yet; {method.Name} declares type parameters.");
             }
             if (method.ReturnType != typeof(void))
             {
                 throw new InvalidOperationException(
-                    $"Phase A MVP only patches void instance methods; {method.Name} returns {method.ReturnType.Name}.");
+                    $"Runtime patch only supports void methods; {method.Name} returns {method.ReturnType.Name}.");
             }
             if (method.IsStatic)
             {
                 throw new InvalidOperationException(
-                    $"Phase A MVP only patches *instance* methods; {method.Name} is static.");
+                    $"Runtime patch only supports instance methods; {method.Name} is static.");
+            }
+            foreach (var p in method.GetParameters())
+            {
+                if (p.ParameterType.IsByRef)
+                {
+                    string kind = p.IsOut ? "out" : (p.IsIn ? "in" : "ref");
+                    throw new InvalidOperationException(
+                        $"Runtime patch does not support `{kind}` parameters yet; {method.Name} parameter `{p.Name}` is `{kind}`.");
+                }
             }
             return method;
         }
