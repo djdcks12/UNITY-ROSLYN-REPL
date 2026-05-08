@@ -86,6 +86,21 @@
     -unity-text-align: middle-right;
 }
 
+/* Issue #20: persistent banner under the Code header reminding the
+   user that the only way to interrupt a snippet is for the snippet
+   itself to observe `ct`. The first-Run dialog is the loud version;
+   this row is the always-visible recap so the warning never
+   disappears once the user dismisses the dialog. */
+.rr-run-warning {
+    font-size: 10px;
+    color: rgb(220, 180, 80);
+    background-color: rgba(220, 180, 80, 0.10);
+    border-bottom-width: 1px;
+    border-bottom-color: rgba(220, 180, 80, 0.30);
+    padding: 3px 8px;
+    white-space: normal;
+}
+
 /* Phase-A4: clickable mode tabs in the Output / Patches header. */
 .rr-pane-tab {
     margin-right: 12px;

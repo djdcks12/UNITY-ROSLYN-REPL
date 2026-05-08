@@ -16,6 +16,20 @@ namespace RoslynRepl.Editor.UI
 
         private const string SessionKey_CodeText = "RoslynRepl.CodeText";
 
+        // Issue #20: ack flag for the cooperative-cancel safety dialog.
+        // Stored in machine-wide EditorPrefs (not project-scoped) — the
+        // user only needs to learn the threading model once per
+        // workstation, and the project-scoped Reset deliberately leaves
+        // it alone so handing the project off doesn't surprise the new
+        // user with a missing warning. A new machine still gets the
+        // dialog on first Run.
+        private const string PrefsKey_CoopCancelAcknowledged = "RoslynRepl.CoopCancelAcknowledged";
+
+        private const string CoopWarningTooltip =
+            "Snippets run on the Unity Editor main thread.\n" +
+            "Only `ct.ThrowIfCancellationRequested()` (cooperative cancel) " +
+            "can interrupt a running snippet — `while(true){}` without a `ct` check freezes the Editor.";
+
         private const string DefaultCode =
 @"// Roslyn REPL — write C# below, F5 or Ctrl+Enter to run.
 // Use 'return X;' to surface a value. Debug.Log() output is captured.
@@ -311,7 +325,23 @@ return UnityEngine.Application.unityVersion;";
             }
 
             var runBtn = root.Q<Button>("run-btn");
-            if (runBtn != null) runBtn.clicked += Run;
+            if (runBtn != null)
+            {
+                // Match the persistent banner under the Code header so
+                // hover-discoverable surfaces all carry the same
+                // cooperative-cancel reminder. The first-Run dialog is
+                // the loud version once per workstation; tooltip + banner
+                // cover every subsequent Run.
+                runBtn.tooltip = CoopWarningTooltip;
+                runBtn.clicked += Run;
+            }
+
+            // Same reminder under the Code header — match tooltip text
+            // so a user mousing over the warning row gets the
+            // ct-throwifcancellation-style call-out without leaving the
+            // pane.
+            var runWarning = root.Q<Label>("run-warning-label");
+            if (runWarning != null) runWarning.tooltip = CoopWarningTooltip;
 
             var clearBtn = root.Q<Button>("clear-btn");
             if (clearBtn != null) clearBtn.clicked += ClearOutput;
@@ -424,6 +454,35 @@ return UnityEngine.Application.unityVersion;";
         private void Run()
         {
             if (_codeEditor == null || _outputContent == null) return;
+
+            // Issue #20 acceptance criterion (OR branch): warn the user
+            // about the cooperative-only cancel model before the very
+            // first Run on this workstation. Once acknowledged, the
+            // permanent banner under the Code header + the Run button
+            // tooltip carry the reminder forward; we don't re-prompt on
+            // every Run. Cancel aborts this Run only — the user can
+            // edit the code and try again, and the dialog still fires
+            // until they explicitly OK it.
+            if (!EditorPrefs.GetBool(PrefsKey_CoopCancelAcknowledged, false))
+            {
+                bool proceed = EditorUtility.DisplayDialog(
+                    "Roslyn REPL — Cooperative cancel only",
+                    "Snippets execute synchronously on the Unity Editor's main thread.\n\n" +
+                    "The 5-second timeout (and any external Cancel) only fire when your code observes " +
+                    "the cancellation token `ct`. Patterns like `while (true) {}` or any blocking call " +
+                    "without a `ct.ThrowIfCancellationRequested()` check will freeze the Editor and may " +
+                    "require force-quitting Unity.\n\n" +
+                    "This dialog only appears the first time on this machine. The yellow banner under " +
+                    "the Code header keeps the reminder visible going forward.",
+                    "I understand — run it",
+                    "Cancel");
+                if (!proceed)
+                {
+                    AppendOutput("(Run cancelled — ack the cooperative-cancel warning to continue.)", "info");
+                    return;
+                }
+                EditorPrefs.SetBool(PrefsKey_CoopCancelAcknowledged, true);
+            }
 
             var code = _codeEditor.value ?? string.Empty;
             ClearOutput();
