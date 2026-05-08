@@ -787,18 +787,66 @@ namespace RoslynRepl.Editor.Patches
         }
 
         // Render a System.Type as the C# type expression we paste into
-        // the generated code. Avoids the open-generic edge cases by
-        // routing through Roslyn-friendly names.
+        // the generated code. Closed generics (`List<int>`,
+        // `Dictionary<string, int>`, `Nullable<int>`) need recursive
+        // rendering — Type.FullName for those is the assembly-qualified
+        // form `System.Collections.Generic.List`1[[System.Int32, mscorlib,
+        // ...]]` which is not valid C#. We strip the backtick arity,
+        // recursively render each type argument, and re-emit the
+        // angle-bracket form. Arrays go through GetElementType + "[]".
         private static string TypeRef(Type t)
         {
             if (t == null) return "object";
             if (t == typeof(void)) return "object"; // helpers return object then; T=object yields default
             if (t.IsByRef) t = t.GetElementType();
-            // For generics + nested types, FullName uses `+` and a
-            // backtick-arity suffix; turn that back into the C# form.
-            // Phase D2 doesn't try to handle open generics, so a plain
-            // FullName is fine for the names we expect (int, string,
-            // Vector3, the user's plain-old types).
+            return RenderCSharpType(t);
+        }
+
+        private static string RenderCSharpType(Type t)
+        {
+            if (t == null) return "object";
+            if (t.IsByRef) t = t.GetElementType();
+
+            // Arrays — recurse on element type, then re-attach the
+            // bracket suffix. Multi-dim arrays use [,] etc. — preserve
+            // the rank so the round-trip stays accurate.
+            if (t.IsArray)
+            {
+                var elem = t.GetElementType();
+                int rank = t.GetArrayRank();
+                var brackets = "[" + new string(',', rank - 1) + "]";
+                return RenderCSharpType(elem) + brackets;
+            }
+
+            // Pointer types — uncommon in patch bodies but cheap to
+            // handle.
+            if (t.IsPointer)
+            {
+                return RenderCSharpType(t.GetElementType()) + "*";
+            }
+
+            // Generics: strip the `N` arity suffix from the
+            // (namespace-qualified, '+'→'.') name and re-emit each
+            // type argument inside angle brackets. Open generics
+            // (a generic parameter T) just render as their declared
+            // name — patch bodies basically never see those.
+            if (t.IsGenericParameter)
+            {
+                return t.Name;
+            }
+            if (t.IsGenericType)
+            {
+                var def = t.GetGenericTypeDefinition();
+                var rawName = def.FullName ?? def.Name;
+                int tick = rawName.IndexOf('`');
+                var head = (tick >= 0 ? rawName.Substring(0, tick) : rawName).Replace('+', '.');
+                var args = t.GetGenericArguments();
+                if (args.Length == 0) return head;
+                return head + "<" + string.Join(", ", args.Select(RenderCSharpType)) + ">";
+            }
+
+            // Plain non-generic — FullName covers namespace + nested
+            // chain (with `+`), so map `+` to `.` for the C# form.
             return (t.FullName ?? t.Name).Replace('+', '.');
         }
     }
