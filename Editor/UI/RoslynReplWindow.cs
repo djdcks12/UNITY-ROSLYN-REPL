@@ -116,12 +116,25 @@ return UnityEngine.Application.unityVersion;";
             bool hasStalePatchKey = patchCount == 0
                 && RoslynRepl.Editor.Patches.PatchPersistence.HasAny();
 
+            // Watch compile cache PR fix: WatchStore.Clear() drops the
+            // expression *list* from EditorPrefs, but ReplEngine's
+            // compile cache still holds a strong reference to each
+            // wrapped source string keyed under that exact text. A
+            // user resetting after running sensitive watches would see
+            // the dialog claim "watches cleared" while the same
+            // expression text stays alive in process memory until the
+            // next AppDomain.AssemblyLoad. Pull the cache size into
+            // both the early-return scope check and the dialog so the
+            // counts don't lie about what actually got wiped.
+            int compileCacheCount = ReplEngine.CompileCacheCount;
+
             if (storeTotal == 0 && !hasCarryOver && dirtyOutputs == 0
-                && patchCount == 0 && !hasStalePatchKey)
+                && patchCount == 0 && !hasStalePatchKey
+                && compileCacheCount == 0)
             {
                 EditorUtility.DisplayDialog(
                     "Roslyn REPL — Reset Project Data",
-                    "Nothing to clear — all four stores are empty, no `_` carry-over is set, no Output panel has run results to wipe, and no runtime method patches are active.",
+                    "Nothing to clear — all four stores are empty, no `_` carry-over is set, no Output panel has run results to wipe, no runtime method patches are active, and the compiled-watch cache is empty.",
                     "OK");
                 return;
             }
@@ -144,6 +157,9 @@ return UnityEngine.Application.unityVersion;";
             detail.Append(patchCount > 0
                 ? $"  • {patchCount} runtime method patch{(patchCount == 1 ? "" : "es")} (Harmony detours will be reverted)\n"
                 : "  • runtime method patches (none active)\n");
+            detail.Append(compileCacheCount > 0
+                ? $"  • {compileCacheCount} cached compiled watch{(compileCacheCount == 1 ? "" : "es")} (in-memory wrapped source + MethodInfo)\n"
+                : "  • the compiled-watch cache (currently empty)\n");
             detail.Append("\nOther projects on this machine are not affected. There is no undo.");
 
             if (!EditorUtility.DisplayDialog(
@@ -164,6 +180,13 @@ return UnityEngine.Application.unityVersion;";
             WatchStore.Clear();
             UsingsStore.Clear();
             ReplEngine.ResetLastResult();
+            // Order: clear the cache *after* WatchStore.Clear so a
+            // racing AssemblyLoad mid-reset can't repopulate from a
+            // surviving WatchEvaluator timer. WatchStore is the only
+            // surface that asks the evaluator to compile, so once it's
+            // empty the cache stays empty regardless of when the
+            // invalidation lands.
+            ReplEngine.InvalidateCompileCache();
 
             // Drop every Harmony detour first, then wipe the registry
             // — order matters: PatchRegistry.Clear fires Changed, which
@@ -182,10 +205,10 @@ return UnityEngine.Application.unityVersion;";
                 if (w != null) w.ClearOutputAfterReset();
             }
 
-            int reportedTotal = storeTotal + (hasCarryOver ? 1 : 0) + dirtyOutputs + patchCount;
+            int reportedTotal = storeTotal + (hasCarryOver ? 1 : 0) + dirtyOutputs + patchCount + compileCacheCount;
             EditorUtility.DisplayDialog(
                 "Roslyn REPL — Reset Project Data",
-                $"Cleared {reportedTotal} item{(reportedTotal == 1 ? "" : "s")} across snippet library, run history, watches, custom usings, the `_` carry-over, visible Output panels, and runtime method patches.",
+                $"Cleared {reportedTotal} item{(reportedTotal == 1 ? "" : "s")} across snippet library, run history, watches, custom usings, the `_` carry-over, visible Output panels, runtime method patches, and the compiled-watch cache.",
                 "OK");
         }
 

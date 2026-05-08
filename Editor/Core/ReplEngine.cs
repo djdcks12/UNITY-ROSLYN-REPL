@@ -67,44 +67,77 @@ namespace RoslynRepl.Editor.Core
             {
                 var wrapped = ReplCodeWrapper.Wrap(userCode, options.Usings);
 
-                var tree = CSharpSyntaxTree.ParseText(wrapped.Source);
-                var compilation = CSharpCompilation.Create(
-                    assemblyName: "ReplDynamic_" + Guid.NewGuid().ToString("N").Substring(0, 8),
-                    syntaxTrees: new[] { tree },
-                    references: AssemblyReferenceCache.GetReferences(),
-                    options: new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary)
-                );
-
-                using var ms = new MemoryStream();
-                var emit = compilation.Emit(ms);
-                if (!emit.Success)
+                MethodInfo method = null;
+                if (options.UseCompileCache)
                 {
-                    var diagnostics = emit.Diagnostics
-                        .Where(d => d.Severity == DiagnosticSeverity.Error)
-                        .Select(d => ToDiagnosticInfo(d, wrapped.UserCodeLineOffset))
-                        .ToList();
-                    return ReplResult.CompileError(diagnostics, ClassifyLogs(capture.End()), sw.Elapsed);
+                    EnsureAssemblyLoadHook();
+                    lock (_compileCacheLock)
+                    {
+                        if (_compileCache.TryGetValue(wrapped.Source, out var cached))
+                        {
+                            method = cached.Method;
+                        }
+                    }
                 }
 
-                ms.Seek(0, SeekOrigin.Begin);
-                var asm = Assembly.Load(ms.ToArray());
-                var type = asm.GetType(ReplCodeWrapper.ClassName);
-                if (type == null)
-                {
-                    return ReplResult.RuntimeError(
-                        new InvalidOperationException(
-                            $"Internal error: class '{ReplCodeWrapper.ClassName}' not found in compiled assembly."),
-                        ClassifyLogs(capture.End()), sw.Elapsed);
-                }
-
-                var method = type.GetMethod(ReplCodeWrapper.MethodName,
-                    BindingFlags.Public | BindingFlags.Static);
                 if (method == null)
                 {
-                    return ReplResult.RuntimeError(
-                        new InvalidOperationException(
-                            $"Internal error: method '{ReplCodeWrapper.MethodName}' not found."),
-                        ClassifyLogs(capture.End()), sw.Elapsed);
+                    var tree = CSharpSyntaxTree.ParseText(wrapped.Source);
+                    var compilation = CSharpCompilation.Create(
+                        assemblyName: "ReplDynamic_" + Guid.NewGuid().ToString("N").Substring(0, 8),
+                        syntaxTrees: new[] { tree },
+                        references: AssemblyReferenceCache.GetReferences(),
+                        options: new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary)
+                    );
+
+                    using var ms = new MemoryStream();
+                    var emit = compilation.Emit(ms);
+                    if (!emit.Success)
+                    {
+                        var diagnostics = emit.Diagnostics
+                            .Where(d => d.Severity == DiagnosticSeverity.Error)
+                            .Select(d => ToDiagnosticInfo(d, wrapped.UserCodeLineOffset))
+                            .ToList();
+                        return ReplResult.CompileError(diagnostics, ClassifyLogs(capture.End()), sw.Elapsed);
+                    }
+
+                    ms.Seek(0, SeekOrigin.Begin);
+                    var asm = Assembly.Load(ms.ToArray());
+                    var type = asm.GetType(ReplCodeWrapper.ClassName);
+                    if (type == null)
+                    {
+                        return ReplResult.RuntimeError(
+                            new InvalidOperationException(
+                                $"Internal error: class '{ReplCodeWrapper.ClassName}' not found in compiled assembly."),
+                            ClassifyLogs(capture.End()), sw.Elapsed);
+                    }
+
+                    method = type.GetMethod(ReplCodeWrapper.MethodName,
+                        BindingFlags.Public | BindingFlags.Static);
+                    if (method == null)
+                    {
+                        return ReplResult.RuntimeError(
+                            new InvalidOperationException(
+                                $"Internal error: method '{ReplCodeWrapper.MethodName}' not found."),
+                            ClassifyLogs(capture.End()), sw.Elapsed);
+                    }
+
+                    if (options.UseCompileCache)
+                    {
+                        // Hold a strong reference to the Assembly even
+                        // though MethodInfo already pins it — explicit
+                        // ownership makes the lifetime obvious to anyone
+                        // reading the cache type, and matches what we'd
+                        // want if the cache ever grows to evict by age.
+                        lock (_compileCacheLock)
+                        {
+                            _compileCache[wrapped.Source] = new CachedScript
+                            {
+                                Assembly = asm,
+                                Method = method,
+                            };
+                        }
+                    }
                 }
 
                 // Begin capture as late as possible — only the Invoke window — so
@@ -239,6 +272,88 @@ namespace RoslynRepl.Editor.Core
             if (options.TimeoutMs > 0 && token.IsCancellationRequested)
                 return $"Snippet cancelled after {options.TimeoutMs} ms timeout";
             return "Snippet cancelled";
+        }
+
+        // ─── compile cache (opt-in via ReplOptions.UseCompileCache) ──
+        //
+        // Issue #13: amortize the per-Run compile cost across N watch
+        // expressions. Watches re-evaluate the same expression text
+        // every Run, so the wrapped source ReplCodeWrapper.Wrap returns
+        // is byte-identical between runs. Keying the cache on
+        // wrapped.Source (which folds in usings + ClassName +
+        // MethodName + the user expression) makes a hit safe by
+        // construction — different snippet *or* different usings ⇒
+        // different key ⇒ fresh compile.
+        //
+        // Invalidation: AppDomain.AssemblyLoad. Anything that adds a
+        // new assembly to the domain — package install, recompile,
+        // first-time Type.GetType resolution that pulls in a satellite
+        // assembly — could legitimately change which symbols the next
+        // compile would resolve, so the safe move is to drop the
+        // entire cache. Our own dynamic ReplDynamic_* assemblies are
+        // skipped so populating the cache doesn't immediately wipe it.
+        //
+        // Memory: no explicit eviction. Watches are user-typed and
+        // typically <50 distinct snippets per session; the AssemblyLoad
+        // sweep already prunes naturally on common project events
+        // (script recompile, package add). If a user pathologically
+        // typed thousands of unique watches, the cache would grow —
+        // but that's the same pressure the underlying Assembly.Load
+        // path already exerts, with or without this cache.
+
+        private class CachedScript
+        {
+            public Assembly Assembly;
+            public MethodInfo Method;
+        }
+
+        private static readonly Dictionary<string, CachedScript> _compileCache = new();
+        private static readonly object _compileCacheLock = new();
+        private static bool _assemblyLoadHooked;
+
+        /// <summary>Snapshot of the cached entry count — diagnostics + tests.</summary>
+        public static int CompileCacheCount
+        {
+            get { lock (_compileCacheLock) return _compileCache.Count; }
+        }
+
+        /// <summary>
+        /// Drop every cached MethodInfo. Called automatically on
+        /// AppDomain.AssemblyLoad for assemblies the engine didn't
+        /// generate; exposed publicly so tests and the UI's "force
+        /// rebuild" path can invalidate manually.
+        /// </summary>
+        public static void InvalidateCompileCache()
+        {
+            lock (_compileCacheLock)
+            {
+                _compileCache.Clear();
+            }
+        }
+
+        private static void EnsureAssemblyLoadHook()
+        {
+            if (_assemblyLoadHooked) return;
+            _assemblyLoadHooked = true;
+            AppDomain.CurrentDomain.AssemblyLoad += OnAssemblyLoaded;
+        }
+
+        private static void OnAssemblyLoaded(object sender, AssemblyLoadEventArgs args)
+        {
+            var asm = args?.LoadedAssembly;
+            if (asm == null) return;
+
+            // Skip the engine's own emitted assemblies — every cache
+            // miss path ends with `Assembly.Load(ms.ToArray())`, and
+            // that load fires this same event. Wiping the cache there
+            // would defeat the entire feature.
+            string name;
+            try { name = asm.GetName().Name ?? string.Empty; }
+            catch { name = string.Empty; }
+            if (name.StartsWith("ReplDynamic_", StringComparison.Ordinal)) return;
+            if (asm.IsDynamic) return;
+
+            InvalidateCompileCache();
         }
     }
 }
