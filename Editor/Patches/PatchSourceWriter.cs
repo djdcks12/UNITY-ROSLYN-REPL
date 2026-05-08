@@ -39,9 +39,15 @@ namespace RoslynRepl.Editor.Patches
     /// longer a clean overlay.
     ///
     /// Safety: the writer creates a `.bak` sibling of the target
-    /// file before writing. Failures during write leave the
-    /// original in place via the backup; callers can re-run after
-    /// fixing whatever blocked the write.
+    /// file before writing, then performs the substitution as an
+    /// OS-atomic three-step (write to dot-prefixed temp file in the
+    /// same directory → <see cref="System.IO.File.Replace(string,string,string,bool)"/>
+    /// to swap temp → original while saving the previous original
+    /// into the backup). A failure during write leaves the original
+    /// untouched and the pre-write backup in place; callers can
+    /// re-run after fixing whatever blocked the write. Same-volume
+    /// constraint is satisfied by construction because the temp
+    /// always lives in the source's directory.
     /// </summary>
     public static class PatchSourceWriter
     {
@@ -144,21 +150,85 @@ namespace RoslynRepl.Editor.Patches
             var normalized = NormalizeBlockBody(newBody);
             var newSource = source.Substring(0, openEnd) + normalized + closeIndent + source.Substring(closeStart);
 
-            string backupPath;
+            // Atomic write (issue #21). The previous shape was
+            //   File.Copy(...bak)              ← backup
+            //   File.WriteAllText(...source)   ← direct overwrite
+            // which left a window where a half-written .cs could land
+            // on disk if WriteAllText failed mid-write (out-of-disk,
+            // permissions flip, host crash). New shape:
+            //
+            //   1. File.Copy(source → .bak)
+            //         pre-create the backup so a Replace failure that
+            //         leaves no destination-side backup still gives
+            //         the user a known-good copy.
+            //   2. File.WriteAllText(source → tempPath)
+            //         write the new contents into a sibling temp file
+            //         in the *same* directory — same directory means
+            //         same volume, which is what makes File.Replace
+            //         atomic on the OS layer.
+            //   3. File.Replace(temp → source, backup ← prev source)
+            //         OS-atomic swap. The original .cs either fully
+            //         becomes tempPath's content or stays exactly as
+            //         it was. The Replace also overwrites the .bak
+            //         we made in step 1 with the previous source-
+            //         file contents, which is identical content
+            //         (we just copied it), so the user's recovery
+            //         path is unchanged.
+            //
+            // Failure handling: if step 2 throws, the original is
+            // untouched and we delete the partial temp. If step 3
+            // throws, File.Replace's contract preserves the
+            // destination, the pre-step-1 backup we made is still
+            // valid, and we delete the temp.
+            //
+            // Temp file naming: dot-prefix + random suffix in the
+            // source's directory. Dot-prefix tells Unity's asset
+            // importer to skip it (same convention as `.DS_Store`,
+            // `.git`, etc.) so we don't trigger a stray .meta during
+            // the brief window the file exists.
+            string backupPath = found.SourcePath + ".bak";
             try
             {
-                backupPath = found.SourcePath + ".bak";
                 File.Copy(found.SourcePath, backupPath, overwrite: true);
             }
             catch (Exception ex) { return Fail($"Could not write backup: {ex.Message}"); }
 
+            string tempPath;
+            {
+                string dir = Path.GetDirectoryName(found.SourcePath) ?? string.Empty;
+                string baseName = Path.GetFileName(found.SourcePath);
+                tempPath = Path.Combine(dir,
+                    "." + baseName + "." + Guid.NewGuid().ToString("N").Substring(0, 8) + ".tmp");
+            }
+
             try
             {
-                File.WriteAllText(found.SourcePath, newSource);
+                File.WriteAllText(tempPath, newSource);
             }
             catch (Exception ex)
             {
-                return Fail($"Could not write '{found.SourcePath}': {ex.Message}");
+                SafeDelete(tempPath);
+                return Fail($"Could not write temporary file '{tempPath}': {ex.Message}");
+            }
+
+            try
+            {
+                File.Replace(
+                    sourceFileName: tempPath,
+                    destinationFileName: found.SourcePath,
+                    destinationBackupFileName: backupPath,
+                    ignoreMetadataErrors: true);
+            }
+            catch (Exception ex)
+            {
+                // File.Replace documents that a failure leaves the
+                // destination unchanged. The pre-Replace backup we
+                // made in step 1 is still on disk, so the user has
+                // a valid recovery point even if Replace itself
+                // tripped on a sharing violation / cross-volume /
+                // antivirus hold.
+                SafeDelete(tempPath);
+                return Fail($"Could not atomically replace '{found.SourcePath}': {ex.Message}");
             }
 
             // Tell Unity to re-import the asset so the editor picks
@@ -178,6 +248,18 @@ namespace RoslynRepl.Editor.Patches
         // ─── internals ─────────────────────────────────────────────
 
         private static WriteResult Fail(string msg) => new WriteResult { Success = false, Error = msg };
+
+        // Best-effort cleanup of orphaned temp files. Leaving a
+        // dot-prefixed temp around is cosmetic (Unity ignores it,
+        // git ignores hidden files in most defaults) but better to
+        // tidy up; failures here are swallowed because we're already
+        // returning a Fail result and a delete-failure on top of a
+        // write-failure isn't actionable.
+        private static void SafeDelete(string path)
+        {
+            try { if (File.Exists(path)) File.Delete(path); }
+            catch { /* best-effort */ }
+        }
 
         // Compare two body strings while normalizing line endings so
         // a snapshot taken on `\n`-only Unix output and a file read
