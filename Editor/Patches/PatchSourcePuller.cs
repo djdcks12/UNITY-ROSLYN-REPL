@@ -7,6 +7,7 @@ using System.Text;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using RoslynRepl.Editor.Core;
 using UnityEditor;
 
 namespace RoslynRepl.Editor.Patches
@@ -92,6 +93,389 @@ namespace RoslynRepl.Editor.Patches
                 (lastParseError != null ? "Last error: " + lastParseError : "Method may be auto-generated or in an assembly without source available."));
         }
 
+        // ─── Phase D file context ──────────────────────────────────
+        // Snapshot of the namespace + using directives the declaring
+        // type's `.cs` file was authored in. Phase D's compiler
+        // wrapper uses this so a pulled body — which routinely refers
+        // to same-namespace types or types covered by a file-level
+        // using — can compile without forcing the user to fully
+        // qualify every name post-pull. Best-effort: when the source
+        // can't be located (no MonoScript, IO failure, malformed
+        // syntax) the context returns just the runtime namespace.
+        //
+        // The two using buckets matter because C# scoping does:
+        //   - CompilationUnitUsings: declared at file top, before any
+        //     namespace block. Apply file-wide; safe to emit at the
+        //     wrapper's compilation unit too.
+        //   - NamespaceScopedUsings: declared inside a `namespace { …
+        //     }` block. Originally apply *only* inside that block.
+        //     Hoisting them to the wrapper's compilation unit would
+        //     change scoping (a relative `using SubNs;` resolves
+        //     differently outside its namespace) and can collide with
+        //     usings from sibling namespaces in the same file. We
+        //     emit these inside the wrapper's namespace block so the
+        //     original scoping is preserved.
+        //
+        // Only the namespace blocks that *enclose the target type*
+        // contribute. A `using` declared inside an unrelated namespace
+        // in the same file is intentionally dropped — that's exactly
+        // the duplicate-alias / wrong-resolution risk the PR review
+        // surfaced.
+        public class FileContext
+        {
+            public string Namespace;                            // declaring type's runtime namespace
+            public List<string> CompilationUnitUsings = new();  // file top-level usings
+            public List<string> NamespaceScopedUsings = new();  // usings from namespaces enclosing the target
+        }
+
+        public static FileContext GetDeclaringFileContext(MethodInfo targetMethod)
+        {
+            var declaringType = targetMethod?.DeclaringType;
+            var ctx = new FileContext { Namespace = declaringType?.Namespace };
+            if (declaringType == null) return ctx;
+
+            var paths = ResolveScriptPaths(declaringType);
+            if (paths.Count == 0) return ctx;
+
+            // Pick the *single* file that actually declares the method
+            // body. C# file-level usings + aliases are per-file, not
+            // per partial-class — `Player.Part1.cs` with
+            // `using Model = A.Model;` and `Player.Part2.cs` with
+            // `using Model = B.Model;` both compile independently,
+            // but merging both into one wrapper compilation fails
+            // with CS1537 (duplicate alias) before the user's body
+            // even gets a chance. So: locate the partial that
+            // contains the method, use that file's enclosing chain
+            // only.
+            //
+            // Falls back to the first candidate path's first matching
+            // type declaration when no syntactic method match is
+            // found — auto-generated partials, source missing, etc.
+            // Picking a single file (even a "wrong" one) is still
+            // strictly safer than merging every file's aliases.
+            string targetPath = null;
+            SyntaxNode targetRoot = null;
+            TypeDeclarationSyntax targetTypeDecl = null;
+
+            if (targetMethod != null)
+            {
+                var paramTypes = targetMethod.GetParameters().Select(p => p.ParameterType).ToArray();
+                foreach (var path in paths)
+                {
+                    if (TryFindMethodBearingDecl(path, declaringType, targetMethod.Name, paramTypes,
+                        out var foundRoot, out var foundDecl))
+                    {
+                        targetPath = path;
+                        targetRoot = foundRoot;
+                        targetTypeDecl = foundDecl;
+                        break;
+                    }
+                }
+            }
+
+            if (targetTypeDecl == null)
+            {
+                // Fallback: first path, first matching type
+                // declaration in it.
+                foreach (var path in paths)
+                {
+                    if (TryParseFile(path, out var root))
+                    {
+                        var decls = FindMatchingTypeDeclarations(root, declaringType);
+                        if (decls.Count > 0)
+                        {
+                            targetPath = path;
+                            targetRoot = root;
+                            targetTypeDecl = decls[0];
+                            break;
+                        }
+                    }
+                }
+                if (targetTypeDecl == null) return ctx;
+            }
+
+            var seenCu = new HashSet<string>(StringComparer.Ordinal);
+            var seenNs = new HashSet<string>(StringComparer.Ordinal);
+            CollectUsingsForTypeContext(targetTypeDecl, ctx, seenCu, seenNs);
+            return ctx;
+        }
+
+        // Probe a candidate path for the *exact* method declaration
+        // using SemanticModel-based parameter matching. Returns the
+        // parsed root + the specific TypeDeclarationSyntax that
+        // contains the method, so the caller can walk that exact
+        // ancestor chain for usings.
+        //
+        // Cross-file file-context selection is strict: simple-name
+        // matches like `Apply(Model)` against `Apply(Model)` are
+        // *intentionally* not enough, because partial files can
+        // legitimately have same-arity-and-simple-name parameters
+        // resolving to different CLR types via per-file aliases:
+        //
+        //     Part1.cs: using Model = A.Model; void Apply(Model);
+        //     Part2.cs: using Model = B.Model; void Apply(Model);
+        //
+        // The body-pull pipeline used to land on whichever file
+        // appeared first in MonoScript order; the new semantic
+        // matcher consults each file's own using/alias context and
+        // returns true only when the resolved CLR type matches the
+        // target's reflection Type[]. When semantics can't resolve
+        // (rare — broken source, generic type parameters), we
+        // return false rather than fall back to simple-name
+        // matching, because the caller iterates to the next file
+        // and the GetDeclaringFileContext fallback path handles the
+        // "no precise match anywhere" tail case.
+        private static bool TryFindMethodBearingDecl(
+            string path,
+            Type declaringType,
+            string methodName,
+            Type[] paramTypes,
+            out SyntaxNode root,
+            out TypeDeclarationSyntax typeDecl)
+        {
+            root = null;
+            typeDecl = null;
+            if (!TryParseFile(path, out root)) return false;
+
+            var typeDecls = FindMatchingTypeDeclarations(root, declaringType);
+            if (typeDecls.Count == 0) return false;
+
+            int arity = paramTypes.Length;
+            var model = BuildSingleFileSemanticModel(root);
+
+            foreach (var td in typeDecls)
+            {
+                foreach (var member in td.Members)
+                {
+                    if (!(member is MethodDeclarationSyntax m)) continue;
+                    if (m.Identifier.ValueText != methodName) continue;
+                    if (m.ParameterList.Parameters.Count != arity) continue;
+
+                    if (MatchesParamTypesSemantic(m, paramTypes, model))
+                    {
+                        typeDecl = td;
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        // ─── Parameter-type matching ─────────────────────────────
+        // Two matchers, used at different precision levels:
+        //
+        //   - Semantic: each candidate file gets its own single-file
+        //     Compilation + SemanticModel so a `ParameterSyntax` like
+        //     `Model m` resolves through that file's actual `using`
+        //     directives + namespace scoping. Returns the resolved
+        //     System.Type, which we compare for identity to the
+        //     reflection Type[]. This is the only way to disambiguate
+        //     across partial files where the same simple-name param
+        //     means different CLR types because of per-file aliases:
+        //         Part1.cs: using Model = A.Model; void Apply(Model);
+        //         Part2.cs: using Model = B.Model; void Apply(Model);
+        //
+        //   - Syntactic: name-only comparison (full name → simple name
+        //     → C# alias). Cheap, no Compilation cost, works when the
+        //     file has only one arity-matching candidate (no
+        //     ambiguity to break) or when SemanticModel build fails
+        //     (compile-broken source, missing reference).
+        //
+        // Cross-file selection uses semantic-only — a syntactic match
+        // there can leak the wrong file's using context into the
+        // wrapper. Per-file body extraction tries semantic first and
+        // falls back to syntactic only when SemanticModel can't
+        // resolve at all, so a single-overload file in a project
+        // without compile errors still pulls reliably.
+
+        private static bool MatchesParamTypesSyntactic(MethodDeclarationSyntax m, Type[] paramTypes)
+        {
+            for (int i = 0; i < paramTypes.Length; i++)
+            {
+                var syntaxType = m.ParameterList.Parameters[i].Type?.ToString();
+                if (string.IsNullOrEmpty(syntaxType)) return false;
+                var t = paramTypes[i];
+                if (t == null) return false;
+                if (syntaxType == t.FullName || syntaxType == t.Name) continue;
+                if (syntaxType == ShortAliasFor(t)) continue;
+                return false;
+            }
+            return true;
+        }
+
+        private static bool MatchesParamTypesSemantic(
+            MethodDeclarationSyntax m,
+            Type[] paramTypes,
+            SemanticModel model)
+        {
+            if (model == null) return false;
+            for (int i = 0; i < paramTypes.Length; i++)
+            {
+                var typeSyntax = m.ParameterList.Parameters[i].Type;
+                if (typeSyntax == null) return false;
+                var t = paramTypes[i];
+                if (t == null) return false;
+
+                // Either path can land us on the same ITypeSymbol;
+                // GetSymbolInfo returns the named type symbol when
+                // the name binds, GetTypeInfo additionally covers
+                // built-ins like `int` whose Symbol may be null.
+                var sym = model.GetSymbolInfo(typeSyntax).Symbol as ITypeSymbol
+                    ?? model.GetTypeInfo(typeSyntax).Type;
+                if (sym == null) return false;
+
+                var resolved = ResolveTypeFromITypeSymbol(sym);
+                if (resolved == null) return false;
+                if (resolved != t) return false;
+            }
+            return true;
+        }
+
+        // Build a single-file Compilation just to ask the SemanticModel
+        // a question. Cost is one CSharpCompilation.Create + one
+        // GetSemanticModel — handful of ms on a warm reference cache,
+        // amortized across all the matching probes inside one file.
+        // Returns null when the build itself fails (very rare; Roslyn
+        // tolerates malformed source as long as the syntax tree
+        // parsed at all).
+        private static SemanticModel BuildSingleFileSemanticModel(SyntaxNode root)
+        {
+            try
+            {
+                var tree = root.SyntaxTree;
+                var compilation = CSharpCompilation.Create(
+                    "RrPullerSemantic_" + Guid.NewGuid().ToString("N").Substring(0, 8),
+                    new[] { tree },
+                    AssemblyReferenceCache.GetReferences());
+                return compilation.GetSemanticModel(tree);
+            }
+            catch { return null; }
+        }
+
+        // ITypeSymbol → System.Type via fully-qualified display name.
+        // Roslyn renders nested types with `.`; reflection wants `+`.
+        // We try both forms after walking the AppDomain. CLR built-
+        // ins go through the SpecialType switch first because
+        // FullyQualifiedFormat uses C# keyword aliases (`string`,
+        // `int`, `object`) that `Type.GetType` won't load.
+        private static Type ResolveTypeFromITypeSymbol(ITypeSymbol sym)
+        {
+            if (sym == null) return null;
+
+            switch (sym.SpecialType)
+            {
+                case SpecialType.System_Object:   return typeof(object);
+                case SpecialType.System_String:   return typeof(string);
+                case SpecialType.System_Boolean:  return typeof(bool);
+                case SpecialType.System_Char:     return typeof(char);
+                case SpecialType.System_SByte:    return typeof(sbyte);
+                case SpecialType.System_Byte:     return typeof(byte);
+                case SpecialType.System_Int16:    return typeof(short);
+                case SpecialType.System_UInt16:   return typeof(ushort);
+                case SpecialType.System_Int32:    return typeof(int);
+                case SpecialType.System_UInt32:   return typeof(uint);
+                case SpecialType.System_Int64:    return typeof(long);
+                case SpecialType.System_UInt64:   return typeof(ulong);
+                case SpecialType.System_Single:   return typeof(float);
+                case SpecialType.System_Double:   return typeof(double);
+                case SpecialType.System_Decimal:  return typeof(decimal);
+                case SpecialType.System_Void:     return typeof(void);
+                case SpecialType.System_IntPtr:   return typeof(IntPtr);
+                case SpecialType.System_UIntPtr:  return typeof(UIntPtr);
+                case SpecialType.System_DateTime: return typeof(DateTime);
+            }
+
+            string fqn;
+            try { fqn = sym.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat).Replace("global::", ""); }
+            catch { return null; }
+
+            var direct = Type.GetType(fqn, throwOnError: false);
+            if (direct != null) return direct;
+
+            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                var found = asm.GetType(fqn, throwOnError: false)
+                    ?? asm.GetType(fqn.Replace('.', '+'), throwOnError: false);
+                if (found != null) return found;
+            }
+            return null;
+        }
+
+        private static bool TryParseFile(string path, out SyntaxNode root)
+        {
+            root = null;
+            string source;
+            try { source = File.ReadAllText(path); }
+            catch { return false; }
+
+            try
+            {
+                var tree = CSharpSyntaxTree.ParseText(source);
+                root = tree.GetRoot();
+                return true;
+            }
+            catch { return false; }
+        }
+
+        // Walks ancestors of the target type's declaration, collecting
+        // usings from every enclosing namespace block + the
+        // compilation unit. Stops at CU; nothing useful lives above
+        // it. NamespaceDeclarationSyntax exposes `.Usings` directly;
+        // the file-scoped variant (newer Roslyn) is reflected so the
+        // package still compiles against older Microsoft.CodeAnalysis
+        // builds that lack the type. Sibling-namespace usings — i.e.,
+        // a using inside a namespace block that doesn't enclose the
+        // target — are intentionally not visited.
+        private static void CollectUsingsForTypeContext(
+            TypeDeclarationSyntax target,
+            FileContext ctx,
+            HashSet<string> seenCu,
+            HashSet<string> seenNs)
+        {
+            for (var p = (SyntaxNode)target.Parent; p != null; p = p.Parent)
+            {
+                if (p is CompilationUnitSyntax cu)
+                {
+                    foreach (var u in cu.Usings)
+                    {
+                        var text = u.ToFullString().Trim();
+                        if (string.IsNullOrEmpty(text)) continue;
+                        if (seenCu.Add(text)) ctx.CompilationUnitUsings.Add(text);
+                    }
+                    break;
+                }
+                else if (p is NamespaceDeclarationSyntax nsDecl)
+                {
+                    foreach (var u in nsDecl.Usings)
+                    {
+                        var text = u.ToFullString().Trim();
+                        if (string.IsNullOrEmpty(text)) continue;
+                        if (seenNs.Add(text)) ctx.NamespaceScopedUsings.Add(text);
+                    }
+                }
+                else if (p.GetType().Name == "FileScopedNamespaceDeclarationSyntax")
+                {
+                    // Reflection access — see CollectUsings in
+                    // AncestorChainMatches for why we don't reference
+                    // the type by name.
+                    var usingsProp = p.GetType().GetProperty("Usings");
+                    if (usingsProp?.GetValue(p) is System.Collections.IEnumerable list)
+                    {
+                        foreach (var item in list)
+                        {
+                            if (item == null) continue;
+                            var text = item.ToString().Trim();
+                            if (string.IsNullOrEmpty(text)) continue;
+                            if (seenNs.Add(text)) ctx.NamespaceScopedUsings.Add(text);
+                        }
+                    }
+                }
+                // Otherwise (TypeDeclarationSyntax for an enclosing
+                // outer type, etc.) — keep walking up.
+            }
+        }
+
         // Step 1 — find every .cs whose first class declaration is the
         // requested type. AssetDatabase.FindAssets is editor-only so
         // this whole class lives in Editor/. Partial classes return
@@ -154,27 +538,47 @@ namespace RoslynRepl.Editor.Patches
             }
 
             if (candidates.Count == 0) return null;
-            if (candidates.Count == 1) return candidates[0];
 
-            // Multiple overloads with the same arity — try a deeper
-            // type-name match. Falls back to the first candidate if
-            // nothing matches more precisely (the user's spec only
-            // disambiguated this far anyway).
+            // Try semantic disambiguation first — even when there's
+            // only one arity-matching candidate in this file, we
+            // verify its parameter types resolve to what the caller
+            // requested. Two partial files can each have a single
+            // `void Apply(Model)` whose `Model` aliases to a
+            // different CLR type; without semantic verification this
+            // method would happily return the first file's body
+            // when the user's spec actually targeted the other.
+            // SemanticModel.GetSymbolInfo gives us the resolved type
+            // through the file's own using/alias context.
+            var model = BuildSingleFileSemanticModel(root);
+            if (model != null)
+            {
+                foreach (var c in candidates)
+                {
+                    if (MatchesParamTypesSemantic(c, paramTypes, model)) return c;
+                }
+
+                // SemanticModel built but resolved no candidate —
+                // either the file's overloads target different
+                // CLR types than the caller asked for (correct: try
+                // the next path), or semantics genuinely failed
+                // (e.g., file references a type from an unloaded
+                // assembly). Fall through to the syntactic path
+                // only when we have a *single* arity match — no
+                // ambiguity for syntactic to make worse — so we
+                // don't silently miss the body for the broken-
+                // semantic edge case.
+                if (candidates.Count == 1) return candidates[0];
+                return null;
+            }
+
+            // Semantic build failed entirely — fall back to syntactic
+            // matching. Single arity match is unambiguous; multiple
+            // arity matches go through the simple-name comparison and
+            // accept the first hit.
+            if (candidates.Count == 1) return candidates[0];
             foreach (var c in candidates)
             {
-                bool allMatch = true;
-                for (int i = 0; i < paramTypes.Length; i++)
-                {
-                    var syntaxType = c.ParameterList.Parameters[i].Type?.ToString();
-                    if (string.IsNullOrEmpty(syntaxType)) { allMatch = false; break; }
-                    var t = paramTypes[i];
-                    if (t == null) { allMatch = false; break; }
-                    if (syntaxType == t.FullName || syntaxType == t.Name) continue;
-                    // Common short-name aliases (System.Int32 ↔ int).
-                    if (syntaxType == ShortAliasFor(t)) continue;
-                    allMatch = false; break;
-                }
-                if (allMatch) return c;
+                if (MatchesParamTypesSyntactic(c, paramTypes)) return c;
             }
             return candidates[0];
         }
