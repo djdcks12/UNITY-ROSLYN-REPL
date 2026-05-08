@@ -372,29 +372,28 @@ namespace RoslynRepl.Editor.Patches
         {
             var sb = new StringBuilder();
 
-            // Standard usings the wrapper has always emitted, plus
-            // every using directive captured from the target type's
-            // source file. Dedupe by exact text so a wrapper for
-            // `MyGame.Player` that imports `using System;` doesn't
-            // double-emit the standard one and trigger CS0105.
-            var emittedUsings = new HashSet<string>(StringComparer.Ordinal);
-            void EmitUsing(string line)
+            // Compilation-unit usings: the standard wrapper imports
+            // plus the source file's top-level usings. Dedupe by
+            // exact text so `using System;` from both sources doesn't
+            // double-emit and trigger CS0105.
+            var cuEmitted = new HashSet<string>(StringComparer.Ordinal);
+            void EmitCuUsing(string line)
             {
-                if (emittedUsings.Add(line)) sb.AppendLine(line);
+                if (cuEmitted.Add(line)) sb.AppendLine(line);
             }
-            EmitUsing("using System;");
-            EmitUsing("using System.Collections.Generic;");
-            EmitUsing("using System.Linq;");
-            EmitUsing("using System.Reflection;");
-            EmitUsing("using UnityEngine;");
-            if (context?.UsingDirectives != null)
+            EmitCuUsing("using System;");
+            EmitCuUsing("using System.Collections.Generic;");
+            EmitCuUsing("using System.Linq;");
+            EmitCuUsing("using System.Reflection;");
+            EmitCuUsing("using UnityEngine;");
+            if (context?.CompilationUnitUsings != null)
             {
-                foreach (var u in context.UsingDirectives) EmitUsing(u);
+                foreach (var u in context.CompilationUnitUsings) EmitCuUsing(u);
             }
             sb.AppendLine();
 
-            // Wrap the wrapper class in the target type's namespace so
-            // pulled bodies that reference same-namespace types
+            // Wrap the wrapper class in the target type's namespace
+            // so pulled bodies that reference same-namespace types
             // resolve without explicit qualification. Top-level
             // (declaringType.Namespace == null) falls back to the
             // global namespace, same as the pre-Phase-D wrapper.
@@ -404,6 +403,23 @@ namespace RoslynRepl.Editor.Patches
             {
                 sb.AppendLine($"namespace {ns}");
                 sb.AppendLine("{");
+            }
+
+            // Namespace-scoped usings — these were originally declared
+            // inside a `namespace { … }` block in the source file.
+            // Emit them inside the wrapper's namespace block so their
+            // scoping (and any relative resolution against the
+            // enclosing namespace) is preserved instead of leaked to
+            // the compilation unit. Skip ones already emitted at CU
+            // level to avoid CS0105.
+            if (context?.NamespaceScopedUsings != null)
+            {
+                foreach (var u in context.NamespaceScopedUsings)
+                {
+                    if (cuEmitted.Contains(u)) continue;
+                    sb.AppendLine(hasNs ? "    " + u : u);
+                }
+                if (context.NamespaceScopedUsings.Count > 0) sb.AppendLine();
             }
 
             sb.AppendLine($"public static class {className}");

@@ -101,10 +101,30 @@ namespace RoslynRepl.Editor.Patches
         // qualify every name post-pull. Best-effort: when the source
         // can't be located (no MonoScript, IO failure, malformed
         // syntax) the context returns just the runtime namespace.
+        //
+        // The two using buckets matter because C# scoping does:
+        //   - CompilationUnitUsings: declared at file top, before any
+        //     namespace block. Apply file-wide; safe to emit at the
+        //     wrapper's compilation unit too.
+        //   - NamespaceScopedUsings: declared inside a `namespace { …
+        //     }` block. Originally apply *only* inside that block.
+        //     Hoisting them to the wrapper's compilation unit would
+        //     change scoping (a relative `using SubNs;` resolves
+        //     differently outside its namespace) and can collide with
+        //     usings from sibling namespaces in the same file. We
+        //     emit these inside the wrapper's namespace block so the
+        //     original scoping is preserved.
+        //
+        // Only the namespace blocks that *enclose the target type*
+        // contribute. A `using` declared inside an unrelated namespace
+        // in the same file is intentionally dropped — that's exactly
+        // the duplicate-alias / wrong-resolution risk the PR review
+        // surfaced.
         public class FileContext
         {
-            public string Namespace;            // declaring type's runtime namespace
-            public List<string> UsingDirectives = new(); // verbatim "using ...;" lines from source
+            public string Namespace;                            // declaring type's runtime namespace
+            public List<string> CompilationUnitUsings = new();  // file top-level usings
+            public List<string> NamespaceScopedUsings = new();  // usings from namespaces enclosing the target
         }
 
         public static FileContext GetDeclaringFileContext(Type declaringType)
@@ -115,14 +135,12 @@ namespace RoslynRepl.Editor.Patches
             var paths = ResolveScriptPaths(declaringType);
             if (paths.Count == 0) return ctx;
 
-            // Walk every candidate path (covers partial classes split
-            // across files), accumulate every using directive — both
-            // top-level and namespace-scoped. Dedupe by exact text so
-            // wrappers don't end up with duplicate-using compile
-            // errors. Order matters when source-file using order
-            // matters for resolution (rare but possible with aliases),
-            // so we preserve first-seen order.
-            var seen = new HashSet<string>(StringComparer.Ordinal);
+            // Dedupe by exact text within each bucket so partial
+            // classes spread across files don't double-emit. Order is
+            // first-seen so file-order resolution stays predictable.
+            var seenCu = new HashSet<string>(StringComparer.Ordinal);
+            var seenNs = new HashSet<string>(StringComparer.Ordinal);
+
             foreach (var path in paths)
             {
                 string source;
@@ -133,17 +151,81 @@ namespace RoslynRepl.Editor.Patches
                 {
                     var tree = CSharpSyntaxTree.ParseText(source);
                     var root = tree.GetRoot();
-                    foreach (var u in root.DescendantNodes().OfType<UsingDirectiveSyntax>())
-                    {
-                        var text = u.ToFullString().Trim();
-                        if (string.IsNullOrEmpty(text)) continue;
-                        if (seen.Add(text)) ctx.UsingDirectives.Add(text);
-                    }
+
+                    // Locate the syntactic declaration of the target
+                    // type (re-uses the name + ancestor + namespace
+                    // matching from the Pull pipeline). Without a
+                    // match we have no anchor for "enclosing
+                    // namespaces", so the file's usings can't be
+                    // attributed safely — skip rather than guess.
+                    var typeDecls = FindMatchingTypeDeclarations(root, declaringType);
+                    if (typeDecls.Count == 0) continue;
+
+                    foreach (var td in typeDecls)
+                        CollectUsingsForTypeContext(td, ctx, seenCu, seenNs);
                 }
                 catch { /* malformed source — ignore that one file */ }
             }
 
             return ctx;
+        }
+
+        // Walks ancestors of the target type's declaration, collecting
+        // usings from every enclosing namespace block + the
+        // compilation unit. Stops at CU; nothing useful lives above
+        // it. NamespaceDeclarationSyntax exposes `.Usings` directly;
+        // the file-scoped variant (newer Roslyn) is reflected so the
+        // package still compiles against older Microsoft.CodeAnalysis
+        // builds that lack the type. Sibling-namespace usings — i.e.,
+        // a using inside a namespace block that doesn't enclose the
+        // target — are intentionally not visited.
+        private static void CollectUsingsForTypeContext(
+            TypeDeclarationSyntax target,
+            FileContext ctx,
+            HashSet<string> seenCu,
+            HashSet<string> seenNs)
+        {
+            for (var p = (SyntaxNode)target.Parent; p != null; p = p.Parent)
+            {
+                if (p is CompilationUnitSyntax cu)
+                {
+                    foreach (var u in cu.Usings)
+                    {
+                        var text = u.ToFullString().Trim();
+                        if (string.IsNullOrEmpty(text)) continue;
+                        if (seenCu.Add(text)) ctx.CompilationUnitUsings.Add(text);
+                    }
+                    break;
+                }
+                else if (p is NamespaceDeclarationSyntax nsDecl)
+                {
+                    foreach (var u in nsDecl.Usings)
+                    {
+                        var text = u.ToFullString().Trim();
+                        if (string.IsNullOrEmpty(text)) continue;
+                        if (seenNs.Add(text)) ctx.NamespaceScopedUsings.Add(text);
+                    }
+                }
+                else if (p.GetType().Name == "FileScopedNamespaceDeclarationSyntax")
+                {
+                    // Reflection access — see CollectUsings in
+                    // AncestorChainMatches for why we don't reference
+                    // the type by name.
+                    var usingsProp = p.GetType().GetProperty("Usings");
+                    if (usingsProp?.GetValue(p) is System.Collections.IEnumerable list)
+                    {
+                        foreach (var item in list)
+                        {
+                            if (item == null) continue;
+                            var text = item.ToString().Trim();
+                            if (string.IsNullOrEmpty(text)) continue;
+                            if (seenNs.Add(text)) ctx.NamespaceScopedUsings.Add(text);
+                        }
+                    }
+                }
+                // Otherwise (TypeDeclarationSyntax for an enclosing
+                // outer type, etc.) — keep walking up.
+            }
         }
 
         // Step 1 — find every .cs whose first class declaration is the
