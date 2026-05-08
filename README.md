@@ -423,6 +423,22 @@ This tool executes editor code in your Unity project. Treat snippets and patches
 - they can trigger side effects through methods and property getters,
 - long blocking loops can freeze the Editor if they never return.
 
+### Cooperative Cancel Only
+
+Snippets run synchronously on the Unity Editor's main thread. The 5-second timeout and any external Cancel button only take effect when your snippet observes the cancellation token `ct` — for example:
+
+```csharp
+while (some_condition)
+{
+    ct.ThrowIfCancellationRequested();
+    DoWork();
+}
+```
+
+Code that does not check `ct` — including `while (true) {}`, infinite loops without a bound, or any blocking call that never returns — will freeze the Unity Editor and may require force-quitting the process. There is no hard-kill mechanism for non-cooperative code; both `Thread.Abort` and isolated worker domains are unavailable on Unity's runtime.
+
+The first time you Run a snippet on a workstation the REPL surfaces this caveat as a confirm dialog. After you acknowledge, a persistent yellow banner under the Code header keeps the reminder visible.
+
 Prefer small probes, use `ct` in long loops, and revert runtime patches when you are done testing.
 
 ## Dependency Notes
