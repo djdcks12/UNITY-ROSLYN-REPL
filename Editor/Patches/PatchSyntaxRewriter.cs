@@ -250,6 +250,8 @@ namespace RoslynRepl.Editor.Patches
 
         // ─── Read context ──────────────────────────────────────────
         // `hp` (unqualified) → __get<T>("hp")
+        // `cacheVersion` (unqualified, private static on declaringType)
+        //   → __getStatic<T>(typeof(decl), "cacheVersion")
         // `singleton.privateField` → __getOn<T>(singleton, "privateField")
         // `MyClass.PrivateStatic` → __getStatic<T>(typeof(MyClass), "PrivateStatic")
         // The T is inferred from declaringType's reflection metadata
@@ -268,16 +270,37 @@ namespace RoslynRepl.Editor.Patches
             // means a private member rather than a typo, since typos
             // would also show up as "name doesn't exist" with no
             // intent to rewrite anyway. If the name doesn't match a
-            // declaringType member we leave the diagnostic alone.
+            // declaringType member (instance OR static) we leave the
+            // diagnostic alone.
+            //
+            // Source pulled from an instance method legitimately
+            // references same-class private statics without a type
+            // qualifier (`cacheVersion++;`, `ResetCache();`). Roslyn
+            // reports those as CS0103 the same way it reports unbound
+            // instance members; the wrapper sees both the same way
+            // (no `this`, no enclosing type). So we try instance
+            // first — by far the more common case — and fall back to
+            // static on the declaringType when nothing instance-side
+            // matches.
             if (access is IdentifierNameSyntax id)
             {
                 var name = id.Identifier.ValueText;
-                var memberType = ResolveMemberType(declaringType, name, includeStatic: false);
-                if (memberType == null) return false;
+                var kind = ClassifySelfMember(declaringType, name, out var memberType);
+                if (kind == SelfMemberKind.NotFound) return false;
 
-                var helper = SyntaxFactory.ParseExpression($"__get<{TypeRef(memberType)}>(\"{name}\")");
-                replacements[access] = helper.WithTriviaFrom(access);
-                notes.Add($"{name} (read) → __get");
+                if (kind == SelfMemberKind.Instance)
+                {
+                    var helper = SyntaxFactory.ParseExpression($"__get<{TypeRef(memberType)}>(\"{name}\")");
+                    replacements[access] = helper.WithTriviaFrom(access);
+                    notes.Add($"{name} (read) → __get");
+                }
+                else // Static fallback on the declaring type.
+                {
+                    var helper = SyntaxFactory.ParseExpression(
+                        $"__getStatic<{TypeRef(memberType)}>(typeof({TypeRef(declaringType)}), \"{name}\")");
+                    replacements[access] = helper.WithTriviaFrom(access);
+                    notes.Add($"{name} (static read on self) → __getStatic");
+                }
                 return true;
             }
 
@@ -346,10 +369,22 @@ namespace RoslynRepl.Editor.Patches
             if (accessLhs is IdentifierNameSyntax id)
             {
                 var name = id.Identifier.ValueText;
-                if (ResolveMemberType(declaringType, name, includeStatic: false) == null) return false;
-                var call = SyntaxFactory.ParseExpression($"__set(\"{name}\", {rhsText})");
+                var kind = ClassifySelfMember(declaringType, name, out _);
+                if (kind == SelfMemberKind.NotFound) return false;
+
+                ExpressionSyntax call;
+                if (kind == SelfMemberKind.Instance)
+                {
+                    call = SyntaxFactory.ParseExpression($"__set(\"{name}\", {rhsText})");
+                    notes.Add($"{name} (write) → __set");
+                }
+                else
+                {
+                    call = SyntaxFactory.ParseExpression(
+                        $"__setStatic(typeof({TypeRef(declaringType)}), \"{name}\", {rhsText})");
+                    notes.Add($"{name} (static write on self) → __setStatic");
+                }
                 replacements[assignment] = call.WithTriviaFrom(assignment);
-                notes.Add($"{name} (write) → __set");
                 return true;
             }
 
@@ -406,13 +441,25 @@ namespace RoslynRepl.Editor.Patches
             if (accessLhs is IdentifierNameSyntax id)
             {
                 var name = id.Identifier.ValueText;
-                var t = ResolveMemberType(declaringType, name, includeStatic: false);
-                if (t == null) return false;
-                var typeArg = TypeRef(t);
-                var call = SyntaxFactory.ParseExpression(
-                    $"__set(\"{name}\", __get<{typeArg}>(\"{name}\") {binOp} ({rhsText}))");
+                var kind = ClassifySelfMember(declaringType, name, out var memberType);
+                if (kind == SelfMemberKind.NotFound) return false;
+                var typeArg = TypeRef(memberType);
+
+                ExpressionSyntax call;
+                if (kind == SelfMemberKind.Instance)
+                {
+                    call = SyntaxFactory.ParseExpression(
+                        $"__set(\"{name}\", __get<{typeArg}>(\"{name}\") {binOp} ({rhsText}))");
+                    notes.Add($"{name} ({assignment.OperatorToken.Text}) → __set/__get");
+                }
+                else
+                {
+                    var typeRef = TypeRef(declaringType);
+                    call = SyntaxFactory.ParseExpression(
+                        $"__setStatic(typeof({typeRef}), \"{name}\", __getStatic<{typeArg}>(typeof({typeRef}), \"{name}\") {binOp} ({rhsText}))");
+                    notes.Add($"{name} (static {assignment.OperatorToken.Text} on self) → __setStatic/__getStatic");
+                }
                 replacements[assignment] = call.WithTriviaFrom(assignment);
-                notes.Add($"{name} ({assignment.OperatorToken.Text}) → __set/__get");
                 return true;
             }
 
@@ -476,13 +523,25 @@ namespace RoslynRepl.Editor.Patches
             if (accessOperand is IdentifierNameSyntax id)
             {
                 var name = id.Identifier.ValueText;
-                var t = ResolveMemberType(declaringType, name, includeStatic: false);
-                if (t == null) return false;
-                var typeArg = TypeRef(t);
-                var call = SyntaxFactory.ParseExpression(
-                    $"__set(\"{name}\", __get<{typeArg}>(\"{name}\") {op} 1)");
+                var kind = ClassifySelfMember(declaringType, name, out var memberType);
+                if (kind == SelfMemberKind.NotFound) return false;
+                var typeArg = TypeRef(memberType);
+
+                ExpressionSyntax call;
+                if (kind == SelfMemberKind.Instance)
+                {
+                    call = SyntaxFactory.ParseExpression(
+                        $"__set(\"{name}\", __get<{typeArg}>(\"{name}\") {op} 1)");
+                    notes.Add($"{name} ({(op == "+" ? "++" : "--")}) → __set/__get");
+                }
+                else
+                {
+                    var typeRef = TypeRef(declaringType);
+                    call = SyntaxFactory.ParseExpression(
+                        $"__setStatic(typeof({typeRef}), \"{name}\", __getStatic<{typeArg}>(typeof({typeRef}), \"{name}\") {op} 1)");
+                    notes.Add($"{name} ({(op == "+" ? "++" : "--")} static on self) → __setStatic/__getStatic");
+                }
                 replacements[unaryNode] = call.WithTriviaFrom(unaryNode);
-                notes.Add($"{name} ({(op == "+" ? "++" : "--")}) → __set/__get");
                 return true;
             }
 
@@ -549,14 +608,35 @@ namespace RoslynRepl.Editor.Patches
             if (accessExpr is IdentifierNameSyntax id)
             {
                 var name = id.Identifier.ValueText;
+                // Try instance methods first, then static fall-back —
+                // mirrors the field/property logic in
+                // ClassifySelfMember. Source pulled from an instance
+                // method can call private static helpers without a
+                // type qualifier (`ResetCache();`); without this
+                // fall-back those bodies leak out as Unhandled CS0103.
                 var ret = FindMethodReturnType(declaringType, name, arity, includeStatic: false);
-                if (ret == null) return false;
-                var typeArg = TypeRef(ret);
-                var argsBlob = arity == 0 ? string.Empty : ", " + argsText;
-                var call = SyntaxFactory.ParseExpression($"__call<{typeArg}>(\"{name}\"{argsBlob})");
-                replacements[invocation] = call.WithTriviaFrom(invocation);
-                notes.Add($"{name}({arity} args) → __call");
-                return true;
+                if (ret != null)
+                {
+                    var typeArg = TypeRef(ret);
+                    var argsBlob = arity == 0 ? string.Empty : ", " + argsText;
+                    var call = SyntaxFactory.ParseExpression($"__call<{typeArg}>(\"{name}\"{argsBlob})");
+                    replacements[invocation] = call.WithTriviaFrom(invocation);
+                    notes.Add($"{name}({arity} args) → __call");
+                    return true;
+                }
+                ret = FindMethodReturnType(declaringType, name, arity, includeStatic: true, staticOnly: true);
+                if (ret != null)
+                {
+                    var typeArg = TypeRef(ret);
+                    var typeRef = TypeRef(declaringType);
+                    var argsBlob = arity == 0 ? string.Empty : ", " + argsText;
+                    var call = SyntaxFactory.ParseExpression(
+                        $"__callStatic<{typeArg}>(typeof({typeRef}), \"{name}\"{argsBlob})");
+                    replacements[invocation] = call.WithTriviaFrom(invocation);
+                    notes.Add($"{name}({arity} args, static on self) → __callStatic");
+                    return true;
+                }
+                return false;
             }
 
             if (accessExpr is MemberAccessExpressionSyntax ma)
@@ -644,6 +724,23 @@ namespace RoslynRepl.Editor.Patches
         }
 
         // ─── Helpers ──────────────────────────────────────────────
+
+        // Self-class member classification for unqualified identifiers.
+        // Source pulled out of an instance method legitimately
+        // references same-class private *static* members without a
+        // type qualifier (`cacheVersion`, `ResetCache()`), so the
+        // fall-back from instance to static must happen on the
+        // declaring type before we surrender the diagnostic.
+        private enum SelfMemberKind { NotFound, Instance, Static }
+
+        private static SelfMemberKind ClassifySelfMember(Type t, string name, out Type memberType)
+        {
+            memberType = ResolveMemberType(t, name, includeStatic: false);
+            if (memberType != null) return SelfMemberKind.Instance;
+            memberType = ResolveMemberType(t, name, includeStatic: true, instanceOnly: false, staticOnly: true);
+            if (memberType != null) return SelfMemberKind.Static;
+            return SelfMemberKind.NotFound;
+        }
 
         // Find a field/property on the type and return its CLR type, or
         // null when no such member exists. Walks base types via
