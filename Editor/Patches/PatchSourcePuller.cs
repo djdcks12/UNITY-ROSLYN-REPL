@@ -158,10 +158,10 @@ namespace RoslynRepl.Editor.Patches
 
             if (targetMethod != null)
             {
-                int paramArity = targetMethod.GetParameters().Length;
+                var paramTypes = targetMethod.GetParameters().Select(p => p.ParameterType).ToArray();
                 foreach (var path in paths)
                 {
-                    if (TryFindMethodBearingDecl(path, declaringType, targetMethod.Name, paramArity,
+                    if (TryFindMethodBearingDecl(path, declaringType, targetMethod.Name, paramTypes,
                         out var foundRoot, out var foundDecl))
                     {
                         targetPath = path;
@@ -199,16 +199,28 @@ namespace RoslynRepl.Editor.Patches
             return ctx;
         }
 
-        // Probe a candidate path for a method matching the target's
-        // name + parameter count *inside* the matching type
-        // declaration. Returns the parsed root + the specific
-        // TypeDeclarationSyntax that contains the method, so the
-        // caller can walk that exact ancestor chain for usings.
+        // Probe a candidate path for the *exact* method declaration —
+        // matching name + parameter count + parameter types — inside
+        // the type's matching syntactic declaration. Returns the
+        // parsed root + the specific TypeDeclarationSyntax that
+        // contains the method, so the caller can walk that exact
+        // ancestor chain for usings.
+        //
+        // Same matching depth as `FindMethodNode`'s overload-
+        // resolution path (shared via MatchesParamTypes). When
+        // multiple arity-matching candidates exist in the same file,
+        // we pick the one whose parameter types match exactly; only
+        // when no candidate matches by type do we fall back to the
+        // first arity match. That mirrors the body-pull semantics so
+        // a `void Apply(int)` and `void Apply(string)` overload pair
+        // — split across two partial files — gets routed to whichever
+        // file actually holds the requested overload, not just the
+        // first file with *any* `Apply(...)` signature.
         private static bool TryFindMethodBearingDecl(
             string path,
             Type declaringType,
             string methodName,
-            int paramArity,
+            Type[] paramTypes,
             out SyntaxNode root,
             out TypeDeclarationSyntax typeDecl)
         {
@@ -217,20 +229,58 @@ namespace RoslynRepl.Editor.Patches
             if (!TryParseFile(path, out root)) return false;
 
             var typeDecls = FindMatchingTypeDeclarations(root, declaringType);
+            TypeDeclarationSyntax fallback = null;
+            int arity = paramTypes.Length;
+
             foreach (var td in typeDecls)
             {
                 foreach (var member in td.Members)
                 {
-                    if (member is MethodDeclarationSyntax m
-                        && m.Identifier.ValueText == methodName
-                        && m.ParameterList.Parameters.Count == paramArity)
+                    if (!(member is MethodDeclarationSyntax m)) continue;
+                    if (m.Identifier.ValueText != methodName) continue;
+                    if (m.ParameterList.Parameters.Count != arity) continue;
+
+                    if (MatchesParamTypes(m, paramTypes))
                     {
                         typeDecl = td;
                         return true;
                     }
+                    if (fallback == null) fallback = td;
                 }
             }
+
+            if (fallback != null)
+            {
+                // No exact param-type match in this file; remember
+                // the arity-only match but only use it when *no*
+                // file gives an exact one. Caller iterates files in
+                // order, so returning false here lets the next file
+                // try; the GetDeclaringFileContext fallback path
+                // handles the "all files arity-only" case.
+                return false;
+            }
             return false;
+        }
+
+        // Compare a method's syntactic parameter type list to a
+        // System.Type[] from reflection. Returns true when every
+        // parameter's type name matches by full name, simple name,
+        // or short C# alias (System.Int32 ↔ int). Shared between
+        // body-pull and file-context paths so both round-trips agree
+        // on which overload is "the" target.
+        private static bool MatchesParamTypes(MethodDeclarationSyntax m, Type[] paramTypes)
+        {
+            for (int i = 0; i < paramTypes.Length; i++)
+            {
+                var syntaxType = m.ParameterList.Parameters[i].Type?.ToString();
+                if (string.IsNullOrEmpty(syntaxType)) return false;
+                var t = paramTypes[i];
+                if (t == null) return false;
+                if (syntaxType == t.FullName || syntaxType == t.Name) continue;
+                if (syntaxType == ShortAliasFor(t)) continue;
+                return false;
+            }
+            return true;
         }
 
         private static bool TryParseFile(string path, out SyntaxNode root)
@@ -372,24 +422,13 @@ namespace RoslynRepl.Editor.Patches
             if (candidates.Count == 1) return candidates[0];
 
             // Multiple overloads with the same arity — try a deeper
-            // type-name match. Falls back to the first candidate if
-            // nothing matches more precisely (the user's spec only
-            // disambiguated this far anyway).
+            // type-name match (shared with the file-context path).
+            // Falls back to the first candidate if nothing matches
+            // more precisely (the user's spec only disambiguated this
+            // far anyway).
             foreach (var c in candidates)
             {
-                bool allMatch = true;
-                for (int i = 0; i < paramTypes.Length; i++)
-                {
-                    var syntaxType = c.ParameterList.Parameters[i].Type?.ToString();
-                    if (string.IsNullOrEmpty(syntaxType)) { allMatch = false; break; }
-                    var t = paramTypes[i];
-                    if (t == null) { allMatch = false; break; }
-                    if (syntaxType == t.FullName || syntaxType == t.Name) continue;
-                    // Common short-name aliases (System.Int32 ↔ int).
-                    if (syntaxType == ShortAliasFor(t)) continue;
-                    allMatch = false; break;
-                }
-                if (allMatch) return c;
+                if (MatchesParamTypes(c, paramTypes)) return c;
             }
             return candidates[0];
         }
