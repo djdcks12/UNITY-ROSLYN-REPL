@@ -82,6 +82,43 @@ namespace RoslynRepl.Editor.Patches
             if (declaringType == null) throw new ArgumentNullException(nameof(declaringType));
 
             var result = new Result { Tree = tree };
+
+            // ─── Pre-pass: this → __instance ──────────────────────
+            // Pulled source from instance methods commonly uses
+            // explicit `this` (`this.hp`, `this.Die()`, `this.x +=`).
+            // The wrapper's Prefix is a static method, so `this`
+            // tokens fail with `CS0026 / CS8030`-class errors *before*
+            // they ever surface as the CS0103/CS0122 member-access
+            // diagnostics the rest of the rewriter handles, and there
+            // is no ThisExpressionSyntax path in NormalizeAccess
+            // either. Replacing every `this` with the typed
+            // `__instance` parameter (which PatchCodeGenerator
+            // already declares for the wrapper) hands those
+            // expressions to the existing `__instance.privateField`
+            // path — which then yields the normal CS0122 + __getOn /
+            // __setOn / __callOn flow.
+            //
+            // We do this unconditionally before consulting Roslyn's
+            // diagnostics, because the diagnostic for raw `this` is
+            // not in our handled set and would otherwise show up as
+            // Unhandled — masking the *real* member-access diagnostics
+            // that come after.
+            var preRoot = tree.GetRoot();
+            var thisNodes = preRoot.DescendantNodes().OfType<ThisExpressionSyntax>().ToArray();
+            if (thisNodes.Length > 0)
+            {
+                var preReplace = new Dictionary<SyntaxNode, SyntaxNode>(thisNodes.Length);
+                foreach (var t in thisNodes)
+                {
+                    preReplace[t] = SyntaxFactory.IdentifierName("__instance").WithTriviaFrom(t);
+                }
+                preRoot = preRoot.ReplaceNodes(preReplace.Keys, (orig, _) => preReplace[orig]);
+                tree = CSharpSyntaxTree.Create((CSharpSyntaxNode)preRoot, (CSharpParseOptions)tree.Options, tree.FilePath, tree.Encoding);
+                compilation = compilation.RemoveAllSyntaxTrees().AddSyntaxTrees(tree);
+                result.Tree = tree;
+                result.Notes.Add($"this → __instance ({thisNodes.Length} occurrence(s))");
+            }
+
             var model = compilation.GetSemanticModel(tree);
             var root = tree.GetRoot();
 
