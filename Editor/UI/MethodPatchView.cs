@@ -47,6 +47,7 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
         private Button _applyToFileBtn;
         private Label _statusLabel;
         private VisualElement _activeListContainer;
+        private Toggle _autoReapplyToggle;
 
         // Pull Original drops the source body into the editor, but
         // the user then edits it before Apply. To keep
@@ -70,11 +71,27 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
 
             PatchRegistry.Changed -= OnRegistryChanged;
             PatchRegistry.Changed += OnRegistryChanged;
+            // Subscribe so the Patches-tab toggle reflects external
+            // flips of the same setting — the Tools menu item, a
+            // programmatic setter, or another window mutating the
+            // pref directly. SetValueWithoutNotify avoids re-firing
+            // our own RegisterValueChangedCallback.
+            PatchAutoReapply.SettingsChanged -= OnAutoReapplySettingsChanged;
+            PatchAutoReapply.SettingsChanged += OnAutoReapplySettingsChanged;
         }
 
         public void Dispose()
         {
             PatchRegistry.Changed -= OnRegistryChanged;
+            PatchAutoReapply.SettingsChanged -= OnAutoReapplySettingsChanged;
+        }
+
+        private void OnAutoReapplySettingsChanged()
+        {
+            if (_autoReapplyToggle == null) return;
+            var current = PatchAutoReapply.AutoReapplyEnabled;
+            if (_autoReapplyToggle.value != current)
+                _autoReapplyToggle.SetValueWithoutNotify(current);
         }
 
         private void OnRegistryChanged()
@@ -297,6 +314,31 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             _targetField.RegisterValueChangedCallback(_ => RefreshDiff());
             _methodField.RegisterValueChangedCallback(_ => RefreshDiff());
             _paramsField.RegisterValueChangedCallback(_ => RefreshDiff());
+
+            // Auto-reapply toggle. Same setting as the Tools menu
+            // item, exposed inline here so users browsing the
+            // Patches tab can flip it without leaving the panel.
+            // The setter on PatchAutoReapply.AutoReapplyEnabled
+            // fires SettingsChanged, which our subscription mirrors
+            // back into the toggle (and the toolbar badge), so the
+            // two control surfaces stay in sync regardless of which
+            // one the user clicked.
+            _autoReapplyToggle = new Toggle("Auto-reapply patches on reload");
+            _autoReapplyToggle.value = PatchAutoReapply.AutoReapplyEnabled;
+            _autoReapplyToggle.tooltip =
+                "On (default): Active patches re-install themselves on every domain reload.\n" +
+                "Off: persisted patches still load but stay dormant — no detour is installed\n" +
+                "until you click Apply per row or flip this back on.";
+            _autoReapplyToggle.style.fontSize = 10;
+            _autoReapplyToggle.style.marginTop = 4;
+            _autoReapplyToggle.style.marginBottom = 2;
+            _autoReapplyToggle.style.flexShrink = 0;
+            _autoReapplyToggle.RegisterValueChangedCallback(evt =>
+            {
+                if (PatchAutoReapply.AutoReapplyEnabled != evt.newValue)
+                    PatchAutoReapply.AutoReapplyEnabled = evt.newValue;
+            });
+            _host.Add(_autoReapplyToggle);
 
             var listTitle = new Label("Active patches");
             listTitle.style.unityFontStyleAndWeight = FontStyle.Bold;

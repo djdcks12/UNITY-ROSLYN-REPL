@@ -176,28 +176,59 @@ namespace RoslynRepl.Editor.Patches
         }
 
         /// <summary>
-        /// Revert every active patch. Convenience for Reset Project Data
-        /// and for the popup's "Disable all" affordance.
+        /// Revert every patch the registry currently has armed —
+        /// "armed" meaning either a live Harmony detour (DisplayState
+        /// Active) or a persisted Active intent that's only dormant
+        /// because auto-reapply is off (DisplayState DormantAutoOff).
+        /// Both branches need to flip to Inactive so a "Revert All"
+        /// click honors the user's "disable everything" intent
+        /// regardless of the current toggle state. Iterating
+        /// <see cref="_applied"/> alone — the previous shape — left
+        /// the dormant branch persisted as Active and the patches
+        /// would re-arm on the next reload-with-auto-on. Used by
+        /// Reset Project Data and the Patches popup's "Revert all"
+        /// affordance. Reported in PR review for #22.
         /// </summary>
         public static int RevertAll()
         {
-            int n = _applied.Count;
-            // Snapshot keys before mutating the dictionary in Revert().
+            // Pass 1: every spec the registry treats as armed right
+            // now. Revert(spec) handles both cases (with-detour and
+            // without-detour) — for the dormant branch it just
+            // flips Status to Inactive and persists, since
+            // _applied has no entry to remove.
+            var armed = PatchRegistry.Specs
+                .Where(s => s != null)
+                .Where(s =>
+                {
+                    var ds = PatchRegistry.GetDisplayState(s);
+                    return ds == PatchDisplayState.Active
+                        || ds == PatchDisplayState.DormantAutoOff;
+                })
+                .ToList();
+            int reverted = 0;
+            foreach (var spec in armed)
+            {
+                Revert(spec);
+                reverted++;
+            }
+
+            // Pass 2: orphaned _applied entries — a detour installed
+            // but the spec was already removed from the registry.
+            // Pass 1 can't catch these because there's no spec to
+            // walk; flushing them here keeps Harmony's state
+            // consistent with what the registry says is armed.
+            // Pass 1's Revert calls already cleared the _applied
+            // entries that DO have specs, so this loop is normally
+            // a no-op.
             foreach (var key in _applied.Keys.ToList())
             {
-                var spec = PatchRegistry.Specs.FirstOrDefault(s => s.Key == key);
-                if (spec != null) Revert(spec);
-                else
-                {
-                    // Spec gone from registry but engine still holds the
-                    // detour — flush directly.
-                    var applied = _applied[key];
-                    try { HarmonyBridge.Unpatch(applied.Target, applied.PrefixReplacement); }
-                    catch { /* best-effort */ }
-                    _applied.Remove(key);
-                }
+                var applied = _applied[key];
+                try { HarmonyBridge.Unpatch(applied.Target, applied.PrefixReplacement); }
+                catch { /* best-effort */ }
+                _applied.Remove(key);
             }
-            return n;
+
+            return reverted;
         }
 
         /// <summary>
