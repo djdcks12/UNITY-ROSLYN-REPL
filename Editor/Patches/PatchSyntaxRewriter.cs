@@ -173,20 +173,34 @@ namespace RoslynRepl.Editor.Patches
                     var argsText = string.Join(", ", argsList.Select(a => a.ToFullString()));
                     var argsBlob = arity == 0 ? string.Empty : ", " + argsText;
 
-                    // Infer argument types from syntax — falls back to
-                    // null per argument when the SemanticModel can't
-                    // resolve (e.g., the arg is itself an unbound name
-                    // we'll rewrite later). Nulls are treated as
-                    // "accept anything" by FindBaseMethodByArgs, which
-                    // matches the runtime helper's null-arg policy.
                     var argTypes = InferArgTypes(preModel, inv.ArgumentList);
                     var baseM = FindBaseMethodByArgs(declaringType, name, argTypes);
                     string rArg = baseM != null && baseM.ReturnType != typeof(void)
                         ? TypeRef(baseM.ReturnType)
                         : "object";
 
+                    // When we resolved the exact base MethodInfo,
+                    // emit the paramTypes-aware overload so the
+                    // helper does strict matching (avoids reflection-
+                    // order ties for null args and primitive widening
+                    // cases like `base.Foo(1)` against `Foo(long)`).
+                    // Otherwise fall back to the legacy form where
+                    // the helper narrows by runtime arg types.
+                    string helperName;
+                    string callTail;
+                    if (baseM != null)
+                    {
+                        helperName = "__callBaseX";
+                        callTail = RenderExactCallArgs(baseM, argsList);
+                    }
+                    else
+                    {
+                        helperName = "__callBase";
+                        callTail = argsBlob;
+                    }
+
                     var helper = SyntaxFactory.ParseExpression(
-                        $"__callBase<{rArg}>(\"{name}\"{argsBlob})");
+                        $"{helperName}<{rArg}>(\"{name}\"{callTail})");
                     preReplace[inv] = helper.WithTriviaFrom(inv);
                 }
                 preRoot = preRoot.ReplaceNodes(preReplace.Keys, (orig, _) => preReplace[orig]);
@@ -838,8 +852,9 @@ namespace RoslynRepl.Editor.Patches
                     string call;
                     if (genericArity == 0)
                     {
-                        call = $"__call<{rArg}>(\"{memberName}\"{argsBlob})";
-                        notes.Add($"{memberName}({arity} args) → __call");
+                        var callTail = RenderExactCallArgs(minfo, argsList);
+                        call = $"__callX<{rArg}>(\"{memberName}\"{callTail})";
+                        notes.Add($"{memberName}({arity} args) → __callX (exact)");
                     }
                     else
                     {
@@ -857,8 +872,9 @@ namespace RoslynRepl.Editor.Patches
                     string call;
                     if (genericArity == 0)
                     {
-                        call = $"__callStatic<{rArg}>(typeof({typeRef}), \"{memberName}\"{argsBlob})";
-                        notes.Add($"{memberName}({arity} args, static on self) → __callStatic");
+                        var callTail = RenderExactCallArgs(minfo, argsList);
+                        call = $"__callStaticX<{rArg}>(typeof({typeRef}), \"{memberName}\"{callTail})";
+                        notes.Add($"{memberName}({arity} args, static on self) → __callStaticX (exact)");
                     }
                     else
                     {
@@ -886,8 +902,9 @@ namespace RoslynRepl.Editor.Patches
                 string call;
                 if (genericArity == 0)
                 {
-                    call = $"__callStatic<{rArg}>(typeof({typeRef}), \"{memberName}\"{argsBlob})";
-                    notes.Add($"{nts.Name}.{memberName}({arity} args) → __callStatic");
+                    var callTail = RenderExactCallArgs(minfo, argsList);
+                    call = $"__callStaticX<{rArg}>(typeof({typeRef}), \"{memberName}\"{callTail})";
+                    notes.Add($"{nts.Name}.{memberName}({arity} args) → __callStaticX (exact)");
                 }
                 else
                 {
@@ -912,8 +929,17 @@ namespace RoslynRepl.Editor.Patches
             string extCall;
             if (genericArity == 0)
             {
-                extCall = $"__callOn<{extRArg}>({lhsText}, \"{memberName}\"{argsBlob})";
-                notes.Add($"{lhsText.Trim()}.{memberName}({arity} args) → __callOn");
+                if (extMinfo != null)
+                {
+                    var callTail = RenderExactCallArgs(extMinfo, argsList);
+                    extCall = $"__callOnX<{extRArg}>({lhsText}, \"{memberName}\"{callTail})";
+                    notes.Add($"{lhsText.Trim()}.{memberName}({arity} args) → __callOnX (exact)");
+                }
+                else
+                {
+                    extCall = $"__callOn<{extRArg}>({lhsText}, \"{memberName}\"{argsBlob})";
+                    notes.Add($"{lhsText.Trim()}.{memberName}({arity} args) → __callOn");
+                }
             }
             else
             {
@@ -981,6 +1007,52 @@ namespace RoslynRepl.Editor.Patches
                 return PickMostSpecific(candidates, argTypes);
             }
             return null;
+        }
+
+        // Render the paramTypes array + casted args array tail for
+        // a paramTypes-aware helper invocation. The cast on each arg
+        // forces the boxed object passed through `object[] args` to
+        // match the target parameter type — critical for two cases:
+        //   - null arguments: `null` carries no runtime type, so a
+        //     plain `(string key = null; Foo(key))` would otherwise
+        //     reach the helper as `null` in the args array and lose
+        //     the static type info needed to pick the right overload.
+        //     `(string)key` keeps the element typed-null-ref, but
+        //     the paramTypes array carries the static type hint to
+        //     the helper for strict matching.
+        //   - implicit numeric widening: `base.Foo(1)` against
+        //     `Foo(long)` boxes int → object → DynamicMethod's
+        //     Unbox_Any(long) crashes (boxed type mismatch). The
+        //     `(long)1` cast boxes the right type, so unbox succeeds.
+        //
+        // Returns a string that slots in after the helper's name
+        // argument, e.g. `, new System.Type[]{typeof(int)}, new
+        // object[]{(int)arg1}`. Empty-arity uses zero-length arrays
+        // so the helper signature stays consistent.
+        private static string RenderExactCallArgs(MethodInfo m, SeparatedSyntaxList<ArgumentSyntax> args)
+        {
+            var pars = m.GetParameters();
+            string paramTypesArr;
+            string argsArr;
+            if (pars.Length == 0)
+            {
+                paramTypesArr = "new System.Type[0]";
+                argsArr = "new object[0]";
+            }
+            else
+            {
+                paramTypesArr = "new System.Type[] { "
+                    + string.Join(", ", pars.Select(p => $"typeof({TypeRef(p.ParameterType)})"))
+                    + " }";
+                var castedArgs = new List<string>(pars.Length);
+                for (int i = 0; i < pars.Length; i++)
+                {
+                    var argText = args[i].ToFullString();
+                    castedArgs.Add($"({TypeRef(pars[i].ParameterType)})({argText})");
+                }
+                argsArr = "new object[] { " + string.Join(", ", castedArgs) + " }";
+            }
+            return $", {paramTypesArr}, {argsArr}";
         }
 
         // Specificity score for an overload candidate. Returns -1
@@ -1345,6 +1417,15 @@ namespace RoslynRepl.Editor.Patches
         private static Type ResolveTypeFromSymbol(ITypeSymbol sym)
         {
             if (sym == null) return null;
+
+            // Built-in types: FullyQualifiedFormat uses C# keyword
+            // aliases (`string`, `int`, `object`, ...) which
+            // `Type.GetType` doesn't recognize. SpecialType switch
+            // covers the entire set of CLR built-ins; fall through
+            // to the FQN walk for everything else.
+            var special = TryResolveSpecialType(sym);
+            if (special != null) return special;
+
             // Roslyn ITypeSymbol → System.Type. ToDisplayString gives
             // the namespace-qualified name including generic arity.
             // We don't carry across `+` for nested types because
@@ -1362,6 +1443,40 @@ namespace RoslynRepl.Editor.Patches
                 if (t != null) return t;
             }
             return null;
+        }
+
+        // Map Roslyn SpecialType → reflection Type. Covers the CLR
+        // built-ins whose FullyQualifiedFormat representation is the
+        // C# keyword alias (`string`, `int`, `object`, ...) that
+        // `Type.GetType` won't load. Generic type arguments are
+        // resolved per-element by the caller before reaching this,
+        // so `List<int>` doesn't need a special case here.
+        private static Type TryResolveSpecialType(ITypeSymbol sym)
+        {
+            if (sym == null) return null;
+            switch (sym.SpecialType)
+            {
+                case SpecialType.System_Object:   return typeof(object);
+                case SpecialType.System_String:   return typeof(string);
+                case SpecialType.System_Boolean:  return typeof(bool);
+                case SpecialType.System_Char:     return typeof(char);
+                case SpecialType.System_SByte:    return typeof(sbyte);
+                case SpecialType.System_Byte:     return typeof(byte);
+                case SpecialType.System_Int16:    return typeof(short);
+                case SpecialType.System_UInt16:   return typeof(ushort);
+                case SpecialType.System_Int32:    return typeof(int);
+                case SpecialType.System_UInt32:   return typeof(uint);
+                case SpecialType.System_Int64:    return typeof(long);
+                case SpecialType.System_UInt64:   return typeof(ulong);
+                case SpecialType.System_Single:   return typeof(float);
+                case SpecialType.System_Double:   return typeof(double);
+                case SpecialType.System_Decimal:  return typeof(decimal);
+                case SpecialType.System_Void:     return typeof(void);
+                case SpecialType.System_IntPtr:   return typeof(IntPtr);
+                case SpecialType.System_UIntPtr:  return typeof(UIntPtr);
+                case SpecialType.System_DateTime: return typeof(DateTime);
+                default:                          return null;
+            }
         }
 
         // Render a System.Type as the C# type expression we paste into

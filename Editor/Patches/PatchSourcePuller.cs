@@ -355,10 +355,37 @@ namespace RoslynRepl.Editor.Patches
 
         // ITypeSymbol → System.Type via fully-qualified display name.
         // Roslyn renders nested types with `.`; reflection wants `+`.
-        // We try both forms after walking the AppDomain.
+        // We try both forms after walking the AppDomain. CLR built-
+        // ins go through the SpecialType switch first because
+        // FullyQualifiedFormat uses C# keyword aliases (`string`,
+        // `int`, `object`) that `Type.GetType` won't load.
         private static Type ResolveTypeFromITypeSymbol(ITypeSymbol sym)
         {
             if (sym == null) return null;
+
+            switch (sym.SpecialType)
+            {
+                case SpecialType.System_Object:   return typeof(object);
+                case SpecialType.System_String:   return typeof(string);
+                case SpecialType.System_Boolean:  return typeof(bool);
+                case SpecialType.System_Char:     return typeof(char);
+                case SpecialType.System_SByte:    return typeof(sbyte);
+                case SpecialType.System_Byte:     return typeof(byte);
+                case SpecialType.System_Int16:    return typeof(short);
+                case SpecialType.System_UInt16:   return typeof(ushort);
+                case SpecialType.System_Int32:    return typeof(int);
+                case SpecialType.System_UInt32:   return typeof(uint);
+                case SpecialType.System_Int64:    return typeof(long);
+                case SpecialType.System_UInt64:   return typeof(ulong);
+                case SpecialType.System_Single:   return typeof(float);
+                case SpecialType.System_Double:   return typeof(double);
+                case SpecialType.System_Decimal:  return typeof(decimal);
+                case SpecialType.System_Void:     return typeof(void);
+                case SpecialType.System_IntPtr:   return typeof(IntPtr);
+                case SpecialType.System_UIntPtr:  return typeof(UIntPtr);
+                case SpecialType.System_DateTime: return typeof(DateTime);
+            }
+
             string fqn;
             try { fqn = sym.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat).Replace("global::", ""); }
             catch { return null; }

@@ -498,6 +498,47 @@ namespace RoslynRepl.Editor.Patches
             sb.AppendLine("    }");
             sb.AppendLine();
 
+            // Strict-match variant — when the rewriter already knows
+            // the exact base overload, skip runtime narrowing entirely
+            // and look up MethodInfo by name + paramTypes. Reuses the
+            // same delegate cache via __BuildBaseInvoker so repeated
+            // calls amortize the IL emit cost. Falls back to the
+            // narrowing path when paramTypes is null or no exact
+            // overload is found (defensive).
+            sb.AppendLine("    private static object __BaseInvokeFromDerivedExact(object instance, System.Type derivedDecl, string name, System.Type[] paramTypes, object[] args)");
+            sb.AppendLine("    {");
+            sb.AppendLine("        if (paramTypes == null) return __BaseInvokeFromDerived(instance, derivedDecl, name, args);");
+            sb.AppendLine("        args = args ?? new object[0];");
+            sb.AppendLine("        System.Reflection.MethodInfo m = null;");
+            sb.AppendLine("        var bf = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.DeclaredOnly;");
+            sb.AppendLine("        for (var bt = derivedDecl.BaseType; bt != null && m == null; bt = bt.BaseType)");
+            sb.AppendLine("        {");
+            sb.AppendLine("            foreach (var mm in bt.GetMethods(bf))");
+            sb.AppendLine("            {");
+            sb.AppendLine("                if (mm.Name != name) continue;");
+            sb.AppendLine("                var pars = mm.GetParameters();");
+            sb.AppendLine("                if (pars.Length != paramTypes.Length) continue;");
+            sb.AppendLine("                bool ok = true;");
+            sb.AppendLine("                for (int i = 0; i < pars.Length; i++)");
+            sb.AppendLine("                {");
+            sb.AppendLine("                    if (pars[i].ParameterType != paramTypes[i]) { ok = false; break; }");
+            sb.AppendLine("                }");
+            sb.AppendLine("                if (ok) { m = mm; break; }");
+            sb.AppendLine("            }");
+            sb.AppendLine("        }");
+            sb.AppendLine("        if (m == null) return __BaseInvokeFromDerived(instance, derivedDecl, name, args);");
+            sb.AppendLine();
+            sb.AppendLine("        System.Func<object, object[], object> del;");
+            sb.AppendLine("        lock (__BaseInvokerCache) { __BaseInvokerCache.TryGetValue(m, out del); }");
+            sb.AppendLine("        if (del == null)");
+            sb.AppendLine("        {");
+            sb.AppendLine("            del = __BuildBaseInvoker(m);");
+            sb.AppendLine("            lock (__BaseInvokerCache) { __BaseInvokerCache[m] = del; }");
+            sb.AppendLine("        }");
+            sb.AppendLine("        return del(instance, args);");
+            sb.AppendLine("    }");
+            sb.AppendLine();
+
             // Build a Func<object, object[], object> delegate that
             // invokes `m` *non-virtually* (IL `call`, not `callvirt`).
             // MethodInfo.Invoke + Delegate.CreateDelegate both go
@@ -722,6 +763,54 @@ namespace RoslynRepl.Editor.Patches
             sb.AppendLine("            return __r is T __cast ? __cast : default;");
             sb.AppendLine("        }");
 
+            // ─── Phase D paramTypes-aware variants ───────────────
+            // C# doesn't allow local-function overloading, so these
+            // are distinct names (`...X`) from the legacy
+            // `__call` / `__callOn` / `__callStatic` / `__callBase`.
+            // The rewriter emits these when it has compile-time
+            // knowledge of the target method's exact parameter types
+            // (the `argTypes`-aware FindMethodInfo / FindBaseMethod-
+            // ByArgs paths). They perform *strict* parameter-type
+            // matching against `paramTypes` instead of inferring
+            // from runtime arg types. Two reasons this matters:
+            //   1. null arg values lose their static type at runtime
+            //      (`null.GetType()` is impossible) — without
+            //      paramTypes, `Foo(string)` vs `Foo(object)` for a
+            //      null call would tie at score 0 and pick first-
+            //      found.
+            //   2. numeric widening conversions: `base.Foo(1)`
+            //      compiles to `Foo(long)`, but the boxed value
+            //      flowing through `object[] args` is a boxed int.
+            //      The rewriter pre-casts to the target paramType so
+            //      the boxed type matches what the DynamicMethod
+            //      invoker's Unbox_Any expects.
+            sb.AppendLine("        T __callX<T>(string name, System.Type[] paramTypes, object[] args)");
+            sb.AppendLine("        {");
+            sb.AppendLine($"            var __t = typeof({declType});");
+            sb.AppendLine("            var __r = __InvokeReflectiveExact(__t, __instance, name, paramTypes, args);");
+            sb.AppendLine("            return __r is T __cast ? __cast : default;");
+            sb.AppendLine("        }");
+
+            sb.AppendLine("        T __callOnX<T>(object target, string name, System.Type[] paramTypes, object[] args)");
+            sb.AppendLine("        {");
+            sb.AppendLine("            if (target == null) throw new System.ArgumentNullException(nameof(target));");
+            sb.AppendLine("            var __r = __InvokeReflectiveExact(target.GetType(), target, name, paramTypes, args);");
+            sb.AppendLine("            return __r is T __cast ? __cast : default;");
+            sb.AppendLine("        }");
+
+            sb.AppendLine("        T __callStaticX<T>(System.Type type, string name, System.Type[] paramTypes, object[] args)");
+            sb.AppendLine("        {");
+            sb.AppendLine("            if (type == null) throw new System.ArgumentNullException(nameof(type));");
+            sb.AppendLine("            var __r = __InvokeReflectiveExact(type, null, name, paramTypes, args);");
+            sb.AppendLine("            return __r is T __cast ? __cast : default;");
+            sb.AppendLine("        }");
+
+            sb.AppendLine("        T __callBaseX<T>(string name, System.Type[] paramTypes, object[] args)");
+            sb.AppendLine("        {");
+            sb.AppendLine($"            var __r = __BaseInvokeFromDerivedExact(__instance, typeof({declType}), name, paramTypes, args);");
+            sb.AppendLine("            return __r is T __cast ? __cast : default;");
+            sb.AppendLine("        }");
+
             // ─── Phase D explicit-generic method call helpers ──────
             // Same shape as __call / __callOn / __callStatic but pass
             // a typeArgs array along so the helper can call
@@ -816,6 +905,37 @@ namespace RoslynRepl.Editor.Patches
             sb.AppendLine("                __m = __best ?? __ms[0];");
             sb.AppendLine("            }");
             sb.AppendLine("            return __m.Invoke(instance, args);");
+            sb.AppendLine("        }");
+
+            // Strict paramTypes match — bypasses the specificity
+            // scoring path entirely. The rewriter uses this when it
+            // already knows the exact target overload at compile
+            // time, so we don't risk a runtime tie-break landing on
+            // a different method. Falls back to specificity scoring
+            // when paramTypes is null (or strict match couldn't
+            // find anything — defensive, shouldn't hit in practice).
+            sb.AppendLine("        object __InvokeReflectiveExact(System.Type type, object instance, string name, System.Type[] paramTypes, object[] args)");
+            sb.AppendLine("        {");
+            sb.AppendLine("            if (paramTypes == null) return __InvokeReflective(type, instance, name, args);");
+            sb.AppendLine("            args = args ?? new object[0];");
+            sb.AppendLine("            var __bf = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.DeclaredOnly;");
+            sb.AppendLine("            for (var __wt = type; __wt != null; __wt = __wt.BaseType)");
+            sb.AppendLine("            {");
+            sb.AppendLine("                foreach (var __mm in __wt.GetMethods(__bf))");
+            sb.AppendLine("                {");
+            sb.AppendLine("                    if (__mm.Name != name) continue;");
+            sb.AppendLine("                    if (__mm.IsGenericMethodDefinition) continue;");
+            sb.AppendLine("                    var __pars = __mm.GetParameters();");
+            sb.AppendLine("                    if (__pars.Length != paramTypes.Length) continue;");
+            sb.AppendLine("                    bool __ok = true;");
+            sb.AppendLine("                    for (int __i = 0; __i < __pars.Length; __i++)");
+            sb.AppendLine("                    {");
+            sb.AppendLine("                        if (__pars[__i].ParameterType != paramTypes[__i]) { __ok = false; break; }");
+            sb.AppendLine("                    }");
+            sb.AppendLine("                    if (__ok) return __mm.Invoke(instance, args);");
+            sb.AppendLine("                }");
+            sb.AppendLine("            }");
+            sb.AppendLine("            return __InvokeReflective(type, instance, name, args);");
             sb.AppendLine("        }");
 
             // Generic method invocation. Picks an arity- *and*
