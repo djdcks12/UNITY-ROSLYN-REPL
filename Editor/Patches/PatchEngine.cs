@@ -570,7 +570,34 @@ namespace RoslynRepl.Editor.Patches
             sb.AppendLine("                __ms.Add(__mm);");
             sb.AppendLine("            }");
             sb.AppendLine("            if (__ms.Count == 0) throw new System.InvalidOperationException(\"Method '\" + name + \"<\" + typeArgs.Length + \">(\" + args.Length + \" args)' not found on \" + type.Name);");
-            sb.AppendLine("            var __m = __ms[0];");
+            sb.AppendLine("            System.Reflection.MethodInfo __m;");
+            sb.AppendLine("            if (__ms.Count == 1) { __m = __ms[0]; }");
+            sb.AppendLine("            else");
+            sb.AppendLine("            {");
+            // Multiple overloads sharing name + arity + generic arity.
+            // Disambiguate by argument types — but for generic
+            // candidates the parameters become concrete only after
+            // MakeGenericMethod, so instantiate per-candidate first
+            // and then compare. `null` arguments match anything since
+            // we have no static type info; non-null arguments must be
+            // assignable to the candidate's parameter type.
+            sb.AppendLine("                var __argTypes = new System.Type[args.Length];");
+            sb.AppendLine("                for (int __i = 0; __i < args.Length; __i++) __argTypes[__i] = args[__i] == null ? typeof(object) : args[__i].GetType();");
+            sb.AppendLine("                System.Reflection.MethodInfo __best = null;");
+            sb.AppendLine("                foreach (var __c in __ms)");
+            sb.AppendLine("                {");
+            sb.AppendLine("                    var __inst = (typeArgs.Length > 0 && __c.IsGenericMethodDefinition) ? __c.MakeGenericMethod(typeArgs) : __c;");
+            sb.AppendLine("                    var __pars = __inst.GetParameters();");
+            sb.AppendLine("                    bool __ok = true;");
+            sb.AppendLine("                    for (int __i = 0; __i < __pars.Length; __i++)");
+            sb.AppendLine("                    {");
+            sb.AppendLine("                        if (args[__i] == null) continue;");
+            sb.AppendLine("                        if (!__pars[__i].ParameterType.IsAssignableFrom(__argTypes[__i])) { __ok = false; break; }");
+            sb.AppendLine("                    }");
+            sb.AppendLine("                    if (__ok) { __best = __c; break; }");
+            sb.AppendLine("                }");
+            sb.AppendLine("                __m = __best ?? __ms[0];");
+            sb.AppendLine("            }");
             sb.AppendLine("            if (typeArgs.Length > 0 && __m.IsGenericMethodDefinition) __m = __m.MakeGenericMethod(typeArgs);");
             sb.AppendLine("            return __m.Invoke(instance, args);");
             sb.AppendLine("        }");

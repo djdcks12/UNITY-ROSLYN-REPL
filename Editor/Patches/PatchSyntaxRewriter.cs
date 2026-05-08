@@ -73,7 +73,16 @@ namespace RoslynRepl.Editor.Patches
         // - CS1061: "'X' does not contain a definition for 'foo' and
         //           no accessible extension method..." — instance
         //           variant of CS0117 for cross-assembly access.
-        private static readonly HashSet<string> _rewritableIds = new() { "CS0103", "CS0117", "CS0122", "CS1061" };
+        // - CS1929: "'X' does not contain a definition for 'foo' and
+        //           the best extension method overload ... requires
+        //           a receiver of type ..." — Roslyn picks an
+        //           extension method as the "closest" candidate and
+        //           bails because the receiver type doesn't match.
+        //           Same syntactic shape as CS1061; fires when an
+        //           accessible extension method shadows the
+        //           inaccessible target. The rewriter handles it the
+        //           same way (helper redirect).
+        private static readonly HashSet<string> _rewritableIds = new() { "CS0103", "CS0117", "CS0122", "CS1061", "CS1929" };
 
         public static Result Rewrite(SyntaxTree tree, Compilation compilation, Type declaringType)
         {
@@ -181,6 +190,30 @@ namespace RoslynRepl.Editor.Patches
         {
             var node = root.FindNode(diag.Location.SourceSpan, getInnermostNodeForTie: true);
             if (node == null) return false;
+
+            // Special case — CS1929. Roslyn places this diagnostic on
+            // the *receiver* of `expr.Method(args)` (e.g., on
+            // `Reg.Instance` rather than on `Get<Foo>`), because its
+            // narrative is "this receiver doesn't have such a method
+            // and the closest extension wants a different receiver
+            // type". The conceptual fix is to rewrite the
+            // *invocation*, not the receiver — letting Phase D's
+            // helper redirect the call before Roslyn snaps to an
+            // unrelated extension method. Without this redirection
+            // the receiver gets read-rewritten (e.g., `Reg.Instance`
+            // → `__getStatic<...>(...)`), which still leaves a CS1929
+            // on the `.Method` access against the helper's return
+            // value — and that's not a shape NormalizeAccess can
+            // handle, so the patch ends up Unhandled.
+            if (diag.Id == "CS1929")
+            {
+                var inv = node.AncestorsAndSelf().OfType<InvocationExpressionSyntax>().FirstOrDefault();
+                if (inv != null && inv.Expression is MemberAccessExpressionSyntax invMa)
+                {
+                    return TryStageInvocation(inv, invMa, model, declaringType, replacements, notes);
+                }
+                return false;
+            }
 
             // Special case — `nameof(member)`. Pulled bodies often
             // call `nameof(hp)` in logs/errors. The naive identifier
