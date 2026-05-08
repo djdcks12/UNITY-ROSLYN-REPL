@@ -435,22 +435,25 @@ return UnityEngine.Application.unityVersion;";
         private void UpdatePatchBadge()
         {
             if (_patchBadge == null) return;
+
+            // Two counts because the auto-off opt-out flow leaves
+            // spec.Status = Active on disk (so the reload-policy
+            // intent survives unrelated registry writes) and uses
+            // PatchRegistry.IsSessionDormant to flag the live
+            // process as opted-out. A spec that's both Active and
+            // dormant is shown as auto-off in the toolbar; only
+            // specs with no dormancy mark count as live.
             int activeCount = 0;
+            int dormantCount = 0;
             foreach (var spec in RoslynRepl.Editor.Patches.PatchRegistry.Specs)
             {
-                if (spec != null && spec.Status == RoslynRepl.Editor.Patches.PatchStatus.Active)
+                if (spec == null) continue;
+                if (spec.Status != RoslynRepl.Editor.Patches.PatchStatus.Active) continue;
+                if (RoslynRepl.Editor.Patches.PatchRegistry.IsSessionDormant(spec.Key))
+                    dormantCount++;
+                else
                     activeCount++;
             }
-
-            // Two zero-state branches: zero specs at all (hide
-            // entirely, the toolbar stays calm during normal use) vs
-            // auto-reapply disabled with stored Active drafts on disk
-            // (those got demoted to Inactive on the last reload).
-            // The disabled-state badge is a different color so a
-            // user spotting "🔧 0" doesn't think the registry is
-            // empty when it's actually full of dormant specs.
-            bool autoOff = !RoslynRepl.Editor.Patches.PatchAutoReapply.AutoReapplyEnabled;
-            int totalSpecs = RoslynRepl.Editor.Patches.PatchRegistry.Count;
 
             if (activeCount > 0)
             {
@@ -458,9 +461,9 @@ return UnityEngine.Application.unityVersion;";
                 _patchBadge.RemoveFromClassList("rr-patch-badge--auto-off");
                 _patchBadge.style.display = DisplayStyle.Flex;
             }
-            else if (autoOff && totalSpecs > 0)
+            else if (dormantCount > 0)
             {
-                _patchBadge.text = $"🔧 {totalSpecs} (auto-off)";
+                _patchBadge.text = $"🔧 {dormantCount} (auto-off)";
                 _patchBadge.AddToClassList("rr-patch-badge--auto-off");
                 _patchBadge.style.display = DisplayStyle.Flex;
             }

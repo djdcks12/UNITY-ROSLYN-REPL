@@ -834,26 +834,45 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
                 row.style.paddingTop = 3;
                 row.style.paddingBottom = 3;
 
+                // Dormancy shadow: spec.Status stays Active on disk
+                // (so the reload-policy intent survives), but the
+                // live process treats it as dormant for this
+                // session. Render the dot in the inactive color and
+                // append a "(auto-off)" suffix so a user scanning
+                // the list sees immediately that this row is not
+                // installed right now.
+                bool dormant = s.Status == PatchStatus.Active
+                            && PatchRegistry.IsSessionDormant(s.Key);
+
                 var dot = new VisualElement();
                 dot.style.width = 8;
                 dot.style.height = 8;
                 dot.style.marginRight = 6;
                 dot.style.borderTopLeftRadius = dot.style.borderTopRightRadius =
                 dot.style.borderBottomLeftRadius = dot.style.borderBottomRightRadius = 4;
-                dot.style.backgroundColor = new StyleColor(s.Status switch
-                {
-                    PatchStatus.Active   => new Color(0.5f, 0.8f, 0.5f),
-                    PatchStatus.Failed   => new Color(0.95f, 0.55f, 0.55f),
-                    _                    => new Color(0.55f, 0.55f, 0.55f),
-                });
+                dot.style.backgroundColor = new StyleColor(dormant
+                    ? new Color(0.55f, 0.55f, 0.55f)
+                    : s.Status switch
+                    {
+                        PatchStatus.Active   => new Color(0.5f, 0.8f, 0.5f),
+                        PatchStatus.Failed   => new Color(0.95f, 0.55f, 0.55f),
+                        _                    => new Color(0.55f, 0.55f, 0.55f),
+                    });
                 row.Add(dot);
 
-                var info = new Label($"{s.TargetTypeName}.{s.MethodName}({s.ParameterTypes})");
+                var infoText = dormant
+                    ? $"{s.TargetTypeName}.{s.MethodName}({s.ParameterTypes})  (auto-off)"
+                    : $"{s.TargetTypeName}.{s.MethodName}({s.ParameterTypes})";
+                var info = new Label(infoText);
                 info.style.flexGrow = 1;
-                info.style.color = new StyleColor(new Color(0.88f, 0.88f, 0.88f));
+                info.style.color = new StyleColor(dormant
+                    ? new Color(0.65f, 0.65f, 0.65f)
+                    : new Color(0.88f, 0.88f, 0.88f));
                 info.tooltip = s.Status == PatchStatus.Failed && !string.IsNullOrEmpty(s.LastError)
                     ? s.LastError
-                    : null;
+                    : (dormant
+                        ? "Auto-reapply is off — Apply this row to install now, or toggle the Tools menu setting back on for the next reload."
+                        : null);
                 row.Add(info);
 
                 var loadBtn = new Button(() => LoadIntoForm(s)) { text = "Load" };

@@ -17,14 +17,26 @@ namespace RoslynRepl.Editor.Patches
     /// <see cref="AutoReapplyEnabled"/> is true (the default, to
     /// preserve historical behavior). When the toggle is off, the
     /// specs still hydrate into the registry — the user's drafts
-    /// don't disappear — but they're shown as Inactive in the live
-    /// process *without* persisting that demotion. The persisted
-    /// desired status stays Active, so flipping the menu back on
-    /// makes the next reload re-install them automatically. The
-    /// user can also click Apply per row to re-install during the
-    /// current session. PR review for #22 caught the alternative
-    /// (persisting the demotion) collapsing the toggle into a
-    /// one-way bulk deactivation that lost the reapply intent.
+    /// don't disappear — but they're shadowed as dormant in the
+    /// live process *without* persisting that state. The persisted
+    /// <see cref="MethodPatchSpec.Status"/> stays Active, so
+    /// flipping the menu back on makes the next reload re-install
+    /// them automatically. The user can also click Apply per row to
+    /// re-install during the current session.
+    ///
+    /// Dormancy is tracked via
+    /// <see cref="PatchRegistry.MarkSessionDormant"/> on a separate
+    /// in-memory set keyed on <see cref="MethodPatchSpec.Key"/>.
+    /// The earlier shape mutated <c>spec.Status</c> in place — and
+    /// because the same instance lives in <c>_byKey</c>, the next
+    /// unrelated registry write (Apply on a *different* spec,
+    /// adding a draft, anything that runs Persist over
+    /// <c>_byKey.Values</c>) would have serialized the in-memory
+    /// Inactive into EditorPrefs and quietly lost the reapply
+    /// intent. The session-set design keeps spec.Status pinned to
+    /// the user's persisted desire and uses a separate live
+    /// dormancy view for the auto-off opt-out, so unrelated
+    /// session writes can't leak through.
     ///
     /// Lifecycle (auto-reapply on):
     ///  1. <see cref="EditorApplication.delayCall"/> defers the
@@ -122,51 +134,56 @@ namespace RoslynRepl.Editor.Patches
             if (activeSpecs.Count == 0) return;
 
             // Auto-reapply gate. The user has opted out, so we don't
-            // install Harmony detours for any of these specs — but
-            // we deliberately do NOT persist the demotion. Mutating
-            // spec.Status in place updates the live registry view
-            // (the Patches list and the toolbar badge both refresh
-            // through PatchRegistry.Changed) while leaving the
-            // persisted desired status as Active on disk. That
-            // matters because the menu has to behave like a reload
-            // policy, not a one-way bulk deactivation:
+            // install Harmony detours for any of these specs — and
+            // crucially we never touch spec.Status, because the same
+            // instance lives in PatchRegistry's _byKey and any later
+            // session write (Apply on another spec, adding a draft,
+            // Remove, Clear) calls Persist over _byKey.Values. If
+            // we'd mutated Status, that next Persist would silently
+            // serialize the in-memory Inactive into EditorPrefs and
+            // we'd lose the reapply intent — the exact bug PR
+            // review for #22 caught the previous round.
+            //
+            // Instead the dormancy is recorded on a separate set
+            // keyed on spec.Key, and PatchRegistry.AddOrUpdate /
+            // Remove / Clear drop the mark automatically when the
+            // user takes an explicit action on that spec. The disk
+            // continues to read Active throughout, so:
             //
             //   • toggle back on, next domain reload     → LoadFromPersistence
-            //                                              still surfaces these
-            //                                              specs as Active
+            //                                              still reads Active
             //                                              and the auto-on
             //                                              path re-installs.
-            //   • toggle stays off, click Apply per row  → MethodPatchView
-            //                                              routes through
-            //                                              PatchEngine.Apply,
-            //                                              which sets
-            //                                              spec.Status =
-            //                                              Active and persists
-            //                                              normally. The
-            //                                              user's explicit
-            //                                              action overrides
-            //                                              the in-memory
-            //                                              opt-out for that
-            //                                              row.
-            //   • toggle stays off, click Revert per row → spec.Status =
-            //                                              Inactive with
-            //                                              persistence. That
-            //                                              IS an explicit
+            //   • toggle stays off, click Apply per row  → AddOrUpdate
+            //                                              clears the dormancy
+            //                                              mark; Apply path
+            //                                              persists Active
+            //                                              normally.
+            //   • toggle stays off, click Revert per row → AddOrUpdate
+            //                                              clears the dormancy
+            //                                              mark; Revert path
+            //                                              persists Inactive.
+            //                                              That's an explicit
             //                                              user intent and we
             //                                              honor it.
+            //   • some other spec gets Apply / Revert /
+            //     a draft save / a Remove                → unrelated registry
+            //                                              writes; the
+            //                                              dormant specs keep
+            //                                              their Status =
+            //                                              Active in memory
+            //                                              (we never touched
+            //                                              it) so Persist
+            //                                              writes Active for
+            //                                              them too.
             if (!AutoReapplyEnabled)
             {
                 foreach (var spec in activeSpecs)
                 {
-                    spec.Status = PatchStatus.Inactive;
-                    spec.LastError = "Auto-reapply is off — toggle on for next reload, or click Apply to install now.";
+                    PatchRegistry.MarkSessionDormant(spec.Key);
                 }
-                // Notify-only: persistence layer is intentionally
-                // bypassed. The disk still says Active for these
-                // specs; only the live process treats them as
-                // Inactive for this session.
                 PatchRegistry.NotifyInMemoryMutation();
-                Debug.Log($"[Roslyn REPL] Runtime patches: auto-reapply is off — {activeSpecs.Count} active spec(s) hidden in this session (persisted Active intent preserved). Toggle '{AutoReapplyMenuPath}' on for next reload, or click Apply per row to install now.");
+                Debug.Log($"[Roslyn REPL] Runtime patches: auto-reapply is off — {activeSpecs.Count} active spec(s) shown as dormant in this session (persisted Active intent preserved). Toggle '{AutoReapplyMenuPath}' on for next reload, or click Apply per row to install now.");
                 return;
             }
 

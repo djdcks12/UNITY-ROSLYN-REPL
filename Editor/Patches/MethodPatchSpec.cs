@@ -72,9 +72,55 @@ namespace RoslynRepl.Editor.Patches
 
         private static readonly Dictionary<string, MethodPatchSpec> _byKey = new();
 
+        // Session-only dormancy bookkeeping (issue #22 follow-up). The
+        // auto-reapply opt-out path needs a way to say "treat this
+        // spec as Inactive for the current process" without ever
+        // touching <see cref="MethodPatchSpec.Status"/> or
+        // persistence — because the same spec instance lives in
+        // _byKey and Persist serializes _byKey.Values, mutating
+        // Status would leak into the next save the *moment* any
+        // other operation in the session calls AddOrUpdate / Remove
+        // / Clear and triggers a Persist over every value. Storing
+        // the dormancy state in a separate set keyed on
+        // <see cref="MethodPatchSpec.Key"/> guarantees the live
+        // process can shadow the persisted desired status without
+        // losing it.
+        private static readonly HashSet<string> _sessionDormantKeys = new();
+
         public static IReadOnlyCollection<MethodPatchSpec> Specs => _byKey.Values;
 
         public static int Count => _byKey.Count;
+
+        /// <summary>True when the spec with this key is shown as
+        /// dormant in the live process — auto-reapply opted out
+        /// for this session — even though its persisted Status is
+        /// still Active. UI surfaces consult this in addition to
+        /// <see cref="MethodPatchSpec.Status"/> so an opted-out
+        /// spec never shows up as live in the toolbar badge or the
+        /// Patches list.</summary>
+        public static bool IsSessionDormant(string key) =>
+            !string.IsNullOrEmpty(key) && _sessionDormantKeys.Contains(key);
+
+        /// <summary>Mark the spec with this key dormant for the
+        /// current process. Persistence is not touched. Caller is
+        /// expected to follow up with
+        /// <see cref="NotifyInMemoryMutation"/> so subscribers
+        /// re-render against the updated dormancy view.</summary>
+        public static void MarkSessionDormant(string key)
+        {
+            if (string.IsNullOrEmpty(key)) return;
+            _sessionDormantKeys.Add(key);
+        }
+
+        /// <summary>Drop every dormancy mark — used when the user
+        /// flips auto-reapply back on (so a follow-up reload sees
+        /// no dormancy carryover) and during Clear.</summary>
+        public static void ClearSessionDormancy()
+        {
+            if (_sessionDormantKeys.Count == 0) return;
+            _sessionDormantKeys.Clear();
+            Changed?.Invoke();
+        }
 
         public static MethodPatchSpec Find(string typeName, string methodName, string parameterTypes)
         {
@@ -89,6 +135,16 @@ namespace RoslynRepl.Editor.Patches
             if (string.IsNullOrEmpty(spec.MethodName))     throw new ArgumentException("MethodName is required",     nameof(spec));
             spec.ParameterTypes ??= string.Empty;
             _byKey[spec.Key] = spec;
+            // Any explicit registry write — Apply, Revert, save a
+            // draft from the form — is the user's intent for this
+            // spec, so the session-only dormancy mark gets cleared.
+            // Apply leaves the spec at Active and we want the
+            // toolbar badge / Patches list to recognize it
+            // immediately; Revert leaves the spec at Inactive
+            // (regardless of the dormancy state) and dropping the
+            // mark keeps the registry view consistent with the
+            // persisted desired status.
+            _sessionDormantKeys.Remove(spec.Key);
             Persist();
             Changed?.Invoke();
         }
@@ -116,6 +172,7 @@ namespace RoslynRepl.Editor.Patches
             var key = MethodPatchSpec.Keyed(typeName, methodName, parameterTypes);
             if (_byKey.Remove(key))
             {
+                _sessionDormantKeys.Remove(key);
                 Persist();
                 Changed?.Invoke();
                 return true;
@@ -146,6 +203,7 @@ namespace RoslynRepl.Editor.Patches
             if (!hadInMemory && !hadPersisted) return;
 
             _byKey.Clear();
+            _sessionDormantKeys.Clear();
             // Use the dedicated DeleteKey path instead of Persist()'s
             // SetString-with-empty-list. SetString("") leaves an empty
             // EditorPrefs key on disk, which contradicts the README's
