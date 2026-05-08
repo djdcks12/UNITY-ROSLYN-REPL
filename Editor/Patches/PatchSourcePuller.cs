@@ -42,6 +42,102 @@ namespace RoslynRepl.Editor.Patches
             public string Error;
         }
 
+        /// <summary>
+        /// Located method declaration shared across the Pull body
+        /// extractor and the source writer. Carries enough context
+        /// (path + raw source + parsed root + the specific
+        /// MethodDeclarationSyntax + its containing TypeDeclaration)
+        /// for callers to inspect or splice without re-doing the
+        /// disambiguation walk.
+        /// </summary>
+        public class FoundMethod
+        {
+            public string SourcePath;
+            public string Source;
+            public SyntaxNode Root;
+            public TypeDeclarationSyntax TypeDecl;
+            public MethodDeclarationSyntax Method;
+        }
+
+        /// <summary>
+        /// Semantic-aware method-declaration locator shared with
+        /// `PatchSourceWriter.ApplyToFile`. Walks every MonoScript
+        /// path the declaring type maps to (covers partial classes
+        /// split across files), parses each, builds a one-shot
+        /// SemanticModel for it, and matches the target by name +
+        /// arity + each parameter's resolved CLR type. This is the
+        /// same matching depth the body-extractor uses, so Pull and
+        /// Apply To File can never disagree on which overload is
+        /// "the" target — even with per-file `using Model = …`
+        /// aliases that map the same simple name to different types.
+        /// Returns null when no file produces an exact semantic
+        /// match.
+        /// </summary>
+        public static FoundMethod FindMethodForTarget(MethodInfo target)
+        {
+            if (target == null || target.DeclaringType == null) return null;
+            var paths = ResolveScriptPaths(target.DeclaringType);
+            if (paths.Count == 0) return null;
+
+            var paramTypes = target.GetParameters().Select(p => p.ParameterType).ToArray();
+
+            foreach (var path in paths)
+            {
+                string source;
+                try { source = File.ReadAllText(path); }
+                catch { continue; }
+
+                if (!TryParseFile(path, out var root)) continue;
+                var typeDecls = FindMatchingTypeDeclarations(root, target.DeclaringType);
+                if (typeDecls.Count == 0) continue;
+
+                var model = BuildSingleFileSemanticModel(root);
+
+                foreach (var td in typeDecls)
+                {
+                    foreach (var member in td.Members)
+                    {
+                        if (!(member is MethodDeclarationSyntax m)) continue;
+                        if (m.Identifier.ValueText != target.Name) continue;
+                        if (m.ParameterList.Parameters.Count != paramTypes.Length) continue;
+
+                        // Prefer semantic match (handles per-file
+                        // alias contexts). When the SemanticModel
+                        // can't resolve, fall back to syntactic so a
+                        // single-overload file with broken-Roslyn
+                        // semantics still routes correctly.
+                        bool match = MatchesParamTypesSemantic(m, paramTypes, model);
+                        if (!match && model == null)
+                            match = MatchesParamTypesSyntactic(m, paramTypes);
+                        if (!match) continue;
+
+                        return new FoundMethod
+                        {
+                            SourcePath = path,
+                            Source = source,
+                            Root = root,
+                            TypeDecl = td,
+                            Method = m,
+                        };
+                    }
+                }
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// Same `body between outer braces` extraction logic the
+        /// Pull pipeline applies — exposed for callers (e.g. the
+        /// source writer's conflict check) that already have a
+        /// MethodDeclarationSyntax in hand and need its current
+        /// body text without re-parsing.
+        /// </summary>
+        public static string ExtractMethodBody(string source, MethodDeclarationSyntax method)
+        {
+            if (method?.Body == null || string.IsNullOrEmpty(source)) return string.Empty;
+            return ExtractBodyInside(source, method.Body);
+        }
+
         public static PullResult TryPullMethodBody(MethodInfo method)
         {
             if (method == null)

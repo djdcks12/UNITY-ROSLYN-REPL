@@ -330,20 +330,31 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
         // Snapshot resolution priority:
         //   1. _lastPulledOriginal — populated by Pull Original /
         //      LoadIntoForm when the form's identity matches a
-        //      previously-captured body.
-        //   2. spec.OriginalBody from the registry, looked up by the
-        //      form's current identity. Covers the case where the
-        //      user reopened the window after the cached snapshot
-        //      was lost (domain reload) but a stored spec still
-        //      carries one.
+        //      previously-captured body. Verified against the
+        //      *current* form key before we trust it: the user can
+        //      Pull for A.Foo, edit Type/Method/Params to point at
+        //      B.Bar, and the cached body would still belong to
+        //      A.Foo. Without the key check we'd offer (and Apply
+        //      to file write!) a stale snapshot against the wrong
+        //      target.
+        //   2. spec.OriginalBody from the registry, looked up by
+        //      the form's current identity. Covers the case where
+        //      the user reopened the window after the cached
+        //      snapshot was lost (domain reload) but a stored spec
+        //      still carries one.
         //   3. null — no snapshot available, diff section disables.
         private string ResolveSnapshot()
         {
-            if (!string.IsNullOrEmpty(_lastPulledOriginal)) return _lastPulledOriginal;
             var typeName = _targetField?.value?.Trim();
             var methodName = _methodField?.value?.Trim();
             var paramsCsv = _paramsField?.value ?? string.Empty;
             if (string.IsNullOrEmpty(typeName) || string.IsNullOrEmpty(methodName)) return null;
+
+            var formKey = MethodPatchSpec.Keyed(typeName, methodName, paramsCsv);
+
+            if (!string.IsNullOrEmpty(_lastPulledOriginal) && _lastPulledKey == formKey)
+                return _lastPulledOriginal;
+
             var spec = PatchRegistry.Find(typeName, methodName, paramsCsv);
             return string.IsNullOrEmpty(spec?.OriginalBody) ? null : spec.OriginalBody;
         }
@@ -461,10 +472,23 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
                 "Cancel");
             if (!ok) return;
 
-            var result = PatchSourceWriter.ApplyToFile(target, body);
+            // Pass the current snapshot in so the writer can detect
+            // a conflict — the file might have been edited (by the
+            // user, an IDE, or source control) since Pull captured
+            // the snapshot. Splicing a stale body would silently
+            // overwrite the newer content. The writer aborts on
+            // mismatch and ConflictDetected gives the UI a hook to
+            // surface a "Pull again" hint instead of a generic
+            // failure.
+            var snapshot = ResolveSnapshot();
+            var result = PatchSourceWriter.ApplyToFile(target, body, snapshot);
             if (result.Success)
             {
                 SetStatus($"Wrote to {result.SourcePath} (backup: {result.BackupPath}).", error: false);
+            }
+            else if (result.ConflictDetected)
+            {
+                SetStatus("Apply to file aborted: " + result.Error, error: true);
             }
             else
             {
