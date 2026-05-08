@@ -29,6 +29,17 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
         private TextField _methodField;
         private TextField _paramsField;
         private TextField _bodyField;
+
+        // Phase E: diff section. _diffLines is the scrollable
+        // colored line view, _diffSummary shows "+N -M" in the
+        // header, the two buttons act on the current vs.-snapshot
+        // pair. Disabled when no source snapshot is available.
+        private VisualElement _diffContainer;
+        private VisualElement _diffLines;
+        private Label _diffSummary;
+        private ScrollView _diffScroll;
+        private Button _copyDiffBtn;
+        private Button _applyToFileBtn;
         private Label _statusLabel;
         private VisualElement _activeListContainer;
 
@@ -204,6 +215,81 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
 
             _host.Add(actionRow);
 
+            // ─── Diff section (Phase E) ──────────────────────────
+            // Shows the line diff between the source snapshot Pull
+            // Original captured (or spec.OriginalBody for a stored
+            // patch) and the current edited body. Buttons act on
+            // the snapshot/current pair: "Copy diff" pastes a
+            // unified-diff text blob to the clipboard; "Apply to
+            // file" splices the *user-edited* form back into the
+            // target method's source file (Phase D's auto-rewrite
+            // never touches spec.PatchBody, so the body is always
+            // clean source — natural `hp -= 10`, never the
+            // wrapper-only `__set("hp", __get<int>("hp") - 10)`).
+            //
+            // Disabled when no snapshot exists — typically a
+            // hand-typed patch that was never Pulled.
+            _diffContainer = new VisualElement();
+            _diffContainer.style.flexShrink = 0;
+            _diffContainer.style.marginTop = 4;
+            _diffContainer.style.marginBottom = 4;
+            _diffContainer.style.borderTopWidth = 1;
+            _diffContainer.style.borderTopColor = new StyleColor(new Color(0.3f, 0.3f, 0.3f));
+            _diffContainer.style.paddingTop = 4;
+
+            var diffHeaderRow = new VisualElement();
+            diffHeaderRow.style.flexDirection = FlexDirection.Row;
+            diffHeaderRow.style.alignItems = Align.Center;
+            diffHeaderRow.style.marginBottom = 2;
+            var diffTitle = new Label("Diff (original → current)");
+            diffTitle.style.unityFontStyleAndWeight = FontStyle.Bold;
+            diffTitle.style.fontSize = 10;
+            diffTitle.style.color = new StyleColor(new Color(0.7f, 0.7f, 0.7f));
+            diffTitle.style.flexGrow = 1;
+            diffHeaderRow.Add(diffTitle);
+            _diffSummary = new Label("(no snapshot)");
+            _diffSummary.style.fontSize = 10;
+            _diffSummary.style.color = new StyleColor(new Color(0.55f, 0.55f, 0.55f));
+            diffHeaderRow.Add(_diffSummary);
+            _diffContainer.Add(diffHeaderRow);
+
+            _diffScroll = new ScrollView(ScrollViewMode.VerticalAndHorizontal);
+            _diffScroll.style.maxHeight = 140;
+            _diffScroll.style.minHeight = 40;
+            _diffScroll.style.backgroundColor = new StyleColor(new Color(0.12f, 0.12f, 0.12f));
+            _diffLines = new VisualElement();
+            _diffScroll.Add(_diffLines);
+            _diffContainer.Add(_diffScroll);
+
+            var diffActions = new VisualElement();
+            diffActions.style.flexDirection = FlexDirection.Row;
+            diffActions.style.marginTop = 2;
+            _copyDiffBtn = new Button(OnCopyDiffClicked) { text = "Copy diff" };
+            _copyDiffBtn.style.fontSize = 10;
+            _copyDiffBtn.style.marginRight = 4;
+            _copyDiffBtn.tooltip = "Copy a unified-diff text blob to the system clipboard.";
+            diffActions.Add(_copyDiffBtn);
+            _applyToFileBtn = new Button(OnApplyToFileClicked) { text = "Apply to file" };
+            _applyToFileBtn.style.fontSize = 10;
+            _applyToFileBtn.tooltip =
+                "Write the current patch body back into the target method's .cs file.\n" +
+                "Backs up the original to <source>.bak before touching it.\n" +
+                "Phase D's auto-rewrite is wrapper-only, so the body written stays\n" +
+                "clean source (`hp -= 10`, not `__set/__get` calls).";
+            diffActions.Add(_applyToFileBtn);
+            _diffContainer.Add(diffActions);
+
+            _host.Add(_diffContainer);
+
+            // Refresh diff whenever any of (Type, Method, Params,
+            // body) changes — the snapshot is keyed off the form
+            // identity, so a swap should rebuild against the new
+            // spec's stored OriginalBody (or no snapshot, if none).
+            _bodyField.RegisterValueChangedCallback(_ => RefreshDiff());
+            _targetField.RegisterValueChangedCallback(_ => RefreshDiff());
+            _methodField.RegisterValueChangedCallback(_ => RefreshDiff());
+            _paramsField.RegisterValueChangedCallback(_ => RefreshDiff());
+
             var listTitle = new Label("Active patches");
             listTitle.style.unityFontStyleAndWeight = FontStyle.Bold;
             listTitle.style.color = new StyleColor(new Color(0.8f, 0.8f, 0.8f));
@@ -228,6 +314,153 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             _host.Add(listScroll);
 
             RebuildActiveList();
+            RefreshDiff();
+        }
+
+        // ─── Phase E: diff helpers ────────────────────────────────
+
+        // Snapshot resolution priority:
+        //   1. _lastPulledOriginal — populated by Pull Original /
+        //      LoadIntoForm when the form's identity matches a
+        //      previously-captured body.
+        //   2. spec.OriginalBody from the registry, looked up by the
+        //      form's current identity. Covers the case where the
+        //      user reopened the window after the cached snapshot
+        //      was lost (domain reload) but a stored spec still
+        //      carries one.
+        //   3. null — no snapshot available, diff section disables.
+        private string ResolveSnapshot()
+        {
+            if (!string.IsNullOrEmpty(_lastPulledOriginal)) return _lastPulledOriginal;
+            var typeName = _targetField?.value?.Trim();
+            var methodName = _methodField?.value?.Trim();
+            var paramsCsv = _paramsField?.value ?? string.Empty;
+            if (string.IsNullOrEmpty(typeName) || string.IsNullOrEmpty(methodName)) return null;
+            var spec = PatchRegistry.Find(typeName, methodName, paramsCsv);
+            return string.IsNullOrEmpty(spec?.OriginalBody) ? null : spec.OriginalBody;
+        }
+
+        private void RefreshDiff()
+        {
+            if (_diffLines == null || _diffSummary == null) return;
+            _diffLines.Clear();
+
+            var original = ResolveSnapshot();
+            var current = _bodyField?.value ?? string.Empty;
+            if (string.IsNullOrEmpty(original))
+            {
+                _diffSummary.text = "(no snapshot — Pull Original to enable)";
+                _diffSummary.style.color = new StyleColor(new Color(0.55f, 0.55f, 0.55f));
+                _copyDiffBtn?.SetEnabled(false);
+                _applyToFileBtn?.SetEnabled(false);
+                return;
+            }
+
+            var diff = PatchSourceDiff.Compute(original, current);
+            _diffSummary.text = $"+{diff.AddedCount} -{diff.RemovedCount}";
+            _diffSummary.style.color = diff.HasChanges
+                ? new StyleColor(new Color(0.85f, 0.85f, 0.55f))
+                : new StyleColor(new Color(0.55f, 0.55f, 0.55f));
+
+            foreach (var line in diff.Lines)
+            {
+                var lbl = new Label();
+                lbl.style.fontSize = 11;
+                lbl.style.whiteSpace = WhiteSpace.NoWrap;
+                lbl.style.paddingLeft = 4;
+                lbl.style.paddingRight = 4;
+                switch (line.Kind)
+                {
+                    case PatchSourceDiff.LineKind.Same:
+                        lbl.text = "  " + line.Text;
+                        lbl.style.color = new StyleColor(new Color(0.55f, 0.55f, 0.55f));
+                        break;
+                    case PatchSourceDiff.LineKind.Added:
+                        lbl.text = "+ " + line.Text;
+                        lbl.style.color = new StyleColor(new Color(0.4f, 0.85f, 0.45f));
+                        break;
+                    case PatchSourceDiff.LineKind.Removed:
+                        lbl.text = "- " + line.Text;
+                        lbl.style.color = new StyleColor(new Color(0.95f, 0.45f, 0.45f));
+                        break;
+                }
+                _diffLines.Add(lbl);
+            }
+
+            _copyDiffBtn?.SetEnabled(true);
+            // Apply To File can run regardless of HasChanges —
+            // sometimes the user wants to round-trip the unedited
+            // body back into the file (no-op write that still
+            // refreshes import). Keep enabled while a snapshot is
+            // present.
+            _applyToFileBtn?.SetEnabled(true);
+        }
+
+        private void OnCopyDiffClicked()
+        {
+            var original = ResolveSnapshot();
+            if (string.IsNullOrEmpty(original))
+            {
+                SetStatus("No source snapshot to diff against.", error: true);
+                return;
+            }
+            var current = _bodyField?.value ?? string.Empty;
+            var diff = PatchSourceDiff.Compute(original, current);
+            var label = $"{_targetField?.value}.{_methodField?.value}";
+            UnityEditor.EditorGUIUtility.systemCopyBuffer = PatchSourceDiff.FormatUnified(diff, label);
+            SetStatus($"Diff copied (+{diff.AddedCount} -{diff.RemovedCount}).", error: false);
+        }
+
+        private void OnApplyToFileClicked()
+        {
+            var typeName = _targetField?.value?.Trim();
+            var methodName = _methodField?.value?.Trim();
+            var paramsCsv = _paramsField?.value ?? string.Empty;
+            var body = _bodyField?.value ?? string.Empty;
+
+            if (string.IsNullOrEmpty(typeName) || string.IsNullOrEmpty(methodName))
+            {
+                SetStatus("Type and Method are required to apply to file.", error: true);
+                return;
+            }
+
+            // Reuse PatchEngine's resolver so the same scope rules
+            // (instance void only, etc.) apply that Apply Patch
+            // would enforce. If the target wouldn't even be
+            // patchable, writing it to source is also wrong.
+            var spec = new MethodPatchSpec
+            {
+                TargetTypeName = typeName,
+                MethodName = methodName,
+                ParameterTypes = paramsCsv,
+                PatchBody = body,
+            };
+            var target = PatchEngine.TryResolveTargetMethod(spec, out var resolveError);
+            if (target == null)
+            {
+                SetStatus("Apply to file failed: " + resolveError, error: true);
+                return;
+            }
+
+            var declName = target.DeclaringType?.FullName ?? target.DeclaringType?.Name ?? "<unknown>";
+            var ok = UnityEditor.EditorUtility.DisplayDialog(
+                "Apply patch to source file?",
+                $"Write the current patch body into\n\n  {declName}.{target.Name}\n\n" +
+                $"A backup will be saved to <source>.bak.\n\n" +
+                "The body is the user-edited form (Phase D's auto-rewrite is wrapper-only).",
+                "Apply",
+                "Cancel");
+            if (!ok) return;
+
+            var result = PatchSourceWriter.ApplyToFile(target, body);
+            if (result.Success)
+            {
+                SetStatus($"Wrote to {result.SourcePath} (backup: {result.BackupPath}).", error: false);
+            }
+            else
+            {
+                SetStatus("Apply to file failed: " + result.Error, error: true);
+            }
         }
 
         private void OnBrowseMethodsClicked()
@@ -342,6 +575,9 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             _lastPulledKey = MethodPatchSpec.Keyed(spec.TargetTypeName, spec.MethodName, spec.ParameterTypes);
             _lastPulledOriginal = pulled.Body;
             SetStatus($"Pulled from {pulled.SourcePath} ({pulled.Body?.Length ?? 0} chars).", error: false);
+            // SetValueWithoutNotify skips the registered changed
+            // callback that drives the diff; refresh manually.
+            RefreshDiff();
         }
 
         public void LoadIntoForm(MethodPatchSpec spec)
@@ -369,6 +605,7 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             }
 
             UpdateStatusForCurrentForm();
+            RefreshDiff();
         }
 
         private void OnApplyClicked()
