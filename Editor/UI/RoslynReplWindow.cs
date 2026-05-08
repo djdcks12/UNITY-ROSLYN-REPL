@@ -436,23 +436,23 @@ return UnityEngine.Application.unityVersion;";
         {
             if (_patchBadge == null) return;
 
-            // Two counts because the auto-off opt-out flow leaves
-            // spec.Status = Active on disk (so the reload-policy
-            // intent survives unrelated registry writes) and uses
-            // PatchRegistry.IsSessionDormant to flag the live
-            // process as opted-out. A spec that's both Active and
-            // dormant is shown as auto-off in the toolbar; only
-            // specs with no dormancy mark count as live.
+            // PatchRegistry.GetDisplayState owns the rule for what
+            // each spec is rendered as. We just count the two states
+            // the toolbar cares about. Active specs that aren't
+            // really installed (auto-off, manual registry mutation)
+            // come back as DormantAutoOff and contribute to the
+            // auto-off count, never the active count — so the badge
+            // can never claim "N active" for rows that don't have a
+            // live detour.
             int activeCount = 0;
             int dormantCount = 0;
             foreach (var spec in RoslynRepl.Editor.Patches.PatchRegistry.Specs)
             {
-                if (spec == null) continue;
-                if (spec.Status != RoslynRepl.Editor.Patches.PatchStatus.Active) continue;
-                if (RoslynRepl.Editor.Patches.PatchRegistry.IsSessionDormant(spec.Key))
-                    dormantCount++;
-                else
-                    activeCount++;
+                switch (RoslynRepl.Editor.Patches.PatchRegistry.GetDisplayState(spec))
+                {
+                    case RoslynRepl.Editor.Patches.PatchDisplayState.Active:         activeCount++; break;
+                    case RoslynRepl.Editor.Patches.PatchDisplayState.DormantAutoOff: dormantCount++; break;
+                }
             }
 
             if (activeCount > 0)

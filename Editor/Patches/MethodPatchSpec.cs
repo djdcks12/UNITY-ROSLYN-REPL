@@ -18,6 +18,36 @@ namespace RoslynRepl.Editor.Patches
     }
 
     /// <summary>
+    /// What the UI should render for a spec right now. Computed by
+    /// <see cref="PatchRegistry.GetDisplayState"/> from the persisted
+    /// <see cref="MethodPatchSpec.Status"/>, the live
+    /// <see cref="PatchEngine.IsApplied"/> map, and the
+    /// session-only dormancy set. Centralizing this decision in one
+    /// helper means UI surfaces — toolbar badge, active-list row,
+    /// form status line, Apply failure handling — never reach into
+    /// the raw fields and assemble their own variant of "is this
+    /// row really live right now". Reviewer-driven separation
+    /// (issue #22 rounds three / four PR review): UI must not
+    /// interpret <c>spec.Status == Active</c> directly because
+    /// auto-off-dormant specs keep that field at Active for
+    /// persistence reasons.
+    /// </summary>
+    public enum PatchDisplayState
+    {
+        /// <summary>Persisted draft, no detour expected.</summary>
+        Inactive,
+
+        /// <summary>Persisted Active and a Harmony detour really is installed right now.</summary>
+        Active,
+
+        /// <summary>Persisted Active intent kept on disk, but no detour is installed for the current session — auto-reapply is off, or the spec hasn't been Apply'd in this session yet. UI should render this distinct from Active so a user can tell "the row I see won't intercept calls right now".</summary>
+        DormantAutoOff,
+
+        /// <summary>Last Apply attempt failed; <see cref="MethodPatchSpec.LastError"/> carries the diagnostic.</summary>
+        Failed,
+    }
+
+    /// <summary>
     /// Identification + content of a single method patch.
     ///
     /// The triple (TargetTypeName, MethodName, ParameterTypes) uniquely
@@ -94,12 +124,49 @@ namespace RoslynRepl.Editor.Patches
         /// <summary>True when the spec with this key is shown as
         /// dormant in the live process — auto-reapply opted out
         /// for this session — even though its persisted Status is
-        /// still Active. UI surfaces consult this in addition to
-        /// <see cref="MethodPatchSpec.Status"/> so an opted-out
-        /// spec never shows up as live in the toolbar badge or the
-        /// Patches list.</summary>
+        /// still Active. Most UI code should prefer
+        /// <see cref="GetDisplayState"/>, which folds dormancy and
+        /// installed-detour state into a single enum so callers
+        /// don't have to compose the rules themselves.</summary>
         public static bool IsSessionDormant(string key) =>
             !string.IsNullOrEmpty(key) && _sessionDormantKeys.Contains(key);
+
+        /// <summary>
+        /// Single source of truth for what the UI should render for
+        /// this spec right now. Combines the persisted
+        /// <see cref="MethodPatchSpec.Status"/> with the live
+        /// <see cref="PatchEngine.IsApplied"/> map and the session
+        /// dormancy set so callers never re-derive the rules
+        /// (and never miss a case when the rules change).
+        ///
+        /// Mapping:
+        ///   • Status=Failed                                 → Failed
+        ///   • Status=Inactive                               → Inactive
+        ///   • Status=Active && IsSessionDormant             → DormantAutoOff
+        ///   • Status=Active && PatchEngine.IsApplied        → Active
+        ///   • Status=Active && !IsApplied && !dormant       → DormantAutoOff
+        ///         (the persisted intent is Active but no detour
+        ///          is installed — usually a transient state right
+        ///          before Apply runs, or a manual registry mutation
+        ///          from outside the engine. Treating it like the
+        ///          dormant case gives the user the same install
+        ///          affordance instead of falsely claiming the row
+        ///          is live.)
+        /// </summary>
+        public static PatchDisplayState GetDisplayState(MethodPatchSpec spec)
+        {
+            if (spec == null) return PatchDisplayState.Inactive;
+            switch (spec.Status)
+            {
+                case PatchStatus.Failed:   return PatchDisplayState.Failed;
+                case PatchStatus.Inactive: return PatchDisplayState.Inactive;
+                case PatchStatus.Active:
+                    if (IsSessionDormant(spec.Key))    return PatchDisplayState.DormantAutoOff;
+                    if (PatchEngine.IsApplied(spec))   return PatchDisplayState.Active;
+                    return PatchDisplayState.DormantAutoOff;
+                default:                   return PatchDisplayState.Inactive;
+            }
+        }
 
         /// <summary>Mark the spec with this key dormant for the
         /// current process. Persistence is not touched. Caller is
