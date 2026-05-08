@@ -443,32 +443,51 @@ namespace RoslynRepl.Editor.Patches
             // signatures, so `__get<int>("hp")` compiles cleanly. They
             // capture `__instance` through the enclosing scope so the
             // user never has to thread it through.
+            // Same-instance helpers walk the base chain from the
+            // *declaring type* (not the runtime type of __instance).
+            // Why: Reflection.BindingFlags.FlattenHierarchy doesn't
+            // include private inherited members — so a body that
+            // touches `_hp` declared in a base class would silently
+            // fail at runtime when the patched method runs on a
+            // derived instance. Walking from the declaring type with
+            // BindingFlags.DeclaredOnly + .BaseType iteration covers
+            // every inheritance level. Starting from declaringType
+            // (not the runtime type) also avoids accidental
+            // shadowing: a derived class with its own `_hp` won't
+            // hijack a body whose source intent was the base's `_hp`.
             sb.AppendLine("        T __get<T>(string name)");
             sb.AppendLine("        {");
-            sb.AppendLine($"            var __t = __instance != null ? __instance.GetType() : typeof({declType});");
-            sb.AppendLine("            var __bf = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.FlattenHierarchy;");
-            sb.AppendLine("            var __f = __t.GetField(name, __bf);");
-            sb.AppendLine("            if (__f != null) return (T)__f.GetValue(__instance);");
-            sb.AppendLine("            var __p = __t.GetProperty(name, __bf);");
-            sb.AppendLine("            if (__p != null) return (T)__p.GetValue(__instance);");
-            sb.AppendLine("            throw new System.InvalidOperationException(\"Member '\" + name + \"' not found on \" + __t.Name);");
+            sb.AppendLine($"            var __t = typeof({declType});");
+            sb.AppendLine("            var __bf = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.DeclaredOnly;");
+            sb.AppendLine("            while (__t != null)");
+            sb.AppendLine("            {");
+            sb.AppendLine("                var __f = __t.GetField(name, __bf);");
+            sb.AppendLine("                if (__f != null) return (T)__f.GetValue(__instance);");
+            sb.AppendLine("                var __p = __t.GetProperty(name, __bf);");
+            sb.AppendLine("                if (__p != null) return (T)__p.GetValue(__instance);");
+            sb.AppendLine("                __t = __t.BaseType;");
+            sb.AppendLine("            }");
+            sb.AppendLine($"            throw new System.InvalidOperationException(\"Member '\" + name + \"' not found on \" + typeof({declType}).Name + \" or any base\");");
             sb.AppendLine("        }");
 
             sb.AppendLine("        void __set(string name, object value)");
             sb.AppendLine("        {");
-            sb.AppendLine($"            var __t = __instance != null ? __instance.GetType() : typeof({declType});");
-            sb.AppendLine("            var __bf = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.FlattenHierarchy;");
-            sb.AppendLine("            var __f = __t.GetField(name, __bf);");
-            sb.AppendLine("            if (__f != null) { __f.SetValue(__instance, value); return; }");
-            sb.AppendLine("            var __p = __t.GetProperty(name, __bf);");
-            sb.AppendLine("            if (__p != null) { __p.SetValue(__instance, value); return; }");
-            sb.AppendLine("            throw new System.InvalidOperationException(\"Member '\" + name + \"' not found on \" + __t.Name);");
+            sb.AppendLine($"            var __t = typeof({declType});");
+            sb.AppendLine("            var __bf = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.DeclaredOnly;");
+            sb.AppendLine("            while (__t != null)");
+            sb.AppendLine("            {");
+            sb.AppendLine("                var __f = __t.GetField(name, __bf);");
+            sb.AppendLine("                if (__f != null) { __f.SetValue(__instance, value); return; }");
+            sb.AppendLine("                var __p = __t.GetProperty(name, __bf);");
+            sb.AppendLine("                if (__p != null) { __p.SetValue(__instance, value); return; }");
+            sb.AppendLine("                __t = __t.BaseType;");
+            sb.AppendLine("            }");
+            sb.AppendLine($"            throw new System.InvalidOperationException(\"Member '\" + name + \"' not found on \" + typeof({declType}).Name + \" or any base\");");
             sb.AppendLine("        }");
 
             sb.AppendLine("        T __call<T>(string name, params object[] args)");
             sb.AppendLine("        {");
-            sb.AppendLine($"            var __t = __instance != null ? __instance.GetType() : typeof({declType});");
-            sb.AppendLine("            var __r = __InvokeReflective(__t, __instance, name, args);");
+            sb.AppendLine($"            var __r = __InvokeReflective(typeof({declType}), __instance, name, args);");
             sb.AppendLine("            return __r is T __cast ? __cast : default;");
             sb.AppendLine("        }");
 
@@ -487,28 +506,42 @@ namespace RoslynRepl.Editor.Patches
             // their signatures so existing patches written against the
             // documented helpers still compile unchanged.
             sb.AppendLine();
+            // External-instance helpers walk the runtime type's chain.
+            // Different from the same-instance helpers because the
+            // user wrote `someObj.X` — they explicitly mean the
+            // runtime resolution path, not the patch's declaring
+            // type. We still walk DeclaredOnly + BaseType to catch
+            // private inherited members FlattenHierarchy ignores.
             sb.AppendLine("        T __getOn<T>(object target, string name)");
             sb.AppendLine("        {");
             sb.AppendLine("            if (target == null) throw new System.ArgumentNullException(nameof(target));");
+            sb.AppendLine("            var __bf = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.DeclaredOnly;");
             sb.AppendLine("            var __t = target.GetType();");
-            sb.AppendLine("            var __bf = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.FlattenHierarchy;");
-            sb.AppendLine("            var __f = __t.GetField(name, __bf);");
-            sb.AppendLine("            if (__f != null) return (T)__f.GetValue(target);");
-            sb.AppendLine("            var __p = __t.GetProperty(name, __bf);");
-            sb.AppendLine("            if (__p != null) return (T)__p.GetValue(target);");
-            sb.AppendLine("            throw new System.InvalidOperationException(\"Member '\" + name + \"' not found on \" + __t.Name);");
+            sb.AppendLine("            while (__t != null)");
+            sb.AppendLine("            {");
+            sb.AppendLine("                var __f = __t.GetField(name, __bf);");
+            sb.AppendLine("                if (__f != null) return (T)__f.GetValue(target);");
+            sb.AppendLine("                var __p = __t.GetProperty(name, __bf);");
+            sb.AppendLine("                if (__p != null) return (T)__p.GetValue(target);");
+            sb.AppendLine("                __t = __t.BaseType;");
+            sb.AppendLine("            }");
+            sb.AppendLine("            throw new System.InvalidOperationException(\"Member '\" + name + \"' not found on \" + target.GetType().Name + \" or any base\");");
             sb.AppendLine("        }");
 
             sb.AppendLine("        void __setOn(object target, string name, object value)");
             sb.AppendLine("        {");
             sb.AppendLine("            if (target == null) throw new System.ArgumentNullException(nameof(target));");
+            sb.AppendLine("            var __bf = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.DeclaredOnly;");
             sb.AppendLine("            var __t = target.GetType();");
-            sb.AppendLine("            var __bf = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.FlattenHierarchy;");
-            sb.AppendLine("            var __f = __t.GetField(name, __bf);");
-            sb.AppendLine("            if (__f != null) { __f.SetValue(target, value); return; }");
-            sb.AppendLine("            var __p = __t.GetProperty(name, __bf);");
-            sb.AppendLine("            if (__p != null) { __p.SetValue(target, value); return; }");
-            sb.AppendLine("            throw new System.InvalidOperationException(\"Member '\" + name + \"' not found on \" + __t.Name);");
+            sb.AppendLine("            while (__t != null)");
+            sb.AppendLine("            {");
+            sb.AppendLine("                var __f = __t.GetField(name, __bf);");
+            sb.AppendLine("                if (__f != null) { __f.SetValue(target, value); return; }");
+            sb.AppendLine("                var __p = __t.GetProperty(name, __bf);");
+            sb.AppendLine("                if (__p != null) { __p.SetValue(target, value); return; }");
+            sb.AppendLine("                __t = __t.BaseType;");
+            sb.AppendLine("            }");
+            sb.AppendLine("            throw new System.InvalidOperationException(\"Member '\" + name + \"' not found on \" + target.GetType().Name + \" or any base\");");
             sb.AppendLine("        }");
 
             sb.AppendLine("        T __callOn<T>(object target, string name, params object[] args)");
@@ -521,23 +554,33 @@ namespace RoslynRepl.Editor.Patches
             sb.AppendLine("        T __getStatic<T>(System.Type type, string name)");
             sb.AppendLine("        {");
             sb.AppendLine("            if (type == null) throw new System.ArgumentNullException(nameof(type));");
-            sb.AppendLine("            var __bf = System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.FlattenHierarchy;");
-            sb.AppendLine("            var __f = type.GetField(name, __bf);");
-            sb.AppendLine("            if (__f != null) return (T)__f.GetValue(null);");
-            sb.AppendLine("            var __p = type.GetProperty(name, __bf);");
-            sb.AppendLine("            if (__p != null) return (T)__p.GetValue(null);");
-            sb.AppendLine("            throw new System.InvalidOperationException(\"Static member '\" + name + \"' not found on \" + type.Name);");
+            sb.AppendLine("            var __bf = System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.DeclaredOnly;");
+            sb.AppendLine("            var __t = type;");
+            sb.AppendLine("            while (__t != null)");
+            sb.AppendLine("            {");
+            sb.AppendLine("                var __f = __t.GetField(name, __bf);");
+            sb.AppendLine("                if (__f != null) return (T)__f.GetValue(null);");
+            sb.AppendLine("                var __p = __t.GetProperty(name, __bf);");
+            sb.AppendLine("                if (__p != null) return (T)__p.GetValue(null);");
+            sb.AppendLine("                __t = __t.BaseType;");
+            sb.AppendLine("            }");
+            sb.AppendLine("            throw new System.InvalidOperationException(\"Static member '\" + name + \"' not found on \" + type.Name + \" or any base\");");
             sb.AppendLine("        }");
 
             sb.AppendLine("        void __setStatic(System.Type type, string name, object value)");
             sb.AppendLine("        {");
             sb.AppendLine("            if (type == null) throw new System.ArgumentNullException(nameof(type));");
-            sb.AppendLine("            var __bf = System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.FlattenHierarchy;");
-            sb.AppendLine("            var __f = type.GetField(name, __bf);");
-            sb.AppendLine("            if (__f != null) { __f.SetValue(null, value); return; }");
-            sb.AppendLine("            var __p = type.GetProperty(name, __bf);");
-            sb.AppendLine("            if (__p != null) { __p.SetValue(null, value); return; }");
-            sb.AppendLine("            throw new System.InvalidOperationException(\"Static member '\" + name + \"' not found on \" + type.Name);");
+            sb.AppendLine("            var __bf = System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.DeclaredOnly;");
+            sb.AppendLine("            var __t = type;");
+            sb.AppendLine("            while (__t != null)");
+            sb.AppendLine("            {");
+            sb.AppendLine("                var __f = __t.GetField(name, __bf);");
+            sb.AppendLine("                if (__f != null) { __f.SetValue(null, value); return; }");
+            sb.AppendLine("                var __p = __t.GetProperty(name, __bf);");
+            sb.AppendLine("                if (__p != null) { __p.SetValue(null, value); return; }");
+            sb.AppendLine("                __t = __t.BaseType;");
+            sb.AppendLine("            }");
+            sb.AppendLine("            throw new System.InvalidOperationException(\"Static member '\" + name + \"' not found on \" + type.Name + \" or any base\");");
             sb.AppendLine("        }");
 
             sb.AppendLine("        T __callStatic<T>(System.Type type, string name, params object[] args)");
@@ -584,16 +627,26 @@ namespace RoslynRepl.Editor.Patches
             // for value types, which matches the pattern Phase A used.
             sb.AppendLine("        object __InvokeReflective(System.Type type, object instance, string name, object[] args)");
             sb.AppendLine("        {");
-            sb.AppendLine("            var __bf = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.FlattenHierarchy;");
+            sb.AppendLine("            var __bf = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.DeclaredOnly;");
             sb.AppendLine("            args = args ?? new object[0];");
             sb.AppendLine("            var __ms = new System.Collections.Generic.List<System.Reflection.MethodInfo>();");
-            sb.AppendLine("            foreach (var __mm in type.GetMethods(__bf))");
+            // Walk the base chain so private inherited methods are
+            // found — FlattenHierarchy hides those, see field/property
+            // helpers above for the same trade-off. First-declared-
+            // wins shadowing matches C# semantics: a derived type that
+            // re-declares a method with `new` shadows the base.
+            sb.AppendLine("            var __wt = type;");
+            sb.AppendLine("            while (__wt != null)");
             sb.AppendLine("            {");
-            sb.AppendLine("                if (__mm.Name != name) continue;");
-            sb.AppendLine("                if (__mm.GetParameters().Length != args.Length) continue;");
-            sb.AppendLine("                __ms.Add(__mm);");
+            sb.AppendLine("                foreach (var __mm in __wt.GetMethods(__bf))");
+            sb.AppendLine("                {");
+            sb.AppendLine("                    if (__mm.Name != name) continue;");
+            sb.AppendLine("                    if (__mm.GetParameters().Length != args.Length) continue;");
+            sb.AppendLine("                    __ms.Add(__mm);");
+            sb.AppendLine("                }");
+            sb.AppendLine("                __wt = __wt.BaseType;");
             sb.AppendLine("            }");
-            sb.AppendLine("            if (__ms.Count == 0) throw new System.InvalidOperationException(\"Method '\" + name + \"(\" + args.Length + \" args)' not found on \" + type.Name);");
+            sb.AppendLine("            if (__ms.Count == 0) throw new System.InvalidOperationException(\"Method '\" + name + \"(\" + args.Length + \" args)' not found on \" + type.Name + \" or any base\");");
             sb.AppendLine("            System.Reflection.MethodInfo __m;");
             sb.AppendLine("            if (__ms.Count == 1) { __m = __ms[0]; }");
             sb.AppendLine("            else");
@@ -615,23 +668,31 @@ namespace RoslynRepl.Editor.Patches
             // MakeGenericMethod is good enough for the common case.
             sb.AppendLine("        object __InvokeReflectiveGeneric(System.Type type, object instance, string name, System.Type[] typeArgs, object[] args)");
             sb.AppendLine("        {");
-            sb.AppendLine("            var __bf = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.FlattenHierarchy;");
+            sb.AppendLine("            var __bf = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.DeclaredOnly;");
             sb.AppendLine("            args = args ?? new object[0];");
             sb.AppendLine("            typeArgs = typeArgs ?? new System.Type[0];");
             sb.AppendLine("            var __ms = new System.Collections.Generic.List<System.Reflection.MethodInfo>();");
-            sb.AppendLine("            foreach (var __mm in type.GetMethods(__bf))");
+            // Walk the base chain — DeclaredOnly + manual climb so
+            // private inherited generics are visible to user bodies
+            // touching `BaseClass.PrivateGeneric<T>(...)` style calls.
+            sb.AppendLine("            var __wt = type;");
+            sb.AppendLine("            while (__wt != null)");
             sb.AppendLine("            {");
-            sb.AppendLine("                if (__mm.Name != name) continue;");
-            sb.AppendLine("                if (__mm.GetParameters().Length != args.Length) continue;");
-            sb.AppendLine("                if (typeArgs.Length > 0)");
+            sb.AppendLine("                foreach (var __mm in __wt.GetMethods(__bf))");
             sb.AppendLine("                {");
-            sb.AppendLine("                    if (!__mm.IsGenericMethodDefinition) continue;");
-            sb.AppendLine("                    if (__mm.GetGenericArguments().Length != typeArgs.Length) continue;");
+            sb.AppendLine("                    if (__mm.Name != name) continue;");
+            sb.AppendLine("                    if (__mm.GetParameters().Length != args.Length) continue;");
+            sb.AppendLine("                    if (typeArgs.Length > 0)");
+            sb.AppendLine("                    {");
+            sb.AppendLine("                        if (!__mm.IsGenericMethodDefinition) continue;");
+            sb.AppendLine("                        if (__mm.GetGenericArguments().Length != typeArgs.Length) continue;");
+            sb.AppendLine("                    }");
+            sb.AppendLine("                    else if (__mm.IsGenericMethodDefinition) continue;");
+            sb.AppendLine("                    __ms.Add(__mm);");
             sb.AppendLine("                }");
-            sb.AppendLine("                else if (__mm.IsGenericMethodDefinition) continue;");
-            sb.AppendLine("                __ms.Add(__mm);");
+            sb.AppendLine("                __wt = __wt.BaseType;");
             sb.AppendLine("            }");
-            sb.AppendLine("            if (__ms.Count == 0) throw new System.InvalidOperationException(\"Method '\" + name + \"<\" + typeArgs.Length + \">(\" + args.Length + \" args)' not found on \" + type.Name);");
+            sb.AppendLine("            if (__ms.Count == 0) throw new System.InvalidOperationException(\"Method '\" + name + \"<\" + typeArgs.Length + \">(\" + args.Length + \" args)' not found on \" + type.Name + \" or any base\");");
             sb.AppendLine("            System.Reflection.MethodInfo __m;");
             sb.AppendLine("            if (__ms.Count == 1) { __m = __ms[0]; }");
             sb.AppendLine("            else");
