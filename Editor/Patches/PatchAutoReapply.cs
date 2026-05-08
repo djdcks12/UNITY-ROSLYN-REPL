@@ -20,9 +20,12 @@ namespace RoslynRepl.Editor.Patches
     /// don't disappear — but they're shadowed as dormant in the
     /// live process *without* persisting that state. The persisted
     /// <see cref="MethodPatchSpec.Status"/> stays Active, so
-    /// flipping the menu back on makes the next reload re-install
-    /// them automatically. The user can also click Apply per row to
-    /// re-install during the current session.
+    /// flipping the toggle back on installs every dormant spec
+    /// immediately (the setter calls
+    /// <see cref="PatchEngine.Apply"/> on each Active+dormant spec
+    /// and reports per-spec failures the same way the Bootstrap
+    /// auto-on path does). The user can also click Apply per row
+    /// to re-install one at a time without touching the toggle.
     ///
     /// Dormancy is tracked via
     /// <see cref="PatchRegistry.MarkSessionDormant"/> on a separate
@@ -200,6 +203,14 @@ namespace RoslynRepl.Editor.Patches
             // user takes an explicit action on that spec. The disk
             // continues to read Active throughout, so:
             //
+            //   • toggle back on, same session          → AutoReapplyEnabled's
+            //                                              setter detects the
+            //                                              OFF→ON edge and runs
+            //                                              ReapplyDormantSpecs,
+            //                                              which Apply's every
+            //                                              dormant spec right
+            //                                              away. No reload
+            //                                              required.
             //   • toggle back on, next domain reload     → LoadFromPersistence
             //                                              still reads Active
             //                                              and the auto-on
@@ -233,7 +244,7 @@ namespace RoslynRepl.Editor.Patches
                     PatchRegistry.MarkSessionDormant(spec.Key);
                 }
                 PatchRegistry.NotifyInMemoryMutation();
-                Debug.Log($"[Roslyn REPL] Runtime patches: auto-reapply is off — {activeSpecs.Count} active spec(s) shown as dormant in this session (persisted Active intent preserved). Toggle '{AutoReapplyMenuPath}' on for next reload, or click Apply per row to install now.");
+                Debug.Log($"[Roslyn REPL] Runtime patches: auto-reapply is off — {activeSpecs.Count} active spec(s) shown as dormant in this session (persisted Active intent preserved). Toggle '{AutoReapplyMenuPath}' (or the inline switch in the Patches view) back on to install every dormant row immediately, or click Apply per row.");
                 return;
             }
 

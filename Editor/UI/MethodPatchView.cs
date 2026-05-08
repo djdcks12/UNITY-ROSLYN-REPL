@@ -327,8 +327,9 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             _autoReapplyToggle.value = PatchAutoReapply.AutoReapplyEnabled;
             _autoReapplyToggle.tooltip =
                 "On (default): Active patches re-install themselves on every domain reload.\n" +
-                "Off: persisted patches still load but stay dormant — no detour is installed\n" +
-                "until you click Apply per row or flip this back on.";
+                "Off: persisted patches still load but stay dormant — no detour is installed.\n" +
+                "Flipping this back on installs every dormant patch immediately, no reload needed;\n" +
+                "or click Apply on individual rows to install just those.";
             _autoReapplyToggle.style.fontSize = 10;
             _autoReapplyToggle.style.marginTop = 4;
             _autoReapplyToggle.style.marginBottom = 2;
@@ -931,7 +932,7 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
                 info.tooltip = displayState == PatchDisplayState.Failed && !string.IsNullOrEmpty(s.LastError)
                     ? s.LastError
                     : (dormantAutoOff
-                        ? "Auto-reapply is off — Apply this row to install now, or toggle the Tools menu setting back on for the next reload."
+                        ? "Auto-reapply is off — Apply this row to install now, or turn 'Auto-reapply patches on reload' back on to install every dormant row immediately."
                         : null);
                 row.Add(info);
 

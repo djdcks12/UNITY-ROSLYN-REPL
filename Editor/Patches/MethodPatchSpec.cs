@@ -217,20 +217,21 @@ namespace RoslynRepl.Editor.Patches
         }
 
         /// <summary>
-        /// Raise <see cref="Changed"/> for callers that intentionally
-        /// mutated a live spec object in place without going through
-        /// <see cref="AddOrUpdate"/>. The use case is the auto-reapply
-        /// opt-out path, which needs to hide Active specs from the
-        /// current process (mark them Inactive in memory so the UI
-        /// shows them as off and the toolbar badge drops to zero)
-        /// while keeping the persisted desired status intact, so
-        /// flipping the menu back on re-installs the patches on the
-        /// next reload. <see cref="AddOrUpdate"/> can't do this — its
-        /// Persist call is exactly what we want to skip.
+        /// Raise <see cref="Changed"/> for callers that updated some
+        /// in-memory view of the registry without going through
+        /// <see cref="AddOrUpdate"/>. The driving use case is the
+        /// auto-reapply opt-out path: after Bootstrap calls
+        /// <see cref="MarkSessionDormant"/> on every Active spec,
+        /// the UI needs to redraw against the new dormancy view
+        /// even though no spec field changed. Persistence is left
+        /// untouched on purpose — the persisted Status stays Active
+        /// so the toggle remains a reload policy, not a one-way
+        /// deactivation, and the inline-toggle setter installs
+        /// every dormant spec immediately on its OFF→ON edge.
         ///
-        /// Callers must have mutated a spec that's already in
-        /// <see cref="Specs"/>; this method only fires the event.
-        /// Persistence is left untouched.
+        /// Callers must have mutated either the dormancy set or a
+        /// spec instance already in <see cref="Specs"/>; this
+        /// method only fires the event.
         /// </summary>
         public static void NotifyInMemoryMutation() => Changed?.Invoke();
 

@@ -286,7 +286,7 @@ Automatic reapply on reload can be turned off from:
 Tools / Roslyn REPL / Auto-reapply Patches on Reload
 ```
 
-When it is off, patches are still remembered, but they don't reinstall on reload. Open the Patches view and click Apply on the rows you want to re-enable.
+When it is off, patches are still remembered, but they don't reinstall on reload. Open the Patches view and click Apply on the rows you want to re-enable, or turn the setting back on to install every dormant patch right away.
 
 ## Basic Usage
 
