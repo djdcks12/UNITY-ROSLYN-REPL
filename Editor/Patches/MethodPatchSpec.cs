@@ -24,13 +24,13 @@ namespace RoslynRepl.Editor.Patches
     /// identifies a patchable method in the AppDomain. ParameterTypes is
     /// a comma-joined list of full type names — necessary for disambig-
     /// uation when the target has overloads, and stable enough across
-    /// editor sessions to be a safe persistence key for Phase B.
+    /// editor sessions to be a safe persistence key.
     ///
     /// PatchBody is the user-edited replacement body (everything between
     /// the method's outer braces). OriginalBody is the snapshot pulled
     /// from the .cs source at the time the patch was created — used by
-    /// Phase C diff/export and to render the editor's starting content.
-    /// MVP leaves OriginalBody empty until the source-pull pipeline
+    /// the diff view and source export and to render the editor's starting content.
+    /// Initial drafts leave OriginalBody empty until the source-pull pipeline
     /// lands; A3 treats an empty OriginalBody as "user is writing from
     /// scratch".
     /// </summary>
@@ -55,9 +55,9 @@ namespace RoslynRepl.Editor.Patches
 
     /// <summary>
     /// In-memory registry of every method patch the user has defined this
-    /// session. Phase A is intentionally *not* persistent — the user
+    /// session. the engine is intentionally *not* persistent — the user
     /// authoring a patch and the engine applying it are different
-    /// concerns from "survive a domain reload". Phase B will add
+    /// concerns from "survive a domain reload". the persistence layer adds
     /// EditorPrefs (or asset) persistence on top of this same API.
     ///
     /// Looked-up by (typeName, methodName, parameterTypes); duplicates
@@ -141,7 +141,7 @@ namespace RoslynRepl.Editor.Patches
 
         /// <summary>
         /// Pull the persisted spec list back into the live registry.
-        /// Intended for the [InitializeOnLoad] boot path — Phase B3
+        /// Intended for the [InitializeOnLoad] boot path — the bootstrap path
         /// calls this once per domain reload, then walks the loaded
         /// specs and re-applies the Active ones.
         ///

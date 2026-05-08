@@ -7,7 +7,7 @@ namespace RoslynRepl.Editor.Patches
 {
     /// <summary>
     /// Bootstraps the runtime patch list on every Editor session /
-    /// domain reload. Phase B2 made the registry persistent; this
+    /// domain reload. Persistence made the registry persistent; this
     /// class is the consumer side that pulls the persisted specs
     /// back in and re-installs the Harmony detours that were active
     /// the last time the user touched them.

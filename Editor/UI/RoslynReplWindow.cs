@@ -96,7 +96,7 @@ return UnityEngine.Application.unityVersion;";
             foreach (var w in openWindows)
                 if (w != null && w.HasInspectableOutput()) dirtyOutputs++;
 
-            // Phase A PR fix: runtime method patches are also "live state"
+            // the engine PR fix: runtime method patches are also "live state"
             // a security/cleanup reset has to wipe. The in-memory
             // PatchRegistry holds patch bodies (potentially containing
             // sensitive snippet text); Harmony has already redirected
@@ -105,7 +105,7 @@ return UnityEngine.Application.unityVersion;";
             // behavior. Pull both into the reset scope.
             int patchCount = RoslynRepl.Editor.Patches.PatchRegistry.Count;
 
-            // Phase B PR fix: an upgraded user can land here with the
+            // the persistence layer PR fix: an upgraded user can land here with the
             // in-memory registry empty *and* the persisted EditorPrefs
             // key still present (the previous package version wrote
             // SetString(key, "") on Reset, which deserializes back to
@@ -216,7 +216,7 @@ return UnityEngine.Application.unityVersion;";
             _modeLabel     = root.Q<Label>("mode-label");
             _outputSummary = root.Q<Label>("output-summary-label");
 
-            // Phase A4: Output / Patches mode tabs in the lower pane
+            // Note: Output / Patches mode tabs in the lower pane
             // header. Clicking either label flips the visible host
             // between the existing output ScrollView and the patch UI.
             _outputScrollHost = _outputScroll;
@@ -426,7 +426,7 @@ return UnityEngine.Application.unityVersion;";
         }
 
         // Double-click on a browser row routes through different paths
-        // depending on the lower pane's mode. Phase C UI: in Patches
+        // depending on the lower pane's mode. Pull UI: in Patches
         // mode the click means "I want to patch a method on this
         // type's class" — open the method picker instead of the usual
         // Output inspect. Output mode keeps the legacy

@@ -10,7 +10,7 @@ using Microsoft.CodeAnalysis.Text;
 namespace RoslynRepl.Editor.Patches
 {
     /// <summary>
-    /// Phase D — diagnostic-driven syntax rewriter that takes a wrapper
+    /// — diagnostic-driven syntax rewriter that takes a wrapper
     /// source produced by <see cref="PatchCodeGenerator"/>, asks Roslyn
     /// to compile it, and rewrites every "name doesn't exist" / "cannot
     /// access due to its protection level" / "no definition" location
@@ -18,7 +18,7 @@ namespace RoslynRepl.Editor.Patches
     /// amount;`, `Singleton.Instance.PrivateField`, `MyClass.Cooldown =
     /// 0;`) compiles by routing the inaccessible names through the
     /// __get / __set / __call / __getOn / __setOn / __callOn /
-    /// __getStatic / __setStatic / __callStatic helpers Phase D1
+    /// __getStatic / __setStatic / __callStatic helpers helper extension
     /// emits into the wrapper.
     ///
     /// The rewriter does NOT try to be a static analyzer: it only
@@ -27,7 +27,7 @@ namespace RoslynRepl.Editor.Patches
     /// expressions like `transform.position`, `Mathf.Min(...)`,
     /// `Vector3.zero` keep their fast direct-call codegen.
     ///
-    /// Phase D2 scope: instance fields + properties on the declaring
+    /// the rewriter2 scope: instance fields + properties on the declaring
     /// type (read context, simple `=` writes). Subsequent phases (D3+)
     /// extend this to method invocations, compound assignments,
     /// external instance access, and static access — all by adding
@@ -132,7 +132,7 @@ namespace RoslynRepl.Editor.Patches
             // Pulled override bodies routinely begin with
             // `base.OnEnable();`, `base.Init(...);`, etc. The wrapper's
             // Prefix is a static method, so `base` itself doesn't
-            // compile and falls outside the diagnostic IDs Phase D
+            // compile and falls outside the diagnostic IDs the rewriter
             // handles. Replacing `base.X(args)` with the helper call
             // routes the invocation through `__BaseInvokeFromDerived`,
             // which walks the declaring type's base chain and
@@ -260,7 +260,7 @@ namespace RoslynRepl.Editor.Patches
         // can rewrite, decides which helper to substitute, and stages
         // the replacement. Returns false when the diagnostic looks
         // rewritable on paper but the surrounding shape isn't one we
-        // handle yet (Phase D2: read context + simple `=` writes only;
+        // handle yet (Initial pass: read context + simple `=` writes only;
         // later phases extend the handled set).
         private static bool TryClassifyAndRewrite(
             Diagnostic diag,
@@ -279,7 +279,7 @@ namespace RoslynRepl.Editor.Patches
             // narrative is "this receiver doesn't have such a method
             // and the closest extension wants a different receiver
             // type". The conceptual fix is to rewrite the
-            // *invocation*, not the receiver — letting Phase D's
+            // *invocation*, not the receiver — letting the rewriter's
             // helper redirect the call before Roslyn snaps to an
             // unrelated extension method. Without this redirection
             // the receiver gets read-rewritten (e.g., `Reg.Instance`
@@ -403,7 +403,7 @@ namespace RoslynRepl.Editor.Patches
             // statement-context increments are by far the common case
             // and the result-value distinction (postfix returns the
             // pre-modify value) only matters in expression context.
-            // The Phase D scope doc lists this caveat.
+            // The scope notes lists this caveat.
             if (access.Parent is PrefixUnaryExpressionSyntax pre
                 && pre.Operand == access
                 && (pre.IsKind(SyntaxKind.PreIncrementExpression) || pre.IsKind(SyntaxKind.PreDecrementExpression)))
@@ -688,7 +688,7 @@ namespace RoslynRepl.Editor.Patches
         // exactly once. Statement-context increments are exact;
         // expression-context postfix (`var x = hp++;`) reads as the
         // post-increment value rather than the pre-increment one
-        // (documented Phase D limitation — the rewriter doesn't
+        // (documented limitation — the rewriter doesn't
         // synthesize a temp).
         private static bool TryStageIncrement(
             ExpressionSyntax unaryNode,
@@ -783,7 +783,7 @@ namespace RoslynRepl.Editor.Patches
         // path). When the return type is itself a generic parameter
         // — `T GetCache<T>()` — we substitute the user's matching
         // type argument so the helper's `<R>` lines up. Falls back to
-        // `object` for void / unknown returns; that matches Phase A's
+        // `object` for void / unknown returns; that matches the engine's
         // existing __call<T> behavior of returning default(T) when the
         // boxed result isn't assignable.
         private static bool TryStageInvocation(

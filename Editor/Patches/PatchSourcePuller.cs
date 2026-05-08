@@ -14,7 +14,7 @@ namespace RoslynRepl.Editor.Patches
 {
     /// <summary>
     /// Locates the original `.cs` source for a target method and extracts
-    /// the method body text. Used by Phase C of the Runtime Method Patch
+    /// the method body text. Used by the Runtime Method Patch
     /// feature to pre-populate the patch editor with the existing
     /// implementation so the user can edit it in place rather than write
     /// from a blank slate.
@@ -40,6 +40,114 @@ namespace RoslynRepl.Editor.Patches
             public string Body;
             public string SourcePath;
             public string Error;
+        }
+
+        /// <summary>
+        /// Located method declaration shared across the Pull body
+        /// extractor and the source writer. Carries enough context
+        /// (path + raw source + parsed root + the specific
+        /// MethodDeclarationSyntax + its containing TypeDeclaration)
+        /// for callers to inspect or splice without re-doing the
+        /// disambiguation walk.
+        /// </summary>
+        public class FoundMethod
+        {
+            public string SourcePath;
+            public string Source;
+            public SyntaxNode Root;
+            public TypeDeclarationSyntax TypeDecl;
+            public MethodDeclarationSyntax Method;
+        }
+
+        /// <summary>
+        /// Semantic-aware method-declaration locator shared with
+        /// `PatchSourceWriter.ApplyToFile`. Walks every MonoScript
+        /// path the declaring type maps to (covers partial classes
+        /// split across files), parses each, builds a one-shot
+        /// SemanticModel for it, and matches the target by name +
+        /// arity + each parameter's resolved CLR type. This is the
+        /// same matching depth the body-extractor uses, so Pull and
+        /// Apply To File can never disagree on which overload is
+        /// "the" target — even with per-file `using Model = …`
+        /// aliases that map the same simple name to different types.
+        /// Returns null when no file produces an exact semantic
+        /// match.
+        /// </summary>
+        public static FoundMethod FindMethodForTarget(MethodInfo target)
+        {
+            if (target == null || target.DeclaringType == null) return null;
+            var paths = ResolveScriptPaths(target.DeclaringType);
+            if (paths.Count == 0) return null;
+
+            var paramTypes = target.GetParameters().Select(p => p.ParameterType).ToArray();
+
+            foreach (var path in paths)
+            {
+                // Single read of the file — `source` is the exact
+                // text we parse. The original code did
+                // `File.ReadAllText(path)` then `TryParseFile(path)`
+                // which read the file *again*; an IDE / autosave /
+                // VCS write between those reads would pair MethodInfo
+                // spans from version B with `source` from version A,
+                // and the writer's later splice would mangle the
+                // file. Locking the parse to the same string we hold
+                // closes that race.
+                string source;
+                try { source = File.ReadAllText(path); }
+                catch { continue; }
+
+                SyntaxNode root;
+                try { root = CSharpSyntaxTree.ParseText(source).GetRoot(); }
+                catch { continue; }
+
+                var typeDecls = FindMatchingTypeDeclarations(root, target.DeclaringType);
+                if (typeDecls.Count == 0) continue;
+
+                var model = BuildSingleFileSemanticModel(root);
+
+                foreach (var td in typeDecls)
+                {
+                    foreach (var member in td.Members)
+                    {
+                        if (!(member is MethodDeclarationSyntax m)) continue;
+                        if (m.Identifier.ValueText != target.Name) continue;
+                        if (m.ParameterList.Parameters.Count != paramTypes.Length) continue;
+
+                        // Prefer semantic match (handles per-file
+                        // alias contexts). When the SemanticModel
+                        // can't resolve, fall back to syntactic so a
+                        // single-overload file with broken-Roslyn
+                        // semantics still routes correctly.
+                        bool match = MatchesParamTypesSemantic(m, paramTypes, model);
+                        if (!match && model == null)
+                            match = MatchesParamTypesSyntactic(m, paramTypes);
+                        if (!match) continue;
+
+                        return new FoundMethod
+                        {
+                            SourcePath = path,
+                            Source = source,
+                            Root = root,
+                            TypeDecl = td,
+                            Method = m,
+                        };
+                    }
+                }
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// Same `body between outer braces` extraction logic the
+        /// Pull pipeline applies — exposed for callers (e.g. the
+        /// source writer's conflict check) that already have a
+        /// MethodDeclarationSyntax in hand and need its current
+        /// body text without re-parsing.
+        /// </summary>
+        public static string ExtractMethodBody(string source, MethodDeclarationSyntax method)
+        {
+            if (method?.Body == null || string.IsNullOrEmpty(source)) return string.Empty;
+            return ExtractBodyInside(source, method.Body);
         }
 
         public static PullResult TryPullMethodBody(MethodInfo method)
@@ -72,10 +180,10 @@ namespace RoslynRepl.Editor.Patches
                 if (match == null) continue;
                 if (match.Body == null)
                 {
-                    // Expression-bodied (`=> expr`) — Phase C MVP doesn't
+                    // Expression-bodied (`=> expr`) — we don't
                     // unwrap those. Surface a specific message rather
                     // than silently returning empty.
-                    return Fail($"{declaringType.Name}.{method.Name} is expression-bodied; Phase C MVP only extracts block-bodied methods. Edit the file to a `{{ … }}` body or write the patch from scratch.");
+                    return Fail($"{declaringType.Name}.{method.Name} is expression-bodied; only block-bodied methods can be pulled. Convert the source to a `{{ … }}` body or write the patch from scratch.");
                 }
 
                 var body = ExtractBodyInside(source, match.Body);
@@ -93,9 +201,9 @@ namespace RoslynRepl.Editor.Patches
                 (lastParseError != null ? "Last error: " + lastParseError : "Method may be auto-generated or in an assembly without source available."));
         }
 
-        // ─── Phase D file context ──────────────────────────────────
+        // ─── Source file context ──────────────────────────────────
         // Snapshot of the namespace + using directives the declaring
-        // type's `.cs` file was authored in. Phase D's compiler
+        // type's `.cs` file was authored in. the rewriter's compiler
         // wrapper uses this so a pulled body — which routinely refers
         // to same-namespace types or types covered by a file-level
         // using — can compile without forcing the user to fully
@@ -598,7 +706,7 @@ namespace RoslynRepl.Editor.Patches
         private static List<TypeDeclarationSyntax> FindMatchingTypeDeclarations(SyntaxNode root, Type declaringType)
         {
             // Build the simple-name chain Outer → Inner ignoring generics
-            // (Foo`1 → "Foo"). Phase A doesn't pull from generic methods,
+            // (Foo`1 → "Foo"). the engine doesn't pull from generic methods,
             // and reflection's `Type.Name` already drops type-arg names.
             var nameChain = new List<string>();
             for (var cur = declaringType; cur != null; cur = cur.DeclaringType)

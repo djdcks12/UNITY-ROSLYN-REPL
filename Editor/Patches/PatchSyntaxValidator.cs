@@ -7,7 +7,7 @@ using System.Linq;
 namespace RoslynRepl.Editor.Patches
 {
     /// <summary>
-    /// Phase D pre-flight: walk a candidate patch body looking for
+    /// Pre-flight: walk a candidate patch body looking for
     /// language constructs we can't compile cleanly through the
     /// runtime helpers. Returning a one-line user-readable reason
     /// before the heavy compile pipeline runs spares the user a wall
