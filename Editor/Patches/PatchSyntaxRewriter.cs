@@ -182,6 +182,22 @@ namespace RoslynRepl.Editor.Patches
             var node = root.FindNode(diag.Location.SourceSpan, getInnermostNodeForTie: true);
             if (node == null) return false;
 
+            // Special case — `nameof(member)`. Pulled bodies often
+            // call `nameof(hp)` in logs/errors. The naive identifier
+            // rewrite would replace `hp` inside the argument with
+            // `__get<int>("hp")`, producing `nameof(__get<int>("hp"))`
+            // — invalid at nameof's argument since the helper call
+            // isn't a member-access syntactic shape. Detect the
+            // enclosing `nameof(...)` invocation and replace the
+            // whole call with a string literal of the member name;
+            // any inner-identifier rewrite is dropped because
+            // ReplaceNodes is outer-first and the parent takes over.
+            var nameofInv = FindEnclosingNameof(node);
+            if (nameofInv != null)
+            {
+                return TryStageNameof(nameofInv, replacements, notes);
+            }
+
             // The diagnostic span often lands on an IdentifierName or
             // the ".name" half of a member access. Walk up to the
             // smallest expression that fully describes the access so
@@ -768,6 +784,57 @@ namespace RoslynRepl.Editor.Patches
         }
 
         // ─── Helpers ──────────────────────────────────────────────
+
+        // Walks the syntactic ancestors of a diagnostic node looking
+        // for an enclosing `nameof(...)` invocation. The check is
+        // purely syntactic — `nameof` is a contextual keyword, so the
+        // expression is parsed as a regular InvocationExpressionSyntax
+        // whose Expression is `IdentifierNameSyntax("nameof")`.
+        private static InvocationExpressionSyntax FindEnclosingNameof(SyntaxNode start)
+        {
+            for (var p = start; p != null; p = p.Parent)
+            {
+                if (p is InvocationExpressionSyntax inv
+                    && inv.Expression is IdentifierNameSyntax id
+                    && id.Identifier.ValueText == "nameof"
+                    && inv.ArgumentList.Arguments.Count == 1)
+                {
+                    return inv;
+                }
+            }
+            return null;
+        }
+
+        // Replace the entire `nameof(...)` invocation with a string
+        // literal carrying the *last segment* of the argument's name
+        // — same value `nameof` would produce at runtime. Handles
+        // unqualified identifier (`nameof(hp)`), member access
+        // (`nameof(this.hp)`, `nameof(Foo.Bar.Baz)`), and generic
+        // names (`nameof(GetCache<Foo>)`). Anything else (lambdas,
+        // method calls, etc.) isn't valid input to nameof anyway —
+        // we leave those to the original diagnostic.
+        private static bool TryStageNameof(
+            InvocationExpressionSyntax nameofInv,
+            Dictionary<SyntaxNode, SyntaxNode> replacements,
+            List<string> notes)
+        {
+            if (replacements.ContainsKey(nameofInv)) return true;
+
+            var arg = nameofInv.ArgumentList.Arguments[0].Expression;
+            string memberName = null;
+            // Drill through MemberAccess to the right-most simple
+            // name. `nameof(A.B.C)` → "C".
+            while (arg is MemberAccessExpressionSyntax ma) { arg = ma.Name; }
+            if (arg is GenericNameSyntax gn) memberName = gn.Identifier.ValueText;
+            else if (arg is IdentifierNameSyntax idn) memberName = idn.Identifier.ValueText;
+
+            if (string.IsNullOrEmpty(memberName)) return false;
+
+            var literal = SyntaxFactory.ParseExpression($"\"{memberName}\"");
+            replacements[nameofInv] = literal.WithTriviaFrom(nameofInv);
+            notes.Add($"nameof(...) → \"{memberName}\"");
+            return true;
+        }
 
         // Self-class member classification for unqualified identifiers.
         // Source pulled out of an instance method legitimately
