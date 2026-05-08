@@ -113,6 +113,16 @@ namespace RoslynRepl.Editor.Core
                     // leave `_` pointing at the count instead of the
                     // user's actual previous run result.
                     UpdateLastResult = false,
+                    // Issue #13: every Run re-evaluates every watch
+                    // with byte-identical wrapped source. Reusing the
+                    // compiled __Run MethodInfo turns N watches × M
+                    // runs into N compiles + N×M invokes instead of
+                    // N×M compiles. The cache invalidates on any
+                    // AppDomain.AssemblyLoad outside our own dynamic
+                    // assemblies, so adding a package or recompiling
+                    // user scripts mid-session will refresh stale
+                    // entries automatically.
+                    UseCompileCache = true,
                 };
                 r = ReplEngine.Execute(snippet, opts);
             }

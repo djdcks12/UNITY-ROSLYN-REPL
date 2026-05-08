@@ -233,6 +233,8 @@ GameManager.Instance.CurrentState
 
 Watch rows can show scalar values or expandable trees. The panel can resolve expressions from normal compilation, the previous result, or the global object search fallback. The row tells you when a fallback result was used so you know where the value came from.
 
+Watch compiles are cached. Each row's wrapped source is compiled once on first sight and the resulting `MethodInfo` is reused on every subsequent refresh, so N watches × M user runs cost N compiles + N×M invokes rather than N×M compiles. The cache is per-row (different expression text or different effective usings ⇒ separate entry) and invalidates automatically on any package install or user-script recompile, so live edits aren't masked by stale assemblies. The interactive editor doesn't share this cache — every Run there stays a fresh compile against the latest editor state.
+
 ### Runtime Method Patching
 
 Runtime Method Patch lets you temporarily replace a void instance method while the Editor is running.

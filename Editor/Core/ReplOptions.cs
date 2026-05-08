@@ -36,6 +36,29 @@ namespace RoslynRepl.Editor.Core
         /// </summary>
         public bool UpdateLastResult { get; set; } = true;
 
+        /// <summary>
+        /// When <c>true</c>, the engine reuses the dynamic assembly +
+        /// entry-point <see cref="System.Reflection.MethodInfo"/> from a
+        /// previous Execute call whose wrapped source matches byte-for-
+        /// byte. The cache is keyed on the full wrapped source — usings
+        /// included — so a change in either user code or
+        /// <see cref="Usings"/> produces a fresh compile.
+        ///
+        /// Off by default. The Watch panel turns it on so a refresh of
+        /// N rows over many user Runs amortizes to one compile per row
+        /// rather than N×Run compiles. Interactive snippets leave it
+        /// off so each Run is a fresh compile against the latest editor
+        /// state — the cache invalidates on AppDomain.AssemblyLoad
+        /// anyway, but explicit "compile every Run" matches the user
+        /// mental model for the main editor.
+        ///
+        /// Side effect: cache hits skip Wrap → Parse → Compile → Emit →
+        /// Load entirely; only Invoke runs. Compile errors therefore
+        /// can't surface from cache hits — they only happen on first
+        /// compile (which goes through the normal path).
+        /// </summary>
+        public bool UseCompileCache { get; set; } = false;
+
         public static IReadOnlyList<string> DefaultUsings { get; } = new[]
         {
             "System",
