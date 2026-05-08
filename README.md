@@ -278,6 +278,16 @@ Once a body is pulled and edited, the Patches view shows a live diff between the
 
 Patches can be reverted individually or all at once. Active patches are remembered per project and re-applied after domain reload when possible.
 
+When patches are active, the toolbar shows a small `🔧 N active` indicator so it's clear that the running behavior differs from the source files. Click it to open the Patches view.
+
+Automatic reapply on reload can be turned off from:
+
+```text
+Tools / Roslyn REPL / Auto-reapply Patches on Reload
+```
+
+When it is off, patches are still remembered, but they don't reinstall on reload. Open the Patches view and click Apply on the rows you want to re-enable.
+
 ## Basic Usage
 
 1. Open `Tools / Roslyn REPL / Open`.

@@ -86,6 +86,34 @@
     -unity-text-align: middle-right;
 }
 
+/* Issue #22: persistent toolbar pill that surfaces the active
+   runtime-patch count after every domain reload. Hidden when no
+   patches are active (display:none inline-styled from C#). Click
+   routes the user to the Patches tab. Color matches the rewrite-
+   summary palette (orange = "this is a temporary edit-time
+   modification of the source you wrote"). */
+.rr-patch-badge {
+    margin-left: 6px;
+    margin-right: 4px;
+    padding: 0 8px;
+    height: 16px;
+    background-color: rgba(220, 150, 80, 0.20);
+    color: rgb(220, 150, 80);
+    border-top-left-radius: 8px;
+    border-top-right-radius: 8px;
+    border-bottom-left-radius: 8px;
+    border-bottom-right-radius: 8px;
+    font-size: 10px;
+    -unity-font-style: bold;
+    -unity-text-align: middle-center;
+    cursor: link;
+}
+
+.rr-patch-badge--auto-off {
+    background-color: rgba(180, 180, 180, 0.18);
+    color: rgb(180, 180, 180);
+}
+
 /* Issue #20: persistent banner under the Code header reminding the
    user that the only way to interrupt a snippet is for the snippet
    itself to observe `ct`. The first-Run dialog is the loud version;

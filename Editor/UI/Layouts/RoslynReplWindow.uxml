@@ -7,6 +7,7 @@
             <ui:VisualElement style="flex-grow: 1;" />
             <ui:Label name="duration-label" text="" class="rr-duration" />
             <ui:Label name="mode-label" text="EDIT" class="rr-badge rr-badge--edit" />
+            <ui:Label name="patch-badge" text="" class="rr-patch-badge" style="display: none;" />
             <ui:Label name="version-label" text="v?" class="rr-version" />
             <uie:ToolbarButton name="snippets-btn" text="Snippets…" />
             <uie:ToolbarButton name="history-btn" text="History…" />
