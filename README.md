@@ -267,7 +267,12 @@ if (hp <= 0)
 
 The patch body can look like normal source code. Private fields, private methods, private static members, explicit `this` access, `nameof(member)`, compound assignments, and explicit generic method calls are routed through generated reflection helpers when direct access is not available.
 
-You can also click **Pull Original** to load the current source body of the target method, edit it in place, and run the edited version temporarily.
+You can also click **Pull Original** to load the current source body of the target method, edit it in place, and run the edited version temporarily. Picking a method through **Browse** or by double-clicking an Object Browser row in Patches mode auto-pulls the source so the editor lands on a body you can immediately edit.
+
+Once a body is pulled and edited, the Patches view shows a live diff between the original source and the current edit (`+` / `-` lines, `+N -M` summary). Two actions sit under the diff:
+
+- **Copy diff** writes a unified-diff text blob to the system clipboard, ready to paste into a code review or IDE diff tool.
+- **Apply to file** writes the current patch body back into the target method's `.cs` file. A `.bak` sibling is saved before the write, and the body written is the user-edited form — the auto-rewrite that routes inaccessible names through reflection helpers is wrapper-only and never touches `spec.PatchBody`, so the on-disk source stays clean (`hp -= 10`, never `__set("hp", __get<int>("hp") - 10)`).
 
 Patches can be reverted individually or all at once. Active patches are remembered per project and re-applied after domain reload when possible.
 
