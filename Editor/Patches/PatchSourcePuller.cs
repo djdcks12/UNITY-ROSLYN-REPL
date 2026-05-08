@@ -7,6 +7,7 @@ using System.Text;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using RoslynRepl.Editor.Core;
 using UnityEditor;
 
 namespace RoslynRepl.Editor.Patches
@@ -199,23 +200,31 @@ namespace RoslynRepl.Editor.Patches
             return ctx;
         }
 
-        // Probe a candidate path for the *exact* method declaration —
-        // matching name + parameter count + parameter types — inside
-        // the type's matching syntactic declaration. Returns the
+        // Probe a candidate path for the *exact* method declaration
+        // using SemanticModel-based parameter matching. Returns the
         // parsed root + the specific TypeDeclarationSyntax that
         // contains the method, so the caller can walk that exact
         // ancestor chain for usings.
         //
-        // Same matching depth as `FindMethodNode`'s overload-
-        // resolution path (shared via MatchesParamTypes). When
-        // multiple arity-matching candidates exist in the same file,
-        // we pick the one whose parameter types match exactly; only
-        // when no candidate matches by type do we fall back to the
-        // first arity match. That mirrors the body-pull semantics so
-        // a `void Apply(int)` and `void Apply(string)` overload pair
-        // — split across two partial files — gets routed to whichever
-        // file actually holds the requested overload, not just the
-        // first file with *any* `Apply(...)` signature.
+        // Cross-file file-context selection is strict: simple-name
+        // matches like `Apply(Model)` against `Apply(Model)` are
+        // *intentionally* not enough, because partial files can
+        // legitimately have same-arity-and-simple-name parameters
+        // resolving to different CLR types via per-file aliases:
+        //
+        //     Part1.cs: using Model = A.Model; void Apply(Model);
+        //     Part2.cs: using Model = B.Model; void Apply(Model);
+        //
+        // The body-pull pipeline used to land on whichever file
+        // appeared first in MonoScript order; the new semantic
+        // matcher consults each file's own using/alias context and
+        // returns true only when the resolved CLR type matches the
+        // target's reflection Type[]. When semantics can't resolve
+        // (rare — broken source, generic type parameters), we
+        // return false rather than fall back to simple-name
+        // matching, because the caller iterates to the next file
+        // and the GetDeclaringFileContext fallback path handles the
+        // "no precise match anywhere" tail case.
         private static bool TryFindMethodBearingDecl(
             string path,
             Type declaringType,
@@ -229,8 +238,10 @@ namespace RoslynRepl.Editor.Patches
             if (!TryParseFile(path, out root)) return false;
 
             var typeDecls = FindMatchingTypeDeclarations(root, declaringType);
-            TypeDeclarationSyntax fallback = null;
+            if (typeDecls.Count == 0) return false;
+
             int arity = paramTypes.Length;
+            var model = BuildSingleFileSemanticModel(root);
 
             foreach (var td in typeDecls)
             {
@@ -240,35 +251,45 @@ namespace RoslynRepl.Editor.Patches
                     if (m.Identifier.ValueText != methodName) continue;
                     if (m.ParameterList.Parameters.Count != arity) continue;
 
-                    if (MatchesParamTypes(m, paramTypes))
+                    if (MatchesParamTypesSemantic(m, paramTypes, model))
                     {
                         typeDecl = td;
                         return true;
                     }
-                    if (fallback == null) fallback = td;
                 }
             }
 
-            if (fallback != null)
-            {
-                // No exact param-type match in this file; remember
-                // the arity-only match but only use it when *no*
-                // file gives an exact one. Caller iterates files in
-                // order, so returning false here lets the next file
-                // try; the GetDeclaringFileContext fallback path
-                // handles the "all files arity-only" case.
-                return false;
-            }
             return false;
         }
 
-        // Compare a method's syntactic parameter type list to a
-        // System.Type[] from reflection. Returns true when every
-        // parameter's type name matches by full name, simple name,
-        // or short C# alias (System.Int32 ↔ int). Shared between
-        // body-pull and file-context paths so both round-trips agree
-        // on which overload is "the" target.
-        private static bool MatchesParamTypes(MethodDeclarationSyntax m, Type[] paramTypes)
+        // ─── Parameter-type matching ─────────────────────────────
+        // Two matchers, used at different precision levels:
+        //
+        //   - Semantic: each candidate file gets its own single-file
+        //     Compilation + SemanticModel so a `ParameterSyntax` like
+        //     `Model m` resolves through that file's actual `using`
+        //     directives + namespace scoping. Returns the resolved
+        //     System.Type, which we compare for identity to the
+        //     reflection Type[]. This is the only way to disambiguate
+        //     across partial files where the same simple-name param
+        //     means different CLR types because of per-file aliases:
+        //         Part1.cs: using Model = A.Model; void Apply(Model);
+        //         Part2.cs: using Model = B.Model; void Apply(Model);
+        //
+        //   - Syntactic: name-only comparison (full name → simple name
+        //     → C# alias). Cheap, no Compilation cost, works when the
+        //     file has only one arity-matching candidate (no
+        //     ambiguity to break) or when SemanticModel build fails
+        //     (compile-broken source, missing reference).
+        //
+        // Cross-file selection uses semantic-only — a syntactic match
+        // there can leak the wrong file's using context into the
+        // wrapper. Per-file body extraction tries semantic first and
+        // falls back to syntactic only when SemanticModel can't
+        // resolve at all, so a single-overload file in a project
+        // without compile errors still pulls reliably.
+
+        private static bool MatchesParamTypesSyntactic(MethodDeclarationSyntax m, Type[] paramTypes)
         {
             for (int i = 0; i < paramTypes.Length; i++)
             {
@@ -281,6 +302,77 @@ namespace RoslynRepl.Editor.Patches
                 return false;
             }
             return true;
+        }
+
+        private static bool MatchesParamTypesSemantic(
+            MethodDeclarationSyntax m,
+            Type[] paramTypes,
+            SemanticModel model)
+        {
+            if (model == null) return false;
+            for (int i = 0; i < paramTypes.Length; i++)
+            {
+                var typeSyntax = m.ParameterList.Parameters[i].Type;
+                if (typeSyntax == null) return false;
+                var t = paramTypes[i];
+                if (t == null) return false;
+
+                // Either path can land us on the same ITypeSymbol;
+                // GetSymbolInfo returns the named type symbol when
+                // the name binds, GetTypeInfo additionally covers
+                // built-ins like `int` whose Symbol may be null.
+                var sym = model.GetSymbolInfo(typeSyntax).Symbol as ITypeSymbol
+                    ?? model.GetTypeInfo(typeSyntax).Type;
+                if (sym == null) return false;
+
+                var resolved = ResolveTypeFromITypeSymbol(sym);
+                if (resolved == null) return false;
+                if (resolved != t) return false;
+            }
+            return true;
+        }
+
+        // Build a single-file Compilation just to ask the SemanticModel
+        // a question. Cost is one CSharpCompilation.Create + one
+        // GetSemanticModel — handful of ms on a warm reference cache,
+        // amortized across all the matching probes inside one file.
+        // Returns null when the build itself fails (very rare; Roslyn
+        // tolerates malformed source as long as the syntax tree
+        // parsed at all).
+        private static SemanticModel BuildSingleFileSemanticModel(SyntaxNode root)
+        {
+            try
+            {
+                var tree = root.SyntaxTree;
+                var compilation = CSharpCompilation.Create(
+                    "RrPullerSemantic_" + Guid.NewGuid().ToString("N").Substring(0, 8),
+                    new[] { tree },
+                    AssemblyReferenceCache.GetReferences());
+                return compilation.GetSemanticModel(tree);
+            }
+            catch { return null; }
+        }
+
+        // ITypeSymbol → System.Type via fully-qualified display name.
+        // Roslyn renders nested types with `.`; reflection wants `+`.
+        // We try both forms after walking the AppDomain.
+        private static Type ResolveTypeFromITypeSymbol(ITypeSymbol sym)
+        {
+            if (sym == null) return null;
+            string fqn;
+            try { fqn = sym.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat).Replace("global::", ""); }
+            catch { return null; }
+
+            var direct = Type.GetType(fqn, throwOnError: false);
+            if (direct != null) return direct;
+
+            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                var found = asm.GetType(fqn, throwOnError: false)
+                    ?? asm.GetType(fqn.Replace('.', '+'), throwOnError: false);
+                if (found != null) return found;
+            }
+            return null;
         }
 
         private static bool TryParseFile(string path, out SyntaxNode root)
@@ -419,16 +511,47 @@ namespace RoslynRepl.Editor.Patches
             }
 
             if (candidates.Count == 0) return null;
-            if (candidates.Count == 1) return candidates[0];
 
-            // Multiple overloads with the same arity — try a deeper
-            // type-name match (shared with the file-context path).
-            // Falls back to the first candidate if nothing matches
-            // more precisely (the user's spec only disambiguated this
-            // far anyway).
+            // Try semantic disambiguation first — even when there's
+            // only one arity-matching candidate in this file, we
+            // verify its parameter types resolve to what the caller
+            // requested. Two partial files can each have a single
+            // `void Apply(Model)` whose `Model` aliases to a
+            // different CLR type; without semantic verification this
+            // method would happily return the first file's body
+            // when the user's spec actually targeted the other.
+            // SemanticModel.GetSymbolInfo gives us the resolved type
+            // through the file's own using/alias context.
+            var model = BuildSingleFileSemanticModel(root);
+            if (model != null)
+            {
+                foreach (var c in candidates)
+                {
+                    if (MatchesParamTypesSemantic(c, paramTypes, model)) return c;
+                }
+
+                // SemanticModel built but resolved no candidate —
+                // either the file's overloads target different
+                // CLR types than the caller asked for (correct: try
+                // the next path), or semantics genuinely failed
+                // (e.g., file references a type from an unloaded
+                // assembly). Fall through to the syntactic path
+                // only when we have a *single* arity match — no
+                // ambiguity for syntactic to make worse — so we
+                // don't silently miss the body for the broken-
+                // semantic edge case.
+                if (candidates.Count == 1) return candidates[0];
+                return null;
+            }
+
+            // Semantic build failed entirely — fall back to syntactic
+            // matching. Single arity match is unambiguous; multiple
+            // arity matches go through the simple-name comparison and
+            // accept the first hit.
+            if (candidates.Count == 1) return candidates[0];
             foreach (var c in candidates)
             {
-                if (MatchesParamTypes(c, paramTypes)) return c;
+                if (MatchesParamTypesSyntactic(c, paramTypes)) return c;
             }
             return candidates[0];
         }
