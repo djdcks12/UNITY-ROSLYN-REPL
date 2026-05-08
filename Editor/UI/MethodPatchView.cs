@@ -343,6 +343,16 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
         //      snapshot was lost (domain reload) but a stored spec
         //      still carries one.
         //   3. null — no snapshot available, diff section disables.
+        //
+        // null vs "" distinction matters: a method declared as
+        // `void Foo() {}` pulls as an empty string body, which is
+        // a valid snapshot — the user should be able to add code
+        // through the editor and Apply it back. Returning null only
+        // when no snapshot exists keeps the empty-body path open.
+        // `_lastPulledKey != null` is the presence signal for the
+        // cached pull; spec.OriginalBody is non-null when the
+        // registry stored a snapshot, even if its content is
+        // empty.
         private string ResolveSnapshot()
         {
             var typeName = _targetField?.value?.Trim();
@@ -352,11 +362,11 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
 
             var formKey = MethodPatchSpec.Keyed(typeName, methodName, paramsCsv);
 
-            if (!string.IsNullOrEmpty(_lastPulledOriginal) && _lastPulledKey == formKey)
+            if (_lastPulledKey == formKey && _lastPulledOriginal != null)
                 return _lastPulledOriginal;
 
             var spec = PatchRegistry.Find(typeName, methodName, paramsCsv);
-            return string.IsNullOrEmpty(spec?.OriginalBody) ? null : spec.OriginalBody;
+            return spec?.OriginalBody;
         }
 
         private void RefreshDiff()
@@ -366,8 +376,13 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
 
             var original = ResolveSnapshot();
             var current = _bodyField?.value ?? string.Empty;
-            if (string.IsNullOrEmpty(original))
+            if (original == null)
             {
+                // null means "no snapshot taken" — the diff section
+                // can't operate. An *empty* snapshot (`""`) is a
+                // valid case (e.g., a `void Foo() {}` body that was
+                // pulled successfully); we keep the section enabled
+                // so the user can add code and apply it.
                 _diffSummary.text = "(no snapshot — Pull Original to enable)";
                 _diffSummary.style.color = new StyleColor(new Color(0.55f, 0.55f, 0.55f));
                 _copyDiffBtn?.SetEnabled(false);
@@ -418,7 +433,7 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
         private void OnCopyDiffClicked()
         {
             var original = ResolveSnapshot();
-            if (string.IsNullOrEmpty(original))
+            if (original == null)
             {
                 SetStatus("No source snapshot to diff against.", error: true);
                 return;

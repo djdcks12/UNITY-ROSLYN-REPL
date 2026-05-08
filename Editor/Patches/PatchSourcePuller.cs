@@ -83,11 +83,23 @@ namespace RoslynRepl.Editor.Patches
 
             foreach (var path in paths)
             {
+                // Single read of the file — `source` is the exact
+                // text we parse. The original code did
+                // `File.ReadAllText(path)` then `TryParseFile(path)`
+                // which read the file *again*; an IDE / autosave /
+                // VCS write between those reads would pair MethodInfo
+                // spans from version B with `source` from version A,
+                // and the writer's later splice would mangle the
+                // file. Locking the parse to the same string we hold
+                // closes that race.
                 string source;
                 try { source = File.ReadAllText(path); }
                 catch { continue; }
 
-                if (!TryParseFile(path, out var root)) continue;
+                SyntaxNode root;
+                try { root = CSharpSyntaxTree.ParseText(source).GetRoot(); }
+                catch { continue; }
+
                 var typeDecls = FindMatchingTypeDeclarations(root, target.DeclaringType);
                 if (typeDecls.Count == 0) continue;
 
