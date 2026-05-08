@@ -74,11 +74,21 @@ namespace RoslynRepl.Editor.Patches
             // re-Applying; an old "naively revert first, then compile"
             // path would silently drop the working patch on every typo.
             var target = ResolveTargetMethod(spec);
+            // Phase D — pull the source file's namespace + using
+            // directives so the generated wrapper can compile pulled
+            // bodies that reference same-namespace types or rely on
+            // file-level usings (aliases, project namespaces). Falls
+            // back to "no namespace, standard usings only" when the
+            // source can't be located.
+            var fileContext = PatchSourcePuller.GetDeclaringFileContext(target.DeclaringType);
             var className = "__ReplPatch_" + Guid.NewGuid().ToString("N").Substring(0, 8);
-            var source = PatchCodeGenerator.Generate(spec, target, className);
+            var source = PatchCodeGenerator.Generate(spec, target, className, fileContext);
             var asm = CompileToAssembly(source, target.DeclaringType, spec.Key);
-            var patchType = asm.GetType(className)
-                ?? throw new InvalidOperationException($"Compiled patch is missing class '{className}'");
+            var fullClassName = string.IsNullOrEmpty(fileContext?.Namespace)
+                ? className
+                : fileContext.Namespace + "." + className;
+            var patchType = asm.GetType(fullClassName)
+                ?? throw new InvalidOperationException($"Compiled patch is missing class '{fullClassName}'");
             var prefix = patchType.GetMethod("Prefix", BindingFlags.Public | BindingFlags.Static)
                 ?? throw new InvalidOperationException($"Compiled patch is missing static Prefix method");
 
@@ -351,15 +361,51 @@ namespace RoslynRepl.Editor.Patches
     /// </summary>
     public static class PatchCodeGenerator
     {
+        // Phase D originally had no FileContext parameter; preserve
+        // the old call shape so any caller that doesn't have one
+        // (probes, future callers without source-puller hookup) still
+        // works.
         public static string Generate(MethodPatchSpec spec, MethodInfo target, string className)
+            => Generate(spec, target, className, null);
+
+        public static string Generate(MethodPatchSpec spec, MethodInfo target, string className, PatchSourcePuller.FileContext context)
         {
             var sb = new StringBuilder();
-            sb.AppendLine("using System;");
-            sb.AppendLine("using System.Collections.Generic;");
-            sb.AppendLine("using System.Linq;");
-            sb.AppendLine("using System.Reflection;");
-            sb.AppendLine("using UnityEngine;");
+
+            // Standard usings the wrapper has always emitted, plus
+            // every using directive captured from the target type's
+            // source file. Dedupe by exact text so a wrapper for
+            // `MyGame.Player` that imports `using System;` doesn't
+            // double-emit the standard one and trigger CS0105.
+            var emittedUsings = new HashSet<string>(StringComparer.Ordinal);
+            void EmitUsing(string line)
+            {
+                if (emittedUsings.Add(line)) sb.AppendLine(line);
+            }
+            EmitUsing("using System;");
+            EmitUsing("using System.Collections.Generic;");
+            EmitUsing("using System.Linq;");
+            EmitUsing("using System.Reflection;");
+            EmitUsing("using UnityEngine;");
+            if (context?.UsingDirectives != null)
+            {
+                foreach (var u in context.UsingDirectives) EmitUsing(u);
+            }
             sb.AppendLine();
+
+            // Wrap the wrapper class in the target type's namespace so
+            // pulled bodies that reference same-namespace types
+            // resolve without explicit qualification. Top-level
+            // (declaringType.Namespace == null) falls back to the
+            // global namespace, same as the pre-Phase-D wrapper.
+            string ns = context?.Namespace;
+            bool hasNs = !string.IsNullOrEmpty(ns);
+            if (hasNs)
+            {
+                sb.AppendLine($"namespace {ns}");
+                sb.AppendLine("{");
+            }
+
             sb.AppendLine($"public static class {className}");
             sb.AppendLine("{");
 
@@ -663,6 +709,7 @@ namespace RoslynRepl.Editor.Patches
             sb.AppendLine("        return false; // Harmony Prefix: skip the original method body");
             sb.AppendLine("    }");
             sb.AppendLine("}");
+            if (hasNs) sb.AppendLine("}"); // close namespace block
             return sb.ToString();
         }
     }

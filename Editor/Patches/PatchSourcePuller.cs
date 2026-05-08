@@ -92,6 +92,60 @@ namespace RoslynRepl.Editor.Patches
                 (lastParseError != null ? "Last error: " + lastParseError : "Method may be auto-generated or in an assembly without source available."));
         }
 
+        // ─── Phase D file context ──────────────────────────────────
+        // Snapshot of the namespace + using directives the declaring
+        // type's `.cs` file was authored in. Phase D's compiler
+        // wrapper uses this so a pulled body — which routinely refers
+        // to same-namespace types or types covered by a file-level
+        // using — can compile without forcing the user to fully
+        // qualify every name post-pull. Best-effort: when the source
+        // can't be located (no MonoScript, IO failure, malformed
+        // syntax) the context returns just the runtime namespace.
+        public class FileContext
+        {
+            public string Namespace;            // declaring type's runtime namespace
+            public List<string> UsingDirectives = new(); // verbatim "using ...;" lines from source
+        }
+
+        public static FileContext GetDeclaringFileContext(Type declaringType)
+        {
+            var ctx = new FileContext { Namespace = declaringType?.Namespace };
+            if (declaringType == null) return ctx;
+
+            var paths = ResolveScriptPaths(declaringType);
+            if (paths.Count == 0) return ctx;
+
+            // Walk every candidate path (covers partial classes split
+            // across files), accumulate every using directive — both
+            // top-level and namespace-scoped. Dedupe by exact text so
+            // wrappers don't end up with duplicate-using compile
+            // errors. Order matters when source-file using order
+            // matters for resolution (rare but possible with aliases),
+            // so we preserve first-seen order.
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var path in paths)
+            {
+                string source;
+                try { source = File.ReadAllText(path); }
+                catch { continue; }
+
+                try
+                {
+                    var tree = CSharpSyntaxTree.ParseText(source);
+                    var root = tree.GetRoot();
+                    foreach (var u in root.DescendantNodes().OfType<UsingDirectiveSyntax>())
+                    {
+                        var text = u.ToFullString().Trim();
+                        if (string.IsNullOrEmpty(text)) continue;
+                        if (seen.Add(text)) ctx.UsingDirectives.Add(text);
+                    }
+                }
+                catch { /* malformed source — ignore that one file */ }
+            }
+
+            return ctx;
+        }
+
         // Step 1 — find every .cs whose first class declaration is the
         // requested type. AssetDatabase.FindAssets is editor-only so
         // this whole class lives in Editor/. Partial classes return
