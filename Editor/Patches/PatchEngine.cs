@@ -839,6 +839,34 @@ namespace RoslynRepl.Editor.Patches
             sb.AppendLine("            return __r is T __cast ? __cast : default;");
             sb.AppendLine("        }");
 
+            // ─── Generic paramTypes-aware variants ───────────────
+            // Same role as __callX/__callOnX/__callStaticX for the
+            // non-generic path: rewriter passes the post-substitution
+            // parameter types so the helper performs strict matching
+            // instead of inferring from runtime args. Critical for
+            // null arguments (no runtime type) and implicit widening
+            // (boxed int reaching a long parameter).
+            sb.AppendLine("        T __callGX<T>(string name, System.Type[] typeArgs, System.Type[] paramTypes, object[] args)");
+            sb.AppendLine("        {");
+            sb.AppendLine($"            var __t = typeof({declType});");
+            sb.AppendLine("            var __r = __InvokeReflectiveGenericExact(__t, __instance, name, typeArgs, paramTypes, args);");
+            sb.AppendLine("            return __r is T __cast ? __cast : default;");
+            sb.AppendLine("        }");
+
+            sb.AppendLine("        T __callGOnX<T>(object target, string name, System.Type[] typeArgs, System.Type[] paramTypes, object[] args)");
+            sb.AppendLine("        {");
+            sb.AppendLine("            if (target == null) throw new System.ArgumentNullException(nameof(target));");
+            sb.AppendLine("            var __r = __InvokeReflectiveGenericExact(target.GetType(), target, name, typeArgs, paramTypes, args);");
+            sb.AppendLine("            return __r is T __cast ? __cast : default;");
+            sb.AppendLine("        }");
+
+            sb.AppendLine("        T __callGStaticX<T>(System.Type type, string name, System.Type[] typeArgs, System.Type[] paramTypes, object[] args)");
+            sb.AppendLine("        {");
+            sb.AppendLine("            if (type == null) throw new System.ArgumentNullException(nameof(type));");
+            sb.AppendLine("            var __r = __InvokeReflectiveGenericExact(type, null, name, typeArgs, paramTypes, args);");
+            sb.AppendLine("            return __r is T __cast ? __cast : default;");
+            sb.AppendLine("        }");
+
             // Shared invoke pipeline for __call / __callOn / __callStatic.
             // Picks an overload by argument count first (so user code with
             // params doesn't accidentally bind to a different-arity
@@ -1008,6 +1036,45 @@ namespace RoslynRepl.Editor.Patches
             sb.AppendLine("            }");
             sb.AppendLine("            if (typeArgs.Length > 0 && __m.IsGenericMethodDefinition) __m = __m.MakeGenericMethod(typeArgs);");
             sb.AppendLine("            return __m.Invoke(instance, args);");
+            sb.AppendLine("        }");
+
+            // Strict paramTypes match for generic methods. Walks the
+            // base chain like __InvokeReflectiveGeneric, but instead
+            // of specificity scoring after MakeGenericMethod, looks
+            // for the *exact* candidate whose substituted parameter
+            // types match `paramTypes` element-wise. Falls back to
+            // the specificity-scoring path when paramTypes is null
+            // or no exact match exists (defensive — shouldn't hit
+            // in practice when the rewriter routes here).
+            sb.AppendLine("        object __InvokeReflectiveGenericExact(System.Type type, object instance, string name, System.Type[] typeArgs, System.Type[] paramTypes, object[] args)");
+            sb.AppendLine("        {");
+            sb.AppendLine("            if (paramTypes == null) return __InvokeReflectiveGeneric(type, instance, name, typeArgs, args);");
+            sb.AppendLine("            args = args ?? new object[0];");
+            sb.AppendLine("            typeArgs = typeArgs ?? new System.Type[0];");
+            sb.AppendLine("            var __bf = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.DeclaredOnly;");
+            sb.AppendLine("            for (var __wt = type; __wt != null; __wt = __wt.BaseType)");
+            sb.AppendLine("            {");
+            sb.AppendLine("                foreach (var __mm in __wt.GetMethods(__bf))");
+            sb.AppendLine("                {");
+            sb.AppendLine("                    if (__mm.Name != name) continue;");
+            sb.AppendLine("                    if (__mm.GetParameters().Length != paramTypes.Length) continue;");
+            sb.AppendLine("                    if (typeArgs.Length > 0)");
+            sb.AppendLine("                    {");
+            sb.AppendLine("                        if (!__mm.IsGenericMethodDefinition) continue;");
+            sb.AppendLine("                        if (__mm.GetGenericArguments().Length != typeArgs.Length) continue;");
+            sb.AppendLine("                    }");
+            sb.AppendLine("                    else if (__mm.IsGenericMethodDefinition) continue;");
+            sb.AppendLine("                    var __inst = (typeArgs.Length > 0 && __mm.IsGenericMethodDefinition) ? __mm.MakeGenericMethod(typeArgs) : __mm;");
+            sb.AppendLine("                    var __pars = __inst.GetParameters();");
+            sb.AppendLine("                    bool __ok = true;");
+            sb.AppendLine("                    for (int __i = 0; __i < __pars.Length; __i++)");
+            sb.AppendLine("                    {");
+            sb.AppendLine("                        if (__pars[__i].ParameterType != paramTypes[__i]) { __ok = false; break; }");
+            sb.AppendLine("                    }");
+            sb.AppendLine("                    if (__ok) return __inst.Invoke(instance, args);");
+            sb.AppendLine("                }");
+            sb.AppendLine("            }");
+            sb.AppendLine("            return __InvokeReflectiveGeneric(type, instance, name, typeArgs, args);");
             sb.AppendLine("        }");
 
             // ─── Phase D mutate helpers: single-evaluation read-modify-

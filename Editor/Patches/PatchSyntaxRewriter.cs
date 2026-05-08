@@ -858,8 +858,9 @@ namespace RoslynRepl.Editor.Patches
                     }
                     else
                     {
-                        call = $"__callG<{rArg}>(\"{memberName}\", {typeArgsArrayExpr}{argsBlob})";
-                        notes.Add($"{memberName}<{genericArity}>({arity} args) → __callG");
+                        var callTail = RenderExactCallArgs(minfo, argsList, genericArgSyntaxes);
+                        call = $"__callGX<{rArg}>(\"{memberName}\", {typeArgsArrayExpr}{callTail})";
+                        notes.Add($"{memberName}<{genericArity}>({arity} args) → __callGX (exact)");
                     }
                     replacements[invocation] = SyntaxFactory.ParseExpression(call).WithTriviaFrom(invocation);
                     return true;
@@ -878,8 +879,9 @@ namespace RoslynRepl.Editor.Patches
                     }
                     else
                     {
-                        call = $"__callGStatic<{rArg}>(typeof({typeRef}), \"{memberName}\", {typeArgsArrayExpr}{argsBlob})";
-                        notes.Add($"{memberName}<{genericArity}>({arity} args, static on self) → __callGStatic");
+                        var callTail = RenderExactCallArgs(minfo, argsList, genericArgSyntaxes);
+                        call = $"__callGStaticX<{rArg}>(typeof({typeRef}), \"{memberName}\", {typeArgsArrayExpr}{callTail})";
+                        notes.Add($"{memberName}<{genericArity}>({arity} args, static on self) → __callGStaticX (exact)");
                     }
                     replacements[invocation] = SyntaxFactory.ParseExpression(call).WithTriviaFrom(invocation);
                     return true;
@@ -908,8 +910,9 @@ namespace RoslynRepl.Editor.Patches
                 }
                 else
                 {
-                    call = $"__callGStatic<{rArg}>(typeof({typeRef}), \"{memberName}\", {typeArgsArrayExpr}{argsBlob})";
-                    notes.Add($"{nts.Name}.{memberName}<{genericArity}>({arity} args) → __callGStatic");
+                    var callTail = RenderExactCallArgs(minfo, argsList, genericArgSyntaxes);
+                    call = $"__callGStaticX<{rArg}>(typeof({typeRef}), \"{memberName}\", {typeArgsArrayExpr}{callTail})";
+                    notes.Add($"{nts.Name}.{memberName}<{genericArity}>({arity} args) → __callGStaticX (exact)");
                 }
                 replacements[invocation] = SyntaxFactory.ParseExpression(call).WithTriviaFrom(invocation);
                 return true;
@@ -943,8 +946,17 @@ namespace RoslynRepl.Editor.Patches
             }
             else
             {
-                extCall = $"__callGOn<{extRArg}>({lhsText}, \"{memberName}\", {typeArgsArrayExpr}{argsBlob})";
-                notes.Add($"{lhsText.Trim()}.{memberName}<{genericArity}>({arity} args) → __callGOn");
+                if (extMinfo != null)
+                {
+                    var callTail = RenderExactCallArgs(extMinfo, argsList, genericArgSyntaxes);
+                    extCall = $"__callGOnX<{extRArg}>({lhsText}, \"{memberName}\", {typeArgsArrayExpr}{callTail})";
+                    notes.Add($"{lhsText.Trim()}.{memberName}<{genericArity}>({arity} args) → __callGOnX (exact)");
+                }
+                else
+                {
+                    extCall = $"__callGOn<{extRArg}>({lhsText}, \"{memberName}\", {typeArgsArrayExpr}{argsBlob})";
+                    notes.Add($"{lhsText.Trim()}.{memberName}<{genericArity}>({arity} args) → __callGOn");
+                }
             }
             replacements[invocation] = SyntaxFactory.ParseExpression(extCall).WithTriviaFrom(invocation);
             return true;
@@ -1030,6 +1042,20 @@ namespace RoslynRepl.Editor.Patches
         // object[]{(int)arg1}`. Empty-arity uses zero-length arrays
         // so the helper signature stays consistent.
         private static string RenderExactCallArgs(MethodInfo m, SeparatedSyntaxList<ArgumentSyntax> args)
+            => RenderExactCallArgs(m, args, null);
+
+        // Generic-aware variant: when `genericArgSyntaxes` is supplied
+        // (the user wrote `Foo<X, Y>(args)`), each parameter type is
+        // rendered through `RenderCSharpTypeWithSubstitution` so open
+        // generic parameters in the method signature get replaced
+        // with the user's type-argument syntax — `Get<T>(T)` against
+        // `Get<Foo>(...)` produces paramTypes `[typeof(Foo)]` and a
+        // `(Foo)arg` cast, which is what the runtime helper needs to
+        // strict-match the closed instantiation.
+        private static string RenderExactCallArgs(
+            MethodInfo m,
+            SeparatedSyntaxList<ArgumentSyntax> args,
+            TypeSyntax[] genericArgSyntaxes)
         {
             var pars = m.GetParameters();
             string paramTypesArr;
@@ -1041,14 +1067,30 @@ namespace RoslynRepl.Editor.Patches
             }
             else
             {
+                // Build substitution map for generic parameters.
+                Dictionary<Type, string> sub = null;
+                if (m.IsGenericMethodDefinition && genericArgSyntaxes != null && genericArgSyntaxes.Length > 0)
+                {
+                    sub = new Dictionary<Type, string>();
+                    var typeParams = m.GetGenericArguments();
+                    for (int i = 0; i < typeParams.Length && i < genericArgSyntaxes.Length; i++)
+                    {
+                        sub[typeParams[i]] = genericArgSyntaxes[i].ToFullString().Trim();
+                    }
+                }
+
+                string RenderParamType(Type t) => sub != null
+                    ? RenderCSharpTypeWithSubstitution(t, sub)
+                    : TypeRef(t);
+
                 paramTypesArr = "new System.Type[] { "
-                    + string.Join(", ", pars.Select(p => $"typeof({TypeRef(p.ParameterType)})"))
+                    + string.Join(", ", pars.Select(p => $"typeof({RenderParamType(p.ParameterType)})"))
                     + " }";
                 var castedArgs = new List<string>(pars.Length);
                 for (int i = 0; i < pars.Length; i++)
                 {
                     var argText = args[i].ToFullString();
-                    castedArgs.Add($"({TypeRef(pars[i].ParameterType)})({argText})");
+                    castedArgs.Add($"({RenderParamType(pars[i].ParameterType)})({argText})");
                 }
                 argsArr = "new object[] { " + string.Join(", ", castedArgs) + " }";
             }
