@@ -4,8 +4,8 @@ using System.Text;
 namespace RoslynRepl.Editor.Patches
 {
     /// <summary>
-    /// Phase E — line-level diff between a method's original source
-    /// body (Phase C's snapshot in <see cref="MethodPatchSpec.OriginalBody"/>)
+    /// — line-level diff between a method's original source
+    /// body (Pull's snapshot in <see cref="MethodPatchSpec.OriginalBody"/>)
     /// and the user's current edited body (<see cref="MethodPatchSpec.PatchBody"/>).
     /// The Patches view renders the result as a side-by-side coloring;
     /// the same data also feeds the "Copy diff to clipboard" path as a

@@ -10,7 +10,7 @@ using UnityEditor;
 namespace RoslynRepl.Editor.Patches
 {
     /// <summary>
-    /// Phase E — write the user's edited patch body back into the
+    /// — write the user's edited patch body back into the
     /// declaring type's source file. Pulls together the same method-
     /// resolution machinery <see cref="PatchSourcePuller"/> uses, then
     /// surgically replaces the text between the target method's
@@ -23,7 +23,7 @@ namespace RoslynRepl.Editor.Patches
     ///     SyntaxNode.WithBody + ToFullString tends to reformat in
     ///     ways the user didn't ask for.
     ///   - The patch body the user edited *is* C# source the same
-    ///     way the original was — Phase D's auto-rewrite happens at
+    ///     way the original was — the rewriter's auto-rewrite happens at
     ///     compile time inside the wrapper, never against
     ///     spec.PatchBody. So spec.PatchBody is always clean source
     ///     (`hp -= 10`, not `__set("hp", __get&lt;int&gt;("hp") - 10)`)
@@ -109,7 +109,7 @@ namespace RoslynRepl.Editor.Patches
                 return Fail($"Could not find a method matching {target.DeclaringType.Name}.{target.Name}({string.Join(", ", paramTypes.Select(t => t?.Name))}) in any candidate source file.");
 
             if (method.Body == null)
-                return Fail($"{target.DeclaringType.Name}.{target.Name} is expression-bodied; Phase E only writes block-bodied methods. Convert the source to a `{{ … }}` body first.");
+                return Fail($"{target.DeclaringType.Name}.{target.Name} is expression-bodied; Source export only writes block-bodied methods. Convert the source to a `{{ … }}` body first.");
 
             // Splice between the outer braces. Roslyn attaches
             // trailing newlines to the *preceding* token rather than

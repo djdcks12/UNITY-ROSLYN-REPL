@@ -14,14 +14,14 @@ namespace RoslynRepl.Editor.Patches
     /// Compiles a user-edited method body, then redirects calls to the
     /// target method onto the compiled replacement via Harmony.
     ///
-    /// Phase A MVP scope:
+    /// Supported scope:
     ///  • instance methods returning void
     ///  • public, internal, private, and protected — anything Harmony can
     ///    reach via the BindingFlags below
     ///  • parameter types limited to fully-qualifiable names (the spec
     ///    stores them as a comma-joined list of full type names)
     ///
-    /// Out of scope for the MVP (see issue #14 for the larger plan):
+    /// Out of scope:
     ///  • non-void return types
     ///  • static methods
     ///  • ref / out / in parameters
@@ -66,7 +66,7 @@ namespace RoslynRepl.Editor.Patches
         {
             if (spec == null) throw new ArgumentNullException(nameof(spec));
 
-            // Phase D pre-flight: catch unsupported body shapes
+            // Pre-flight: catch unsupported body shapes
             // (await/yield/named-arg/ref-out-in/base-field-read)
             // before the compile pipeline runs. The validator emits
             // a single user-readable line; the Patches UI surfaces
@@ -85,7 +85,7 @@ namespace RoslynRepl.Editor.Patches
             // re-Applying; an old "naively revert first, then compile"
             // path would silently drop the working patch on every typo.
             var target = ResolveTargetMethod(spec);
-            // Phase D — pull the source file's namespace + using
+            // — pull the source file's namespace + using
             // directives so the generated wrapper can compile pulled
             // bodies that reference same-namespace types or rely on
             // file-level usings (aliases, project namespaces). Falls
@@ -202,7 +202,7 @@ namespace RoslynRepl.Editor.Patches
 
         /// <summary>
         /// Public-facing wrapper around <see cref="ResolveTargetMethod"/>.
-        /// Phase C's "Pull Original" UI needs the same MethodInfo
+        /// Pull's "Pull Original" UI needs the same MethodInfo
         /// resolution the engine uses, but without throwing — failure
         /// just means "can't pull, show the user a hint".
         /// </summary>
@@ -346,7 +346,7 @@ namespace RoslynRepl.Editor.Patches
                 references: refs,
                 options: options);
 
-            // Phase D — natural-code rewrite. The user can write
+            // — natural-code rewrite. The user can write
             // `hp -= 10`, `Singleton.Instance.privateField`,
             // `MyClass.PrivateStatic = …` and have the wrapper still
             // compile. The mechanism: ask Roslyn what it complains
@@ -370,7 +370,7 @@ namespace RoslynRepl.Editor.Patches
             // patch.
             //
             // The first-pass error count guards the common case: if
-            // a patch already uses helpers explicitly (Phase A's
+            // a patch already uses helpers explicitly (the engine's
             // documented form), the first compile is clean and we
             // skip the rewriter walk entirely.
             int rewriteRounds = 0;
@@ -432,7 +432,7 @@ namespace RoslynRepl.Editor.Patches
     /// </summary>
     public static class PatchCodeGenerator
     {
-        // Phase D originally had no FileContext parameter; preserve
+        // originally had no FileContext parameter; preserve
         // the old call shape so any caller that doesn't have one
         // (probes, future callers without source-puller hookup) still
         // works.
@@ -501,7 +501,7 @@ namespace RoslynRepl.Editor.Patches
             // (one per Apply, recycled per re-apply) and stores
             // delegates built via Reflection.Emit so repeated
             // `base.OnEnable()` calls within one patch session reuse
-            // the same DynamicMethod. Phase D's rewriter pre-pass
+            // the same DynamicMethod. the rewriter's rewriter pre-pass
             // replaces `base.X(args)` with `__callBase<R>("X", args)`,
             // which routes through __BaseInvokeFromDerived → either
             // the cached delegate or a freshly emitted one.
@@ -723,7 +723,7 @@ namespace RoslynRepl.Editor.Patches
             sb.AppendLine("            return __r is T __cast ? __cast : default;");
             sb.AppendLine("        }");
 
-            // ─── Phase D helpers: same shape as the originals but
+            // ─── Reflection helpers: same shape as the originals but
             // parameterized over the target type / instance, so the
             // syntax rewriter can redirect inaccessible member access
             // through them no matter where the symbol lives:
@@ -734,7 +734,7 @@ namespace RoslynRepl.Editor.Patches
             //     reflection on an arbitrary `Type` (covers
             //     `SomeClass.PrivateStatic`, `Type.PrivateStaticMethod()`).
             //
-            // Phase A's original `__get<T>` / `__set` / `__call<T>` keep
+            // the engine's original `__get<T>` / `__set` / `__call<T>` keep
             // their signatures so existing patches written against the
             // documented helpers still compile unchanged.
             sb.AppendLine();
@@ -834,7 +834,7 @@ namespace RoslynRepl.Editor.Patches
             sb.AppendLine("            return __r is T __cast ? __cast : default;");
             sb.AppendLine("        }");
 
-            // ─── Phase D paramTypes-aware variants ───────────────
+            // ─── paramTypes-aware variants ───────────────
             // C# doesn't allow local-function overloading, so these
             // are distinct names (`...X`) from the legacy
             // `__call` / `__callOn` / `__callStatic` / `__callBase`.
@@ -882,7 +882,7 @@ namespace RoslynRepl.Editor.Patches
             sb.AppendLine("            return __r is T __cast ? __cast : default;");
             sb.AppendLine("        }");
 
-            // ─── Phase D explicit-generic method call helpers ──────
+            // ─── Generic method call helpers ──────
             // Same shape as __call / __callOn / __callStatic but pass
             // a typeArgs array along so the helper can call
             // MakeGenericMethod before invoke. Used when the user
@@ -944,7 +944,7 @@ namespace RoslynRepl.Editor.Patches
             // method), then narrows by argument types when more than one
             // candidate remains. Returns the boxed result; the caller
             // unboxes via (T) cast — `null` round-trips as `default(T)`
-            // for value types, which matches the pattern Phase A used.
+            // for value types, which matches the documented pattern.
             sb.AppendLine("        object __InvokeReflective(System.Type type, object instance, string name, object[] args)");
             sb.AppendLine("        {");
             sb.AppendLine("            var __bf = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.DeclaredOnly;");
@@ -1148,7 +1148,7 @@ namespace RoslynRepl.Editor.Patches
             sb.AppendLine("            return __InvokeReflectiveGeneric(type, instance, name, typeArgs, args);");
             sb.AppendLine("        }");
 
-            // ─── Phase D mutate helpers: single-evaluation read-modify-
+            // ─── Mutate helpers: single-evaluation read-modify-
             // write for compound assignments and ++/--. The naive
             // rewrite for `obj.X += amount` was
             //   __setOn(obj, "X", __getOn<T>(obj, "X") + (amount))

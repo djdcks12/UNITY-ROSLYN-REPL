@@ -21,7 +21,7 @@ namespace RoslynRepl.Editor.Patches
     ///
     /// LastError is intentionally not persisted: it's transient diagnostic
     /// state from the last apply attempt, valid only for the current
-    /// session. Phase B3 re-runs Apply on the next boot for any spec
+    /// session. the bootstrap path re-runs Apply on the next boot for any spec
     /// stored as Active and refreshes LastError from that attempt.
     /// </summary>
     public static class PatchPersistence

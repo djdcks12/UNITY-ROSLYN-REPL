@@ -7,21 +7,26 @@ using RoslynRepl.Editor.Patches;
 namespace RoslynRepl.Editor.UI
 {
     /// <summary>
-    /// In-window panel for the Runtime Method Patch feature
-    /// (issue #14, Phase A MVP). Mounts inside the main REPL window's
-    /// shared bottom area — same physical space as the Output panel,
-    /// switched via the Output / Patches mode tab in the pane header.
+    /// In-window panel for the Runtime Method Patch feature.
+    /// Mounts inside the main REPL window's shared bottom area —
+    /// same physical space as the Output panel, switched via the
+    /// Output / Patches mode tab in the pane header.
     ///
-    /// Phase A constraints from the engine:
+    /// Engine constraints surfaced here:
     ///   • void instance methods only
-    ///   • private members reached through __get / __set / __call
+    ///   • private members are reachable through natural source
+    ///     (the syntax rewriter routes inaccessible names through
+    ///     reflection helpers) or via the explicit `__get` / `__set`
+    ///     / `__call` helpers when the rewriter picks the wrong
+    ///     overload.
     /// </summary>
     public class MethodPatchView
     {
         private const string DefaultBody =
-@"// Phase A MVP scope: void instance methods.
-// Use __get<T>(""name"") / __set(""name"", value) / __call<T>(""name"", args)
-// to reach private members of the target.
+@"// Write the patch body the same way you'd write the source —
+// `hp -= 10`, `Singleton.Instance.PrivateField`, `base.OnEnable()`
+// all work. The rewriter routes inaccessible names through
+// reflection helpers automatically.
 UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
 
         private readonly VisualElement _host;
@@ -30,10 +35,10 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
         private TextField _paramsField;
         private TextField _bodyField;
 
-        // Phase E: diff section. _diffLines is the scrollable
-        // colored line view, _diffSummary shows "+N -M" in the
-        // header, the two buttons act on the current vs.-snapshot
-        // pair. Disabled when no source snapshot is available.
+        // Diff section. _diffLines is the scrollable colored line
+        // view, _diffSummary shows "+N -M" in the header, the two
+        // buttons act on the current vs.-snapshot pair. Disabled
+        // when no source snapshot is available.
         private VisualElement _diffContainer;
         private VisualElement _diffLines;
         private Label _diffSummary;
@@ -43,11 +48,12 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
         private Label _statusLabel;
         private VisualElement _activeListContainer;
 
-        // Phase C bridge: Pull Original drops the source body into the
-        // editor, but the user then edits it before Apply. To keep
-        // spec.OriginalBody (the unedited snapshot Phase E will diff
-        // against) accurate, remember the last successful pull keyed
-        // by the form's identity at pull time. If the form still
+        // Pull Original drops the source body into the editor, but
+        // the user then edits it before Apply. To keep
+        // spec.OriginalBody (the unedited snapshot the diff view
+        // relies on) accurate, remember the last successful pull
+        // keyed by the form's identity at pull time. If the form
+        // still
         // matches that key when Apply runs, the snapshot ships into
         // the spec; if the form drifted (user changed Type / Method /
         // Params, picked a different method via Browse, etc.) the
@@ -156,8 +162,8 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             pullBtn.style.fontSize = 10;
             pullBtn.tooltip =
                 "Locate the target method's .cs source and copy its body into the editor.\n" +
-                "Use as the starting point for an in-place edit. Phase C MVP: void instance methods,\n" +
-                "block bodies (`{ … }`), source must live in Assets/ or Packages/.";
+                "Use as the starting point for an in-place edit. Supports void instance methods,\n" +
+                "block bodies (`{ … }`); source must live in Assets/ or Packages/.";
             bodyHeader.Add(pullBtn);
             _host.Add(bodyHeader);
 
@@ -215,17 +221,18 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
 
             _host.Add(actionRow);
 
-            // ─── Diff section (Phase E) ──────────────────────────
+            // ─── Diff section ────────────────────────────────────
             // Shows the line diff between the source snapshot Pull
             // Original captured (or spec.OriginalBody for a stored
             // patch) and the current edited body. Buttons act on
             // the snapshot/current pair: "Copy diff" pastes a
             // unified-diff text blob to the clipboard; "Apply to
             // file" splices the *user-edited* form back into the
-            // target method's source file (Phase D's auto-rewrite
-            // never touches spec.PatchBody, so the body is always
-            // clean source — natural `hp -= 10`, never the
-            // wrapper-only `__set("hp", __get<int>("hp") - 10)`).
+            // target method's source file. The auto-rewrite that
+            // routes inaccessible names through reflection helpers
+            // never touches spec.PatchBody itself, so the body
+            // is always clean source — natural `hp -= 10`, never
+            // the wrapper-only `__set("hp", __get<int>("hp") - 10)`.
             //
             // Disabled when no snapshot exists — typically a
             // hand-typed patch that was never Pulled.
@@ -274,7 +281,8 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             _applyToFileBtn.tooltip =
                 "Write the current patch body back into the target method's .cs file.\n" +
                 "Backs up the original to <source>.bak before touching it.\n" +
-                "Phase D's auto-rewrite is wrapper-only, so the body written stays\n" +
+                "The auto-rewrite that routes inaccessible names through\n" +
+                "reflection helpers is wrapper-only, so the body written stays\n" +
                 "clean source (`hp -= 10`, not `__set/__get` calls).";
             diffActions.Add(_applyToFileBtn);
             _diffContainer.Add(diffActions);
@@ -317,7 +325,7 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             RefreshDiff();
         }
 
-        // ─── Phase E: diff helpers ────────────────────────────────
+        // ─── Diff helpers ─────────────────────────────────────────
 
         // Snapshot resolution priority:
         //   1. _lastPulledOriginal — populated by Pull Original /
@@ -447,7 +455,8 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
                 "Apply patch to source file?",
                 $"Write the current patch body into\n\n  {declName}.{target.Name}\n\n" +
                 $"A backup will be saved to <source>.bak.\n\n" +
-                "The body is the user-edited form (Phase D's auto-rewrite is wrapper-only).",
+                "The body is the user-edited form — the auto-rewrite that routes\n" +
+                "inaccessible names through reflection helpers is wrapper-only.",
                 "Apply",
                 "Cancel");
             if (!ok) return;
@@ -502,10 +511,20 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
 
             // Form just got rewritten to a different method — any
             // previous Pull's snapshot belongs to the *old* form
-            // identity, so drop it. The user can hit Pull Original
-            // again to refresh against the new method.
+            // identity, so drop it.
             _lastPulledKey = null;
             _lastPulledOriginal = null;
+
+            // Auto-Pull Original after Browse: the user just told
+            // us exactly which method they want to patch, so the
+            // next thing they need is the source body in the
+            // editor. Without this they'd have to click Pull
+            // Original immediately after every pick, which is what
+            // the UX feedback asked us to remove. The Pull path
+            // still owns the "non-default body — overwrite?"
+            // confirm dialog, so an already-edited body is
+            // protected.
+            OnPullOriginalClicked();
         }
 
         private static System.Type ResolveTypeByName(string fullName)
@@ -556,7 +575,10 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             // window's context, which is where this view lives.)
             bool currentIsDefault = string.IsNullOrEmpty(_bodyField.value)
                                  || _bodyField.value == DefaultBody
-                                 || _bodyField.value.TrimStart().StartsWith("// Phase A MVP scope: void instance methods.");
+                                 // legacy starter text — still treat as default so
+                                 // historic projects don't get an unnecessary confirm
+                                 || _bodyField.value.TrimStart().StartsWith("// Supported scope: void instance methods.")
+                                 || _bodyField.value.TrimStart().StartsWith("// Write the patch body the same way");
             if (!currentIsDefault)
             {
                 bool overwrite = UnityEditor.EditorUtility.DisplayDialog(
@@ -627,7 +649,7 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             // Carry the most recent Pull's snapshot into the spec when
             // it still belongs to *this* form identity. Stale snapshots
             // (form changed since the last Pull) are dropped instead of
-            // persisted against the wrong target. Phase E will diff
+            // persisted against the wrong target. The diff view diffs
             // OriginalBody against PatchBody to surface the user's
             // actual edits; without this hook the diff would always be
             // "the entire patch body is new", which is wrong.
@@ -686,12 +708,12 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
                 SetStatus("No patch matching that target is registered.", error: true);
                 return;
             }
-            // Phase B contract: Revert flips the spec to Inactive but
-            // *keeps* it in the registry as a draft. Removing here
-            // would delete the persisted body — the README promises
-            // users can `Load` an Inactive spec back into the form
-            // later, so the body has to survive. PatchEngine.Revert
-            // already updates spec.Status = Inactive and re-persists.
+            // Revert flips the spec to Inactive but *keeps* it in
+            // the registry as a draft. Removing here would delete
+            // the persisted body — the README promises users can
+            // `Load` an Inactive spec back into the form later, so
+            // the body has to survive. PatchEngine.Revert already
+            // updates spec.Status = Inactive and re-persists.
             PatchEngine.Revert(spec);
             SetStatus($"Reverted: {spec.TargetTypeName}.{spec.MethodName} (draft kept)", error: false);
         }
@@ -810,15 +832,15 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
 
                 block.Add(row);
 
-                // Phase B4: surface LastError as a persistent secondary
-                // line under the row so users don't have to hover for
-                // the tooltip to know why a row is red. The most common
-                // cause in Phase B is "Auto-reapply failed: …" — i.e.
-                // a domain reload happened and the patch couldn't be
-                // re-installed. Hovering still shows the full text;
-                // the inline preview is the first line only so a 100-
-                // char compile diagnostic doesn't push the row layout
-                // around.
+                // Surface LastError as a persistent secondary line
+                // under the row so users don't have to hover for the
+                // tooltip to know why a row is red. The most common
+                // cause is "Auto-reapply failed: …" — i.e. a domain
+                // reload happened and the patch couldn't be re-
+                // installed. Hovering still shows the full text;
+                // the inline preview is the first line only so a
+                // 100-char compile diagnostic doesn't push the row
+                // layout around.
                 if (s.Status == PatchStatus.Failed && !string.IsNullOrEmpty(s.LastError))
                 {
                     var firstLine = s.LastError.Split('\n')[0];

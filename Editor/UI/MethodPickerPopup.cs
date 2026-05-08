@@ -12,7 +12,7 @@ namespace RoslynRepl.Editor.UI
     /// <summary>
     /// Pop-up that lists every patchable method on a target type so the
     /// user doesn't have to remember the exact name + parameter
-    /// signature. Filters to Phase A's scope (void instance methods)
+    /// signature. Filters to the engine's scope (void instance methods)
     /// because picking a non-patchable method wastes a click — those
     /// would just fail at Apply.
     ///
@@ -57,7 +57,7 @@ namespace RoslynRepl.Editor.UI
             title.style.marginBottom = 2;
             root.Add(title);
 
-            var sub = new Label("Phase A scope: void instance methods only.");
+            var sub = new Label("Patchable scope: void instance methods only.");
             sub.style.fontSize = 10;
             sub.style.color = new StyleColor(new Color(0.55f, 0.55f, 0.55f));
             sub.style.marginBottom = 4;
@@ -69,7 +69,7 @@ namespace RoslynRepl.Editor.UI
             root.Add(_search);
 
             // Collect every declared + inherited instance method that
-            // matches the Phase A scope. Exclude property accessors
+            // matches the supported scope. Exclude property accessors
             // (`get_X`, `set_X`) — those are special-cased to mention
             // they're unsupported, and the bare `MethodInfo.IsSpecial-
             // Name` flag catches them.
@@ -80,7 +80,7 @@ namespace RoslynRepl.Editor.UI
             _methods = _targetType.GetMethods(bf)
                 .Where(m => m.ReturnType == typeof(void))
                 .Where(m => !m.IsSpecialName)            // hide getters/setters/event accessors
-                .Where(m => !m.IsGenericMethodDefinition) // hide generics — Phase A out of scope
+                .Where(m => !m.IsGenericMethodDefinition) // hide generics — the engine out of scope
                 .Where(m => !HasRefOrOut(m))             // hide ref/out — same
                 .OrderBy(m => m.Name)
                 .ThenBy(m => m.GetParameters().Length)

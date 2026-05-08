@@ -14,7 +14,7 @@ namespace RoslynRepl.Editor.Patches
 {
     /// <summary>
     /// Locates the original `.cs` source for a target method and extracts
-    /// the method body text. Used by Phase C of the Runtime Method Patch
+    /// the method body text. Used by the Runtime Method Patch
     /// feature to pre-populate the patch editor with the existing
     /// implementation so the user can edit it in place rather than write
     /// from a blank slate.
@@ -72,10 +72,10 @@ namespace RoslynRepl.Editor.Patches
                 if (match == null) continue;
                 if (match.Body == null)
                 {
-                    // Expression-bodied (`=> expr`) — Phase C MVP doesn't
+                    // Expression-bodied (`=> expr`) — we don't
                     // unwrap those. Surface a specific message rather
                     // than silently returning empty.
-                    return Fail($"{declaringType.Name}.{method.Name} is expression-bodied; Phase C MVP only extracts block-bodied methods. Edit the file to a `{{ … }}` body or write the patch from scratch.");
+                    return Fail($"{declaringType.Name}.{method.Name} is expression-bodied; only block-bodied methods can be pulled. Convert the source to a `{{ … }}` body or write the patch from scratch.");
                 }
 
                 var body = ExtractBodyInside(source, match.Body);
@@ -93,9 +93,9 @@ namespace RoslynRepl.Editor.Patches
                 (lastParseError != null ? "Last error: " + lastParseError : "Method may be auto-generated or in an assembly without source available."));
         }
 
-        // ─── Phase D file context ──────────────────────────────────
+        // ─── Source file context ──────────────────────────────────
         // Snapshot of the namespace + using directives the declaring
-        // type's `.cs` file was authored in. Phase D's compiler
+        // type's `.cs` file was authored in. the rewriter's compiler
         // wrapper uses this so a pulled body — which routinely refers
         // to same-namespace types or types covered by a file-level
         // using — can compile without forcing the user to fully
@@ -598,7 +598,7 @@ namespace RoslynRepl.Editor.Patches
         private static List<TypeDeclarationSyntax> FindMatchingTypeDeclarations(SyntaxNode root, Type declaringType)
         {
             // Build the simple-name chain Outer → Inner ignoring generics
-            // (Foo`1 → "Foo"). Phase A doesn't pull from generic methods,
+            // (Foo`1 → "Foo"). the engine doesn't pull from generic methods,
             // and reflection's `Type.Name` already drops type-arg names.
             var nameChain = new List<string>();
             for (var cur = declaringType; cur != null; cur = cur.DeclaringType)
