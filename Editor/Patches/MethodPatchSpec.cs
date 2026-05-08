@@ -93,6 +93,24 @@ namespace RoslynRepl.Editor.Patches
             Changed?.Invoke();
         }
 
+        /// <summary>
+        /// Raise <see cref="Changed"/> for callers that intentionally
+        /// mutated a live spec object in place without going through
+        /// <see cref="AddOrUpdate"/>. The use case is the auto-reapply
+        /// opt-out path, which needs to hide Active specs from the
+        /// current process (mark them Inactive in memory so the UI
+        /// shows them as off and the toolbar badge drops to zero)
+        /// while keeping the persisted desired status intact, so
+        /// flipping the menu back on re-installs the patches on the
+        /// next reload. <see cref="AddOrUpdate"/> can't do this — its
+        /// Persist call is exactly what we want to skip.
+        ///
+        /// Callers must have mutated a spec that's already in
+        /// <see cref="Specs"/>; this method only fires the event.
+        /// Persistence is left untouched.
+        /// </summary>
+        public static void NotifyInMemoryMutation() => Changed?.Invoke();
+
         public static bool Remove(string typeName, string methodName, string parameterTypes)
         {
             var key = MethodPatchSpec.Keyed(typeName, methodName, parameterTypes);

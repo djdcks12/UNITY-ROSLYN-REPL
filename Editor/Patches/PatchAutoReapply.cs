@@ -17,10 +17,14 @@ namespace RoslynRepl.Editor.Patches
     /// <see cref="AutoReapplyEnabled"/> is true (the default, to
     /// preserve historical behavior). When the toggle is off, the
     /// specs still hydrate into the registry — the user's drafts
-    /// don't disappear — but their status flips to Inactive and
-    /// no detour is registered. The user must explicitly Apply
-    /// from the UI to re-activate, which is the "explicit
-    /// confirmation" half of the issue's acceptance criterion.
+    /// don't disappear — but they're shown as Inactive in the live
+    /// process *without* persisting that demotion. The persisted
+    /// desired status stays Active, so flipping the menu back on
+    /// makes the next reload re-install them automatically. The
+    /// user can also click Apply per row to re-install during the
+    /// current session. PR review for #22 caught the alternative
+    /// (persisting the demotion) collapsing the toggle into a
+    /// one-way bulk deactivation that lost the reapply intent.
     ///
     /// Lifecycle (auto-reapply on):
     ///  1. <see cref="EditorApplication.delayCall"/> defers the
@@ -117,28 +121,52 @@ namespace RoslynRepl.Editor.Patches
 
             if (activeSpecs.Count == 0) return;
 
-            // Auto-reapply gate. When the user has opted out, we
-            // demote each Active spec to Inactive so the registry's
-            // Status field reflects what's actually installed in the
-            // process — no Harmony detour exists for any of these
-            // specs after a fresh reload, and leaving them tagged
-            // Active would be a worse lie than the original
-            // silent-reapply problem this issue is about.
+            // Auto-reapply gate. The user has opted out, so we don't
+            // install Harmony detours for any of these specs — but
+            // we deliberately do NOT persist the demotion. Mutating
+            // spec.Status in place updates the live registry view
+            // (the Patches list and the toolbar badge both refresh
+            // through PatchRegistry.Changed) while leaving the
+            // persisted desired status as Active on disk. That
+            // matters because the menu has to behave like a reload
+            // policy, not a one-way bulk deactivation:
             //
-            // The user can re-activate in two ways: flip the menu
-            // toggle back on (next reload re-installs them) or open
-            // the Patches view and click Apply on each row
-            // explicitly. The Patches list keeps the spec text so no
-            // authoring work is lost.
+            //   • toggle back on, next domain reload     → LoadFromPersistence
+            //                                              still surfaces these
+            //                                              specs as Active
+            //                                              and the auto-on
+            //                                              path re-installs.
+            //   • toggle stays off, click Apply per row  → MethodPatchView
+            //                                              routes through
+            //                                              PatchEngine.Apply,
+            //                                              which sets
+            //                                              spec.Status =
+            //                                              Active and persists
+            //                                              normally. The
+            //                                              user's explicit
+            //                                              action overrides
+            //                                              the in-memory
+            //                                              opt-out for that
+            //                                              row.
+            //   • toggle stays off, click Revert per row → spec.Status =
+            //                                              Inactive with
+            //                                              persistence. That
+            //                                              IS an explicit
+            //                                              user intent and we
+            //                                              honor it.
             if (!AutoReapplyEnabled)
             {
                 foreach (var spec in activeSpecs)
                 {
                     spec.Status = PatchStatus.Inactive;
-                    spec.LastError = "Auto-reapply is disabled — Apply manually to re-install.";
-                    PatchRegistry.AddOrUpdate(spec);
+                    spec.LastError = "Auto-reapply is off — toggle on for next reload, or click Apply to install now.";
                 }
-                Debug.Log($"[Roslyn REPL] Runtime patches: auto-reapply disabled — {activeSpecs.Count} active spec(s) demoted to inactive on reload. Re-Apply from the Patches view to re-install, or toggle '{AutoReapplyMenuPath}' back on.");
+                // Notify-only: persistence layer is intentionally
+                // bypassed. The disk still says Active for these
+                // specs; only the live process treats them as
+                // Inactive for this session.
+                PatchRegistry.NotifyInMemoryMutation();
+                Debug.Log($"[Roslyn REPL] Runtime patches: auto-reapply is off — {activeSpecs.Count} active spec(s) hidden in this session (persisted Active intent preserved). Toggle '{AutoReapplyMenuPath}' on for next reload, or click Apply per row to install now.");
                 return;
             }
 
