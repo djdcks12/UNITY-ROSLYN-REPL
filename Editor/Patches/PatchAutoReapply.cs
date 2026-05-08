@@ -83,10 +83,60 @@ namespace RoslynRepl.Editor.Patches
             get => EditorPrefs.GetBool(PrefsKey_AutoReapplyEnabled, true);
             set
             {
+                bool was = EditorPrefs.GetBool(PrefsKey_AutoReapplyEnabled, true);
                 EditorPrefs.SetBool(PrefsKey_AutoReapplyEnabled, value);
                 Menu.SetChecked(AutoReapplyMenuPath, value);
+
+                // OFF → ON transition: install the dormant specs
+                // immediately so the toggle tooltip + Patches-tab
+                // copy ("toggle this back on … to install now") is
+                // honest. The earlier shape only flipped the pref
+                // and waited for the next domain reload's Bootstrap,
+                // which left the row rendering as "(auto-off)" with
+                // the toggle on — exactly the contradiction the PR
+                // review caught. Apply failures are recorded as
+                // Failed status the same way Bootstrap's auto-on
+                // path handles them. SettingsChanged fires last so
+                // UI subscribers see the updated dormancy state.
+                if (!was && value)
+                {
+                    ReapplyDormantSpecs("Toggle on");
+                }
+
                 SettingsChanged?.Invoke();
             }
+        }
+
+        private static void ReapplyDormantSpecs(string trigger)
+        {
+            var dormantSpecs = PatchRegistry.Specs
+                .Where(s => s != null
+                         && s.Status == PatchStatus.Active
+                         && PatchRegistry.IsSessionDormant(s.Key))
+                .ToList();
+            if (dormantSpecs.Count == 0) return;
+
+            int ok = 0, failed = 0;
+            foreach (var spec in dormantSpecs)
+            {
+                try
+                {
+                    PatchEngine.Apply(spec);
+                    // Apply ends with PatchRegistry.AddOrUpdate,
+                    // which clears the dormancy mark for this key
+                    // — the spec is now genuinely live.
+                    ok++;
+                }
+                catch (Exception ex)
+                {
+                    spec.Status = PatchStatus.Failed;
+                    spec.LastError = $"{trigger} reapply failed: " + ex.Message;
+                    PatchRegistry.AddOrUpdate(spec);
+                    failed++;
+                    Debug.LogWarning($"[Roslyn REPL] {trigger} reapply failed for {spec.TargetTypeName}.{spec.MethodName}: {ex.Message}");
+                }
+            }
+            Debug.Log($"[Roslyn REPL] Runtime patches: {trigger.ToLowerInvariant()} re-installed {ok} dormant patch(es), {failed} failed.");
         }
 
         static PatchAutoReapply()
