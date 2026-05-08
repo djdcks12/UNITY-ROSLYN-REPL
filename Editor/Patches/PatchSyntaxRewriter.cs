@@ -417,14 +417,19 @@ namespace RoslynRepl.Editor.Patches
         }
 
         // ─── Compound-write context ────────────────────────────────
-        // `hp += 5` → `__set("hp", __get<int>("hp") + (5))`.
-        // The set/get helper choice (instance / external instance /
-        // static) mirrors the read+write pair: external `obj.x += d`
-        // becomes `__setOn(obj, "x", __getOn<T>(obj, "x") + (d))`,
-        // and `Type.x += d` becomes
-        // `__setStatic(typeof(Type), "x", __getStatic<T>(typeof(Type), "x") + (d))`.
+        // `hp += 5` → `__mutate<int>("hp", __cur => __cur + (5))`.
+        // The mutator delegate captures rhs through closure; the
+        // helper reads, applies the binary op once via the lambda,
+        // and writes back. Compared to the naive `set(name, get(name)
+        // op rhs)` rewrite, this passes the receiver / name / type
+        // through the helper exactly once — important for external
+        // members (`Manager.Instance.hp += d`) where evaluating
+        // `Manager.Instance` twice could call a side-effecting
+        // property accessor twice or even read and write different
+        // objects.
+        //
         // Right-hand side is wrapped in parens so operator precedence
-        // (`hp += 1 << 2`) doesn't shift inside the helper call.
+        // (`hp += 1 << 2`) doesn't shift inside the lambda body.
         private static bool TryStageCompoundWrite(
             AssignmentExpressionSyntax assignment,
             ExpressionSyntax accessLhs,
@@ -449,15 +454,15 @@ namespace RoslynRepl.Editor.Patches
                 if (kind == SelfMemberKind.Instance)
                 {
                     call = SyntaxFactory.ParseExpression(
-                        $"__set(\"{name}\", __get<{typeArg}>(\"{name}\") {binOp} ({rhsText}))");
-                    notes.Add($"{name} ({assignment.OperatorToken.Text}) → __set/__get");
+                        $"__mutate<{typeArg}>(\"{name}\", __cur => __cur {binOp} ({rhsText}))");
+                    notes.Add($"{name} ({assignment.OperatorToken.Text}) → __mutate");
                 }
                 else
                 {
                     var typeRef = TypeRef(declaringType);
                     call = SyntaxFactory.ParseExpression(
-                        $"__setStatic(typeof({typeRef}), \"{name}\", __getStatic<{typeArg}>(typeof({typeRef}), \"{name}\") {binOp} ({rhsText}))");
-                    notes.Add($"{name} (static {assignment.OperatorToken.Text} on self) → __setStatic/__getStatic");
+                        $"__mutateStatic<{typeArg}>(typeof({typeRef}), \"{name}\", __cur => __cur {binOp} ({rhsText}))");
+                    notes.Add($"{name} (static {assignment.OperatorToken.Text} on self) → __mutateStatic");
                 }
                 replacements[assignment] = call.WithTriviaFrom(assignment);
                 return true;
@@ -476,9 +481,9 @@ namespace RoslynRepl.Editor.Patches
                     var typeArg = TypeRef(t);
                     var typeRef = nts.ToDisplayString();
                     var call = SyntaxFactory.ParseExpression(
-                        $"__setStatic(typeof({typeRef}), \"{memberName}\", __getStatic<{typeArg}>(typeof({typeRef}), \"{memberName}\") {binOp} ({rhsText}))");
+                        $"__mutateStatic<{typeArg}>(typeof({typeRef}), \"{memberName}\", __cur => __cur {binOp} ({rhsText}))");
                     replacements[assignment] = call.WithTriviaFrom(assignment);
-                    notes.Add($"{nts.Name}.{memberName} (static {assignment.OperatorToken.Text}) → __setStatic/__getStatic");
+                    notes.Add($"{nts.Name}.{memberName} (static {assignment.OperatorToken.Text}) → __mutateStatic");
                     return true;
                 }
 
@@ -491,9 +496,9 @@ namespace RoslynRepl.Editor.Patches
                 string typeArg2 = memberT != null ? TypeRef(memberT) : "object";
 
                 var call2 = SyntaxFactory.ParseExpression(
-                    $"__setOn({lhsText}, \"{memberName}\", __getOn<{typeArg2}>({lhsText}, \"{memberName}\") {binOp} ({rhsText}))");
+                    $"__mutateOn<{typeArg2}>({lhsText}, \"{memberName}\", __cur => __cur {binOp} ({rhsText}))");
                 replacements[assignment] = call2.WithTriviaFrom(assignment);
-                notes.Add($"{lhsText.Trim()}.{memberName} ({assignment.OperatorToken.Text}) → __setOn/__getOn");
+                notes.Add($"{lhsText.Trim()}.{memberName} ({assignment.OperatorToken.Text}) → __mutateOn");
                 return true;
             }
 
@@ -501,12 +506,14 @@ namespace RoslynRepl.Editor.Patches
         }
 
         // ─── Increment context ─────────────────────────────────────
-        // `hp++` / `++hp` / `hp--` / `--hp` → set(hp, get(hp) ± 1).
-        // Statement-context increments are exact under this rewrite;
-        // expression-context postfix (`var x = hp++;`) is documented
-        // as Phase D's "edge case left for the user to spell with
-        // helpers" because preserving postfix semantics would require
-        // a temp.
+        // `hp++` / `++hp` / `hp--` / `--hp` → __mutate<T>("hp", c => c ± 1).
+        // Same single-evaluation reasoning as compound assignment;
+        // the receiver / type / name go through the mutate helper
+        // exactly once. Statement-context increments are exact;
+        // expression-context postfix (`var x = hp++;`) reads as the
+        // post-increment value rather than the pre-increment one
+        // (documented Phase D limitation — the rewriter doesn't
+        // synthesize a temp).
         private static bool TryStageIncrement(
             ExpressionSyntax unaryNode,
             ExpressionSyntax accessOperand,
@@ -531,15 +538,15 @@ namespace RoslynRepl.Editor.Patches
                 if (kind == SelfMemberKind.Instance)
                 {
                     call = SyntaxFactory.ParseExpression(
-                        $"__set(\"{name}\", __get<{typeArg}>(\"{name}\") {op} 1)");
-                    notes.Add($"{name} ({(op == "+" ? "++" : "--")}) → __set/__get");
+                        $"__mutate<{typeArg}>(\"{name}\", __cur => __cur {op} 1)");
+                    notes.Add($"{name} ({(op == "+" ? "++" : "--")}) → __mutate");
                 }
                 else
                 {
                     var typeRef = TypeRef(declaringType);
                     call = SyntaxFactory.ParseExpression(
-                        $"__setStatic(typeof({typeRef}), \"{name}\", __getStatic<{typeArg}>(typeof({typeRef}), \"{name}\") {op} 1)");
-                    notes.Add($"{name} ({(op == "+" ? "++" : "--")} static on self) → __setStatic/__getStatic");
+                        $"__mutateStatic<{typeArg}>(typeof({typeRef}), \"{name}\", __cur => __cur {op} 1)");
+                    notes.Add($"{name} ({(op == "+" ? "++" : "--")} static on self) → __mutateStatic");
                 }
                 replacements[unaryNode] = call.WithTriviaFrom(unaryNode);
                 return true;
@@ -558,9 +565,9 @@ namespace RoslynRepl.Editor.Patches
                     var typeArg = TypeRef(t);
                     var typeRef = nts.ToDisplayString();
                     var call = SyntaxFactory.ParseExpression(
-                        $"__setStatic(typeof({typeRef}), \"{memberName}\", __getStatic<{typeArg}>(typeof({typeRef}), \"{memberName}\") {op} 1)");
+                        $"__mutateStatic<{typeArg}>(typeof({typeRef}), \"{memberName}\", __cur => __cur {op} 1)");
                     replacements[unaryNode] = call.WithTriviaFrom(unaryNode);
-                    notes.Add($"{nts.Name}.{memberName} ({(op == "+" ? "++" : "--")} static) → __setStatic/__getStatic");
+                    notes.Add($"{nts.Name}.{memberName} ({(op == "+" ? "++" : "--")} static) → __mutateStatic");
                     return true;
                 }
 
@@ -573,9 +580,9 @@ namespace RoslynRepl.Editor.Patches
                 string typeArg2 = memberT != null ? TypeRef(memberT) : "object";
 
                 var call2 = SyntaxFactory.ParseExpression(
-                    $"__setOn({lhsText}, \"{memberName}\", __getOn<{typeArg2}>({lhsText}, \"{memberName}\") {op} 1)");
+                    $"__mutateOn<{typeArg2}>({lhsText}, \"{memberName}\", __cur => __cur {op} 1)");
                 replacements[unaryNode] = call2.WithTriviaFrom(unaryNode);
-                notes.Add($"{lhsText.Trim()}.{memberName} ({(op == "+" ? "++" : "--")}) → __setOn/__getOn");
+                notes.Add($"{lhsText.Trim()}.{memberName} ({(op == "+" ? "++" : "--")}) → __mutateOn");
                 return true;
             }
 

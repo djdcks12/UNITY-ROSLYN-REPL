@@ -515,6 +515,44 @@ namespace RoslynRepl.Editor.Patches
             sb.AppendLine("            return __m.Invoke(instance, args);");
             sb.AppendLine("        }");
 
+            // ─── Phase D mutate helpers: single-evaluation read-modify-
+            // write for compound assignments and ++/--. The naive
+            // rewrite for `obj.X += amount` was
+            //   __setOn(obj, "X", __getOn<T>(obj, "X") + (amount))
+            // which evaluates `obj` twice — broken for receivers with
+            // side effects (singleton properties that build state, lazy
+            // initializers, anything that can return a different
+            // instance on the second call). These helpers take the
+            // mutator as a delegate so the receiver / type / name is
+            // captured exactly once and the rewriter can pass the live
+            // value through __cur to the binary op.
+            sb.AppendLine();
+            sb.AppendLine("        T __mutate<T>(string name, System.Func<T, T> fn)");
+            sb.AppendLine("        {");
+            sb.AppendLine("            var __cur = __get<T>(name);");
+            sb.AppendLine("            var __next = fn(__cur);");
+            sb.AppendLine("            __set(name, __next);");
+            sb.AppendLine("            return __next;");
+            sb.AppendLine("        }");
+
+            sb.AppendLine("        T __mutateOn<T>(object target, string name, System.Func<T, T> fn)");
+            sb.AppendLine("        {");
+            sb.AppendLine("            if (target == null) throw new System.ArgumentNullException(nameof(target));");
+            sb.AppendLine("            var __cur = __getOn<T>(target, name);");
+            sb.AppendLine("            var __next = fn(__cur);");
+            sb.AppendLine("            __setOn(target, name, __next);");
+            sb.AppendLine("            return __next;");
+            sb.AppendLine("        }");
+
+            sb.AppendLine("        T __mutateStatic<T>(System.Type type, string name, System.Func<T, T> fn)");
+            sb.AppendLine("        {");
+            sb.AppendLine("            if (type == null) throw new System.ArgumentNullException(nameof(type));");
+            sb.AppendLine("            var __cur = __getStatic<T>(type, name);");
+            sb.AppendLine("            var __next = fn(__cur);");
+            sb.AppendLine("            __setStatic(type, name, __next);");
+            sb.AppendLine("            return __next;");
+            sb.AppendLine("        }");
+
             sb.AppendLine();
             // Wrap the user body in a void local function. The Prefix
             // method itself returns bool (Harmony's "skip original"
