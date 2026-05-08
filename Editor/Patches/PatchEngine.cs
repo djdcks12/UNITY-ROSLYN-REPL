@@ -485,6 +485,34 @@ namespace RoslynRepl.Editor.Patches
             sb.AppendLine("            return __r is T __cast ? __cast : default;");
             sb.AppendLine("        }");
 
+            // ─── Phase D explicit-generic method call helpers ──────
+            // Same shape as __call / __callOn / __callStatic but pass
+            // a typeArgs array along so the helper can call
+            // MakeGenericMethod before invoke. Used when the user
+            // wrote `Cache.GetPrivate<Foo>(...)` — the rewriter sees
+            // a GenericNameSyntax and emits the typeArgs as
+            // `new System.Type[] { typeof(Foo), ... }`.
+            sb.AppendLine("        T __callG<T>(string name, System.Type[] typeArgs, params object[] args)");
+            sb.AppendLine("        {");
+            sb.AppendLine($"            var __t = __instance != null ? __instance.GetType() : typeof({declType});");
+            sb.AppendLine("            var __r = __InvokeReflectiveGeneric(__t, __instance, name, typeArgs, args);");
+            sb.AppendLine("            return __r is T __cast ? __cast : default;");
+            sb.AppendLine("        }");
+
+            sb.AppendLine("        T __callGOn<T>(object target, string name, System.Type[] typeArgs, params object[] args)");
+            sb.AppendLine("        {");
+            sb.AppendLine("            if (target == null) throw new System.ArgumentNullException(nameof(target));");
+            sb.AppendLine("            var __r = __InvokeReflectiveGeneric(target.GetType(), target, name, typeArgs, args);");
+            sb.AppendLine("            return __r is T __cast ? __cast : default;");
+            sb.AppendLine("        }");
+
+            sb.AppendLine("        T __callGStatic<T>(System.Type type, string name, System.Type[] typeArgs, params object[] args)");
+            sb.AppendLine("        {");
+            sb.AppendLine("            if (type == null) throw new System.ArgumentNullException(nameof(type));");
+            sb.AppendLine("            var __r = __InvokeReflectiveGeneric(type, null, name, typeArgs, args);");
+            sb.AppendLine("            return __r is T __cast ? __cast : default;");
+            sb.AppendLine("        }");
+
             // Shared invoke pipeline for __call / __callOn / __callStatic.
             // Picks an overload by argument count first (so user code with
             // params doesn't accidentally bind to a different-arity
@@ -512,6 +540,38 @@ namespace RoslynRepl.Editor.Patches
             sb.AppendLine("                for (int __i = 0; __i < args.Length; __i++) __argTypes[__i] = args[__i] == null ? typeof(object) : args[__i].GetType();");
             sb.AppendLine("                __m = type.GetMethod(name, __bf, null, __argTypes, null) ?? __ms[0];");
             sb.AppendLine("            }");
+            sb.AppendLine("            return __m.Invoke(instance, args);");
+            sb.AppendLine("        }");
+
+            // Generic method invocation. Picks an arity- *and*
+            // generic-arity-matching open generic definition, calls
+            // MakeGenericMethod with the user-supplied typeArgs, and
+            // invokes. Falls back to picking the first matching
+            // candidate when a runtime arg-type tie-break would need
+            // post-substitution comparisons we don't try to
+            // approximate here — overload resolution after
+            // MakeGenericMethod is good enough for the common case.
+            sb.AppendLine("        object __InvokeReflectiveGeneric(System.Type type, object instance, string name, System.Type[] typeArgs, object[] args)");
+            sb.AppendLine("        {");
+            sb.AppendLine("            var __bf = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.FlattenHierarchy;");
+            sb.AppendLine("            args = args ?? new object[0];");
+            sb.AppendLine("            typeArgs = typeArgs ?? new System.Type[0];");
+            sb.AppendLine("            var __ms = new System.Collections.Generic.List<System.Reflection.MethodInfo>();");
+            sb.AppendLine("            foreach (var __mm in type.GetMethods(__bf))");
+            sb.AppendLine("            {");
+            sb.AppendLine("                if (__mm.Name != name) continue;");
+            sb.AppendLine("                if (__mm.GetParameters().Length != args.Length) continue;");
+            sb.AppendLine("                if (typeArgs.Length > 0)");
+            sb.AppendLine("                {");
+            sb.AppendLine("                    if (!__mm.IsGenericMethodDefinition) continue;");
+            sb.AppendLine("                    if (__mm.GetGenericArguments().Length != typeArgs.Length) continue;");
+            sb.AppendLine("                }");
+            sb.AppendLine("                else if (__mm.IsGenericMethodDefinition) continue;");
+            sb.AppendLine("                __ms.Add(__mm);");
+            sb.AppendLine("            }");
+            sb.AppendLine("            if (__ms.Count == 0) throw new System.InvalidOperationException(\"Method '\" + name + \"<\" + typeArgs.Length + \">(\" + args.Length + \" args)' not found on \" + type.Name);");
+            sb.AppendLine("            var __m = __ms[0];");
+            sb.AppendLine("            if (typeArgs.Length > 0 && __m.IsGenericMethodDefinition) __m = __m.MakeGenericMethod(typeArgs);");
             sb.AppendLine("            return __m.Invoke(instance, args);");
             sb.AppendLine("        }");
 

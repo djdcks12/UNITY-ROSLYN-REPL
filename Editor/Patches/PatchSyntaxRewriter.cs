@@ -233,19 +233,27 @@ namespace RoslynRepl.Editor.Patches
         }
 
         // The "smallest expression for this access" — IdentifierName
-        // (`hp`), MemberAccessExpression (`x.hp`, `Type.X`), or null
-        // when the diagnostic sits on something we don't rewrite
-        // (e.g., a missing using directive at the top of the file).
+        // (`hp`), GenericName (`GetCache<Foo>`), MemberAccessExpression
+        // (`x.hp`, `Type.X`, `obj.GetCache<Foo>`), or null when the
+        // diagnostic sits on something we don't rewrite (e.g., a
+        // missing using directive at the top of the file).
         private static ExpressionSyntax NormalizeAccess(SyntaxNode node)
         {
             // If the diagnostic landed inside the ".name" half of a
-            // MemberAccessExpression, surface the whole expression
-            // (we need both halves to construct the helper call).
+            // MemberAccessExpression (whether IdentifierName or
+            // GenericName), surface the whole expression — we need
+            // both halves to construct the helper call.
             if (node is IdentifierNameSyntax id)
             {
                 if (id.Parent is MemberAccessExpressionSyntax ma && ma.Name == id)
                     return ma;
                 return id;
+            }
+            if (node is GenericNameSyntax gn)
+            {
+                if (gn.Parent is MemberAccessExpressionSyntax mag && mag.Name == gn)
+                    return mag;
+                return gn;
             }
             if (node is MemberAccessExpressionSyntax mae)
                 return mae;
@@ -643,13 +651,23 @@ namespace RoslynRepl.Editor.Patches
         }
 
         // ─── Invocation context ────────────────────────────────────
-        // `Foo(args)` (unqualified) → `__call<R>("Foo", args)`.
-        // `obj.PrivateMethod(args)` → `__callOn<R>(obj, "PrivateMethod", args)`.
-        // `Type.PrivateStatic(args)` → `__callStatic<R>(typeof(Type), "PrivateStatic", args)`.
+        // Plain (non-generic):
+        //   `Foo(args)` (unqualified) → `__call<R>("Foo", args)`.
+        //   `obj.PrivateMethod(args)` → `__callOn<R>(obj, "PrivateMethod", args)`.
+        //   `Type.PrivateStatic(args)` → `__callStatic<R>(typeof(Type), "PrivateStatic", args)`.
+        //
+        // Explicit generics (`GetCache<Foo>(...)`, `obj.GetCache<Foo>(...)`,
+        //   `Type.MakeFoo<Bar>(...)`):
+        //   → `__callG*<R>(... , new System.Type[] { typeof(Foo), ... }, args)`.
+        //   The type arguments come straight from the user's syntax, so
+        //   `typeof(...)` rendering uses the original tokens (handles
+        //   nested generics, qualified names, custom usings).
+        //
         // R is the method's return type if we can find a matching
-        // overload by name + arity (an exact arg-type match would
-        // require a SemanticModel-side reflection and we want this to
-        // work even when Roslyn couldn't bind anything). Falls back to
+        // overload by name + arity (+ generic arity for the generic
+        // path). When the return type is itself a generic parameter
+        // — `T GetCache<T>()` — we substitute the user's matching
+        // type argument so the helper's `<R>` lines up. Falls back to
         // `object` for void / unknown returns; that matches Phase A's
         // existing __call<T> behavior of returning default(T) when the
         // boxed result isn't assignable.
@@ -664,77 +682,134 @@ namespace RoslynRepl.Editor.Patches
             var argsList = invocation.ArgumentList.Arguments;
             int arity = argsList.Count;
             var argsText = string.Join(", ", argsList.Select(a => a.ToFullString()));
+            string argsBlob = arity == 0 ? string.Empty : ", " + argsText;
 
-            if (accessExpr is IdentifierNameSyntax id)
+            // Pull generic info off whichever shape the access takes.
+            // SimpleNameSyntax covers both IdentifierName ("Foo") and
+            // GenericName ("Foo<X, Y>"); MemberAccess.Name is always a
+            // SimpleNameSyntax in the same two flavors.
+            SimpleNameSyntax simpleName = null;
+            ExpressionSyntax lhsForMember = null; // null when unqualified
+            if (accessExpr is SimpleNameSyntax sn1)
             {
-                var name = id.Identifier.ValueText;
-                // Try instance methods first, then static fall-back —
-                // mirrors the field/property logic in
-                // ClassifySelfMember. Source pulled from an instance
-                // method can call private static helpers without a
-                // type qualifier (`ResetCache();`); without this
-                // fall-back those bodies leak out as Unhandled CS0103.
-                var ret = FindMethodReturnType(declaringType, name, arity, includeStatic: false);
-                if (ret != null)
+                simpleName = sn1;
+            }
+            else if (accessExpr is MemberAccessExpressionSyntax ma)
+            {
+                simpleName = ma.Name;
+                lhsForMember = ma.Expression;
+            }
+            if (simpleName == null) return false;
+
+            string memberName = simpleName.Identifier.ValueText;
+            int genericArity = 0;
+            string typeArgsArrayExpr = null;     // C# expression for new System.Type[] {...}
+            TypeSyntax[] genericArgSyntaxes = null;
+            if (simpleName is GenericNameSyntax gn)
+            {
+                var gargs = gn.TypeArgumentList.Arguments;
+                genericArity = gargs.Count;
+                genericArgSyntaxes = gargs.ToArray();
+                typeArgsArrayExpr = "new System.Type[] { "
+                    + string.Join(", ", gargs.Select(a => $"typeof({a.ToFullString().Trim()})"))
+                    + " }";
+            }
+
+            // Unqualified — try instance, then static fall-back on
+            // the declaring type.
+            if (lhsForMember == null)
+            {
+                var minfo = FindMethodInfo(declaringType, memberName, arity, includeStatic: false, staticOnly: false, genericArity: genericArity);
+                if (minfo != null)
                 {
-                    var typeArg = TypeRef(ret);
-                    var argsBlob = arity == 0 ? string.Empty : ", " + argsText;
-                    var call = SyntaxFactory.ParseExpression($"__call<{typeArg}>(\"{name}\"{argsBlob})");
-                    replacements[invocation] = call.WithTriviaFrom(invocation);
-                    notes.Add($"{name}({arity} args) → __call");
+                    var rArg = ReturnTypeArg(minfo, genericArgSyntaxes);
+                    string call;
+                    if (genericArity == 0)
+                    {
+                        call = $"__call<{rArg}>(\"{memberName}\"{argsBlob})";
+                        notes.Add($"{memberName}({arity} args) → __call");
+                    }
+                    else
+                    {
+                        call = $"__callG<{rArg}>(\"{memberName}\", {typeArgsArrayExpr}{argsBlob})";
+                        notes.Add($"{memberName}<{genericArity}>({arity} args) → __callG");
+                    }
+                    replacements[invocation] = SyntaxFactory.ParseExpression(call).WithTriviaFrom(invocation);
                     return true;
                 }
-                ret = FindMethodReturnType(declaringType, name, arity, includeStatic: true, staticOnly: true);
-                if (ret != null)
+                minfo = FindMethodInfo(declaringType, memberName, arity, includeStatic: true, staticOnly: true, genericArity: genericArity);
+                if (minfo != null)
                 {
-                    var typeArg = TypeRef(ret);
+                    var rArg = ReturnTypeArg(minfo, genericArgSyntaxes);
                     var typeRef = TypeRef(declaringType);
-                    var argsBlob = arity == 0 ? string.Empty : ", " + argsText;
-                    var call = SyntaxFactory.ParseExpression(
-                        $"__callStatic<{typeArg}>(typeof({typeRef}), \"{name}\"{argsBlob})");
-                    replacements[invocation] = call.WithTriviaFrom(invocation);
-                    notes.Add($"{name}({arity} args, static on self) → __callStatic");
+                    string call;
+                    if (genericArity == 0)
+                    {
+                        call = $"__callStatic<{rArg}>(typeof({typeRef}), \"{memberName}\"{argsBlob})";
+                        notes.Add($"{memberName}({arity} args, static on self) → __callStatic");
+                    }
+                    else
+                    {
+                        call = $"__callGStatic<{rArg}>(typeof({typeRef}), \"{memberName}\", {typeArgsArrayExpr}{argsBlob})";
+                        notes.Add($"{memberName}<{genericArity}>({arity} args, static on self) → __callGStatic");
+                    }
+                    replacements[invocation] = SyntaxFactory.ParseExpression(call).WithTriviaFrom(invocation);
                     return true;
                 }
                 return false;
             }
 
-            if (accessExpr is MemberAccessExpressionSyntax ma)
+            // Qualified — `Type.foo(...)` (static) or `obj.foo(...)`
+            // (instance). SemanticModel tells us which by binding the
+            // LHS; if it resolves to a type symbol the call is static.
+            var lhsSymbol = model.GetSymbolInfo(lhsForMember).Symbol;
+            if (lhsSymbol is INamedTypeSymbol nts)
             {
-                var memberName = ma.Name.Identifier.ValueText;
-                var lhsSymbol = model.GetSymbolInfo(ma.Expression).Symbol;
-                if (lhsSymbol is INamedTypeSymbol nts)
+                var staticType = ResolveTypeFromSymbol(nts);
+                if (staticType == null) return false;
+                var minfo = FindMethodInfo(staticType, memberName, arity, includeStatic: true, staticOnly: true, genericArity: genericArity);
+                if (minfo == null) return false;
+                var rArg = ReturnTypeArg(minfo, genericArgSyntaxes);
+                var typeRef = nts.ToDisplayString();
+                string call;
+                if (genericArity == 0)
                 {
-                    var staticType = ResolveTypeFromSymbol(nts);
-                    if (staticType == null) return false;
-                    var ret = FindMethodReturnType(staticType, memberName, arity, includeStatic: true, staticOnly: true);
-                    if (ret == null) return false;
-                    var typeArg = TypeRef(ret);
-                    var typeRef = nts.ToDisplayString();
-                    var argsBlob = arity == 0 ? string.Empty : ", " + argsText;
-                    var call = SyntaxFactory.ParseExpression(
-                        $"__callStatic<{typeArg}>(typeof({typeRef}), \"{memberName}\"{argsBlob})");
-                    replacements[invocation] = call.WithTriviaFrom(invocation);
+                    call = $"__callStatic<{rArg}>(typeof({typeRef}), \"{memberName}\"{argsBlob})";
                     notes.Add($"{nts.Name}.{memberName}({arity} args) → __callStatic");
-                    return true;
                 }
-
-                var lhsText = ma.Expression.ToFullString();
-                var lhsTypeInfo = model.GetTypeInfo(ma.Expression);
-                Type lhsType = ResolveTypeFromSymbol(lhsTypeInfo.Type);
-                Type ret2 = lhsType != null
-                    ? FindMethodReturnType(lhsType, memberName, arity, includeStatic: false)
-                    : null;
-                string typeArg2 = ret2 != null ? TypeRef(ret2) : "object";
-                var argsBlob2 = arity == 0 ? string.Empty : ", " + argsText;
-                var call2 = SyntaxFactory.ParseExpression(
-                    $"__callOn<{typeArg2}>({lhsText}, \"{memberName}\"{argsBlob2})");
-                replacements[invocation] = call2.WithTriviaFrom(invocation);
-                notes.Add($"{lhsText.Trim()}.{memberName}({arity} args) → __callOn");
+                else
+                {
+                    call = $"__callGStatic<{rArg}>(typeof({typeRef}), \"{memberName}\", {typeArgsArrayExpr}{argsBlob})";
+                    notes.Add($"{nts.Name}.{memberName}<{genericArity}>({arity} args) → __callGStatic");
+                }
+                replacements[invocation] = SyntaxFactory.ParseExpression(call).WithTriviaFrom(invocation);
                 return true;
             }
 
-            return false;
+            // External instance — `obj.foo(...)`. We can't always
+            // resolve the receiver's runtime type at compile time
+            // (CS0122/CS1061 paths often leave TypeInfo partial), so
+            // a missing minfo just means "use object as <R>".
+            var lhsText = lhsForMember.ToFullString();
+            var lhsTypeInfo = model.GetTypeInfo(lhsForMember);
+            Type lhsType = ResolveTypeFromSymbol(lhsTypeInfo.Type);
+            MethodInfo extMinfo = lhsType != null
+                ? FindMethodInfo(lhsType, memberName, arity, includeStatic: false, staticOnly: false, genericArity: genericArity)
+                : null;
+            string extRArg = ReturnTypeArg(extMinfo, genericArgSyntaxes);
+            string extCall;
+            if (genericArity == 0)
+            {
+                extCall = $"__callOn<{extRArg}>({lhsText}, \"{memberName}\"{argsBlob})";
+                notes.Add($"{lhsText.Trim()}.{memberName}({arity} args) → __callOn");
+            }
+            else
+            {
+                extCall = $"__callGOn<{extRArg}>({lhsText}, \"{memberName}\", {typeArgsArrayExpr}{argsBlob})";
+                notes.Add($"{lhsText.Trim()}.{memberName}<{genericArity}>({arity} args) → __callGOn");
+            }
+            replacements[invocation] = SyntaxFactory.ParseExpression(extCall).WithTriviaFrom(invocation);
+            return true;
         }
 
         // Map `+=` etc. to the binary operator. Returns null for
@@ -759,18 +834,19 @@ namespace RoslynRepl.Editor.Patches
             }
         }
 
-        // Find a method by name + arg count and return its declared
-        // return type. Picks the first arity-matching overload — we
-        // can't bind by argument types statically here, so the helper
-        // does the runtime tie-breaking. This is good enough for the
-        // generic-arg decision; the helper itself re-resolves the
-        // overload at invoke time.
-        private static Type FindMethodReturnType(
+        // Find a method by name + arity (+ generic arity) and return
+        // the matching MethodInfo. Picks the first matching overload
+        // — we can't bind by argument types statically here, so the
+        // helper does the runtime tie-breaking. The MethodInfo is
+        // returned (not just the return type) so the caller can read
+        // generic parameters for type-argument substitution.
+        private static MethodInfo FindMethodInfo(
             Type t,
             string name,
             int arity,
             bool includeStatic,
-            bool staticOnly = false)
+            bool staticOnly = false,
+            int genericArity = 0)
         {
             BindingFlags bf = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.FlattenHierarchy;
             if (!staticOnly) bf |= BindingFlags.Instance;
@@ -778,9 +854,51 @@ namespace RoslynRepl.Editor.Patches
 
             foreach (var m in t.GetMethods(bf))
             {
-                if (m.Name == name && m.GetParameters().Length == arity) return m.ReturnType;
+                if (m.Name != name) continue;
+                if (m.GetParameters().Length != arity) continue;
+                if (genericArity > 0)
+                {
+                    if (!m.IsGenericMethodDefinition) continue;
+                    if (m.GetGenericArguments().Length != genericArity) continue;
+                }
+                else if (m.IsGenericMethodDefinition) continue;
+                return m;
             }
             return null;
+        }
+
+        // Decide what to put inside `<...>` of the helper invocation.
+        //
+        // - When `m` is null, the rewriter couldn't find a matching
+        //   method (typical for external instance access on a type
+        //   we can't resolve at rewrite time). Default to `object`
+        //   and let the helper return default(T).
+        //
+        // - When `m`'s return type is concrete (`int`, `Foo`,
+        //   `List<int>`), render it via TypeRef — same as a non-
+        //   generic call.
+        //
+        // - When `m`'s return type is itself a generic parameter
+        //   (`T GetCache<T>()`), substitute the matching user-supplied
+        //   type argument syntax. We index the method's generic
+        //   parameters and use the user's TypeSyntax at the same
+        //   index, ToFullString'd. That covers the canonical
+        //   `T Foo<T>()` shape; for `int Foo<T>()` (return type
+        //   independent of T) we fall through to TypeRef on the
+        //   concrete return type.
+        private static string ReturnTypeArg(MethodInfo m, TypeSyntax[] genericArgSyntaxes)
+        {
+            if (m == null) return "object";
+            var ret = m.ReturnType;
+            if (ret == typeof(void)) return "object";
+            if (ret.IsGenericParameter && genericArgSyntaxes != null && genericArgSyntaxes.Length > 0)
+            {
+                var typeParams = m.GetGenericArguments();
+                int idx = Array.IndexOf(typeParams, ret);
+                if (idx >= 0 && idx < genericArgSyntaxes.Length)
+                    return genericArgSyntaxes[idx].ToFullString().Trim();
+            }
+            return TypeRef(ret);
         }
 
         // ─── Helpers ──────────────────────────────────────────────

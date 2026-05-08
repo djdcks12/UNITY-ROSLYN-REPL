@@ -534,7 +534,7 @@ When the rewriter fires, the Console gets a single summary line: `[Roslyn REPL] 
 Phase D limitations:
 - `async` / `await` in patch bodies isn't rewritten.
 - Expression-context postfix `++` / `--` (`var x = hp++;`) is exact for **statements** only — used as an expression, the patched value reads as the post-increment value rather than the pre-increment one.
-- Generic method type inference isn't auto-rewritten — call private generics with explicit type arguments (`GetCache<Foo>(...)`).
+- Generic method type inference isn't auto-rewritten, but **explicit-argument generic calls work**: `Cache.Instance.GetPrivate<Foo>(...)`, `MyType.MakeFor<Bar>(...)`, unqualified `Helper<Baz>(...)`. The rewriter routes those through `__callG` / `__callGOn` / `__callGStatic`, which reflectively `MakeGenericMethod(...)` before invoking. Type-inferred form (`Cache.Instance.GetPrivate(...)` letting the compiler pick `T`) still requires the explicit `<...>` since the helpers can't reproduce the inference path.
 
 ### Helpers available inside a patch body
 
