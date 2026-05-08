@@ -80,7 +80,7 @@ namespace RoslynRepl.Editor.Patches
             // file-level usings (aliases, project namespaces). Falls
             // back to "no namespace, standard usings only" when the
             // source can't be located.
-            var fileContext = PatchSourcePuller.GetDeclaringFileContext(target.DeclaringType);
+            var fileContext = PatchSourcePuller.GetDeclaringFileContext(target);
             var className = "__ReplPatch_" + Guid.NewGuid().ToString("N").Substring(0, 8);
             var source = PatchCodeGenerator.Generate(spec, target, className, fileContext);
             var asm = CompileToAssembly(source, target.DeclaringType, spec.Key);

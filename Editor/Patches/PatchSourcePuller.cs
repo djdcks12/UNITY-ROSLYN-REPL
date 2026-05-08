@@ -127,47 +127,126 @@ namespace RoslynRepl.Editor.Patches
             public List<string> NamespaceScopedUsings = new();  // usings from namespaces enclosing the target
         }
 
-        public static FileContext GetDeclaringFileContext(Type declaringType)
+        public static FileContext GetDeclaringFileContext(MethodInfo targetMethod)
         {
+            var declaringType = targetMethod?.DeclaringType;
             var ctx = new FileContext { Namespace = declaringType?.Namespace };
             if (declaringType == null) return ctx;
 
             var paths = ResolveScriptPaths(declaringType);
             if (paths.Count == 0) return ctx;
 
-            // Dedupe by exact text within each bucket so partial
-            // classes spread across files don't double-emit. Order is
-            // first-seen so file-order resolution stays predictable.
-            var seenCu = new HashSet<string>(StringComparer.Ordinal);
-            var seenNs = new HashSet<string>(StringComparer.Ordinal);
+            // Pick the *single* file that actually declares the method
+            // body. C# file-level usings + aliases are per-file, not
+            // per partial-class — `Player.Part1.cs` with
+            // `using Model = A.Model;` and `Player.Part2.cs` with
+            // `using Model = B.Model;` both compile independently,
+            // but merging both into one wrapper compilation fails
+            // with CS1537 (duplicate alias) before the user's body
+            // even gets a chance. So: locate the partial that
+            // contains the method, use that file's enclosing chain
+            // only.
+            //
+            // Falls back to the first candidate path's first matching
+            // type declaration when no syntactic method match is
+            // found — auto-generated partials, source missing, etc.
+            // Picking a single file (even a "wrong" one) is still
+            // strictly safer than merging every file's aliases.
+            string targetPath = null;
+            SyntaxNode targetRoot = null;
+            TypeDeclarationSyntax targetTypeDecl = null;
 
-            foreach (var path in paths)
+            if (targetMethod != null)
             {
-                string source;
-                try { source = File.ReadAllText(path); }
-                catch { continue; }
-
-                try
+                int paramArity = targetMethod.GetParameters().Length;
+                foreach (var path in paths)
                 {
-                    var tree = CSharpSyntaxTree.ParseText(source);
-                    var root = tree.GetRoot();
-
-                    // Locate the syntactic declaration of the target
-                    // type (re-uses the name + ancestor + namespace
-                    // matching from the Pull pipeline). Without a
-                    // match we have no anchor for "enclosing
-                    // namespaces", so the file's usings can't be
-                    // attributed safely — skip rather than guess.
-                    var typeDecls = FindMatchingTypeDeclarations(root, declaringType);
-                    if (typeDecls.Count == 0) continue;
-
-                    foreach (var td in typeDecls)
-                        CollectUsingsForTypeContext(td, ctx, seenCu, seenNs);
+                    if (TryFindMethodBearingDecl(path, declaringType, targetMethod.Name, paramArity,
+                        out var foundRoot, out var foundDecl))
+                    {
+                        targetPath = path;
+                        targetRoot = foundRoot;
+                        targetTypeDecl = foundDecl;
+                        break;
+                    }
                 }
-                catch { /* malformed source — ignore that one file */ }
             }
 
+            if (targetTypeDecl == null)
+            {
+                // Fallback: first path, first matching type
+                // declaration in it.
+                foreach (var path in paths)
+                {
+                    if (TryParseFile(path, out var root))
+                    {
+                        var decls = FindMatchingTypeDeclarations(root, declaringType);
+                        if (decls.Count > 0)
+                        {
+                            targetPath = path;
+                            targetRoot = root;
+                            targetTypeDecl = decls[0];
+                            break;
+                        }
+                    }
+                }
+                if (targetTypeDecl == null) return ctx;
+            }
+
+            var seenCu = new HashSet<string>(StringComparer.Ordinal);
+            var seenNs = new HashSet<string>(StringComparer.Ordinal);
+            CollectUsingsForTypeContext(targetTypeDecl, ctx, seenCu, seenNs);
             return ctx;
+        }
+
+        // Probe a candidate path for a method matching the target's
+        // name + parameter count *inside* the matching type
+        // declaration. Returns the parsed root + the specific
+        // TypeDeclarationSyntax that contains the method, so the
+        // caller can walk that exact ancestor chain for usings.
+        private static bool TryFindMethodBearingDecl(
+            string path,
+            Type declaringType,
+            string methodName,
+            int paramArity,
+            out SyntaxNode root,
+            out TypeDeclarationSyntax typeDecl)
+        {
+            root = null;
+            typeDecl = null;
+            if (!TryParseFile(path, out root)) return false;
+
+            var typeDecls = FindMatchingTypeDeclarations(root, declaringType);
+            foreach (var td in typeDecls)
+            {
+                foreach (var member in td.Members)
+                {
+                    if (member is MethodDeclarationSyntax m
+                        && m.Identifier.ValueText == methodName
+                        && m.ParameterList.Parameters.Count == paramArity)
+                    {
+                        typeDecl = td;
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        private static bool TryParseFile(string path, out SyntaxNode root)
+        {
+            root = null;
+            string source;
+            try { source = File.ReadAllText(path); }
+            catch { return false; }
+
+            try
+            {
+                var tree = CSharpSyntaxTree.ParseText(source);
+                root = tree.GetRoot();
+                return true;
+            }
+            catch { return false; }
         }
 
         // Walks ancestors of the target type's declaration, collecting
