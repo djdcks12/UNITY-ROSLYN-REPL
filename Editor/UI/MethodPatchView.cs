@@ -64,6 +64,18 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
         private string _lastPulledKey;
         private string _lastPulledOriginal;
 
+        // Issue #26: PatchSourceDiff is O(N*M) line-LCS. Small
+        // bodies are fine, but a freshly Pull'd long method that
+        // the user is actively editing turns every keystroke into
+        // a fresh diff over the whole body, which UI Toolkit feels
+        // as input lag. Schedule + debounce handle so the diff
+        // only re-runs after the user stops typing for a beat.
+        // 200ms matches the Object Browser's search debounce —
+        // same "feels live but doesn't run on every keystroke"
+        // budget — and reads together as a single house style.
+        private const long DiffDebounceMs = 200;
+        private IVisualElementScheduledItem _diffDebounce;
+
         public MethodPatchView(VisualElement host)
         {
             _host = host ?? throw new ArgumentNullException(nameof(host));
@@ -84,6 +96,16 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
         {
             PatchRegistry.Changed -= OnRegistryChanged;
             PatchAutoReapply.SettingsChanged -= OnAutoReapplySettingsChanged;
+            // Drop any pending diff so a soon-to-be-disposed view
+            // doesn't fire RefreshDiff against torn-down fields.
+            _diffDebounce?.Pause();
+            _diffDebounce = null;
+        }
+
+        private void ScheduleDiffRefresh()
+        {
+            _diffDebounce?.Pause();
+            _diffDebounce = _host.schedule.Execute(RefreshDiff).StartingIn(DiffDebounceMs);
         }
 
         private void OnAutoReapplySettingsChanged()
@@ -310,10 +332,16 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             // body) changes — the snapshot is keyed off the form
             // identity, so a swap should rebuild against the new
             // spec's stored OriginalBody (or no snapshot, if none).
-            _bodyField.RegisterValueChangedCallback(_ => RefreshDiff());
-            _targetField.RegisterValueChangedCallback(_ => RefreshDiff());
-            _methodField.RegisterValueChangedCallback(_ => RefreshDiff());
-            _paramsField.RegisterValueChangedCallback(_ => RefreshDiff());
+            // Routed through a single debounced scheduler so a
+            // typing burst across any of these four fields
+            // collapses into one RefreshDiff after the user
+            // settles. Pause + reassign on each change so the
+            // eventual diff runs against the final form state, not
+            // a stale snapshot from the start of the burst.
+            _bodyField.RegisterValueChangedCallback(_ => ScheduleDiffRefresh());
+            _targetField.RegisterValueChangedCallback(_ => ScheduleDiffRefresh());
+            _methodField.RegisterValueChangedCallback(_ => ScheduleDiffRefresh());
+            _paramsField.RegisterValueChangedCallback(_ => ScheduleDiffRefresh());
 
             // Auto-reapply toggle. Same setting as the Tools menu
             // item, exposed inline here so users browsing the
@@ -519,6 +547,40 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
                 return;
             }
 
+            // Click-time snapshot guard (issue #26 PR review). The
+            // Apply-to-file button's enable state lives on
+            // RefreshDiff, which is now debounced by
+            // DiffDebounceMs — so the button can stay enabled for
+            // up to that window after the user's last keystroke
+            // edited Type / Method / Params away from whatever
+            // target Pull Original captured. Without this gate the
+            // window lets a click slip through where:
+            //   1. Pull captured snapshot S for target A.
+            //   2. User retypes Type/Method/Params to target B.
+            //   3. Inside the debounce, RefreshDiff hasn't run, so
+            //      _applyToFileBtn is still SetEnabled(true).
+            //   4. User clicks Apply to file. ResolveSnapshot now
+            //      keys off target B and returns null (no Pull was
+            //      ever done for B), but the call site below used
+            //      to pass that null straight into PatchSourceWriter
+            //      — and the writer skips conflict detection when
+            //      expectedSnapshot is null, so it would happily
+            //      splice the user's body (still authored against A)
+            //      into B's source file with no comparison against
+            //      what's already on disk.
+            // Re-running ResolveSnapshot here against the *current*
+            // form key catches that exact slip, and calling
+            // RefreshDiff right after collapses the visible button
+            // / summary state without waiting for the debounce
+            // tail.
+            var snapshot = ResolveSnapshot();
+            if (snapshot == null)
+            {
+                SetStatus("Apply to file needs a Pull Original snapshot for this target. Click Pull Original (or pick the method via Browse) first.", error: true);
+                RefreshDiff();
+                return;
+            }
+
             var declName = target.DeclaringType?.FullName ?? target.DeclaringType?.Name ?? "<unknown>";
             var ok = UnityEditor.EditorUtility.DisplayDialog(
                 "Apply patch to source file?",
@@ -530,15 +592,13 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
                 "Cancel");
             if (!ok) return;
 
-            // Pass the current snapshot in so the writer can detect
-            // a conflict — the file might have been edited (by the
-            // user, an IDE, or source control) since Pull captured
-            // the snapshot. Splicing a stale body would silently
-            // overwrite the newer content. The writer aborts on
-            // mismatch and ConflictDetected gives the UI a hook to
-            // surface a "Pull again" hint instead of a generic
-            // failure.
-            var snapshot = ResolveSnapshot();
+            // Snapshot was resolved before the dialog and held in
+            // `snapshot`. The dialog is modal — the form fields
+            // can't change during it — so reusing the captured
+            // value is safe and avoids a redundant ResolveSnapshot.
+            // PatchSourceWriter then runs its conflict check
+            // against the file on disk and surfaces
+            // ConflictDetected if the file moved since Pull.
             var result = PatchSourceWriter.ApplyToFile(target, body, snapshot);
             if (result.Success)
             {
