@@ -1387,51 +1387,6 @@ namespace RoslynRepl.Editor.Patches
             return TypeRef(ret);
         }
 
-        // Recursive C# type renderer that replaces method generic
-        // parameters with the user's type-argument syntax wherever
-        // they appear. Mirrors RenderCSharpType but consults the
-        // substitution map at each step. Falls back to RenderCSharpType
-        // when the type has no substitutable parameter (so the cost
-        // for non-generic method return types is zero).
-        private static string RenderCSharpTypeWithSubstitution(Type t, Dictionary<Type, string> sub)
-        {
-            if (t == null) return "object";
-            if (t.IsByRef) t = t.GetElementType();
-
-            // Direct parameter hit — emit the user's TypeSyntax.
-            if (t.IsGenericParameter && sub.TryGetValue(t, out var direct))
-                return direct;
-
-            if (t.IsArray)
-            {
-                var elem = t.GetElementType();
-                int rank = t.GetArrayRank();
-                var brackets = "[" + new string(',', rank - 1) + "]";
-                return RenderCSharpTypeWithSubstitution(elem, sub) + brackets;
-            }
-            if (t.IsPointer)
-                return RenderCSharpTypeWithSubstitution(t.GetElementType(), sub) + "*";
-
-            // Unsubstituted generic parameter (e.g., a class-level T
-            // we don't have a binding for). Shouldn't happen for the
-            // method-level case, but emit the name so the failure is
-            // a clear "T" rather than a silent typeof(object) cast.
-            if (t.IsGenericParameter) return t.Name;
-
-            if (t.IsGenericType)
-            {
-                var def = t.GetGenericTypeDefinition();
-                var rawName = def.FullName ?? def.Name;
-                int tick = rawName.IndexOf('`');
-                var head = (tick >= 0 ? rawName.Substring(0, tick) : rawName).Replace('+', '.');
-                var args = t.GetGenericArguments();
-                if (args.Length == 0) return head;
-                return head + "<" + string.Join(", ", args.Select(a => RenderCSharpTypeWithSubstitution(a, sub))) + ">";
-            }
-
-            return (t.FullName ?? t.Name).Replace('+', '.');
-        }
-
         // ─── Helpers ──────────────────────────────────────────────
 
         // Walks the syntactic ancestors of a diagnostic node looking
@@ -1595,67 +1550,47 @@ namespace RoslynRepl.Editor.Patches
         }
 
         // Render a System.Type as the C# type expression we paste into
-        // the generated code. Closed generics (`List<int>`,
-        // `Dictionary<string, int>`, `Nullable<int>`) need recursive
-        // rendering — Type.FullName for those is the assembly-qualified
-        // form `System.Collections.Generic.List`1[[System.Int32, mscorlib,
-        // ...]]` which is not valid C#. We strip the backtick arity,
-        // recursively render each type argument, and re-emit the
-        // angle-bracket form. Arrays go through GetElementType + "[]".
+        // the generated code. Issue #42: every closed-generic / nested
+        // / array / nullable case is now centralised in
+        // CSharpTypeName.Render — the wrapper signature path
+        // (PatchEngine) and this helper path (PatchSyntaxRewriter)
+        // share one renderer so a single fix covers both. The historic
+        // local renderer cut FullName at the first backtick, which
+        // dropped everything after the outermost level on nested
+        // generic types: `Outer<int>.Inner<string>` became
+        // `Namespace.Outer<int, string>` — wrong type, lost the inner
+        // segment, and the wrapper failed to compile the moment a
+        // body touched a private member of that type. The void→object
+        // special case stays here because it is specific to the
+        // helper-return-type call sites in this rewriter (TypeRef is
+        // also asked for "what T do I emit for a void method's
+        // generic helper?", which the wrapper-signature path never
+        // does).
         private static string TypeRef(Type t)
         {
             if (t == null) return "object";
-            if (t == typeof(void)) return "object"; // helpers return object then; T=object yields default
+            if (t == typeof(void)) return "object";
             if (t.IsByRef) t = t.GetElementType();
-            return RenderCSharpType(t);
+            return CSharpTypeName.Render(t);
         }
 
-        private static string RenderCSharpType(Type t)
+        // Recursive C# type renderer that replaces method generic
+        // parameters with the user's type-argument syntax wherever
+        // they appear. Delegates the structural walk to
+        // CSharpTypeName.Render, which handles nested generics,
+        // arrays, and nullables correctly; the substitution map
+        // surfaces only as the per-parameter callback. Issue #42:
+        // before this, the rewriter carried its own copy of the
+        // renderer with the same backtick-truncation bug as the
+        // wrapper signature path — pulling `private Outer<int>.Inner<string>`
+        // through `__get<T>` would emit invalid C# for T even
+        // after the wrapper signature was fixed.
+        private static string RenderCSharpTypeWithSubstitution(Type t, Dictionary<Type, string> sub)
         {
             if (t == null) return "object";
             if (t.IsByRef) t = t.GetElementType();
-
-            // Arrays — recurse on element type, then re-attach the
-            // bracket suffix. Multi-dim arrays use [,] etc. — preserve
-            // the rank so the round-trip stays accurate.
-            if (t.IsArray)
-            {
-                var elem = t.GetElementType();
-                int rank = t.GetArrayRank();
-                var brackets = "[" + new string(',', rank - 1) + "]";
-                return RenderCSharpType(elem) + brackets;
-            }
-
-            // Pointer types — uncommon in patch bodies but cheap to
-            // handle.
-            if (t.IsPointer)
-            {
-                return RenderCSharpType(t.GetElementType()) + "*";
-            }
-
-            // Generics: strip the `N` arity suffix from the
-            // (namespace-qualified, '+'→'.') name and re-emit each
-            // type argument inside angle brackets. Open generics
-            // (a generic parameter T) just render as their declared
-            // name — patch bodies basically never see those.
-            if (t.IsGenericParameter)
-            {
-                return t.Name;
-            }
-            if (t.IsGenericType)
-            {
-                var def = t.GetGenericTypeDefinition();
-                var rawName = def.FullName ?? def.Name;
-                int tick = rawName.IndexOf('`');
-                var head = (tick >= 0 ? rawName.Substring(0, tick) : rawName).Replace('+', '.');
-                var args = t.GetGenericArguments();
-                if (args.Length == 0) return head;
-                return head + "<" + string.Join(", ", args.Select(RenderCSharpType)) + ">";
-            }
-
-            // Plain non-generic — FullName covers namespace + nested
-            // chain (with `+`), so map `+` to `.` for the C# form.
-            return (t.FullName ?? t.Name).Replace('+', '.');
+            return CSharpTypeName.Render(t, p =>
+                sub != null && sub.TryGetValue(p, out var s) ? s : null);
         }
     }
 }

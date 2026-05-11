@@ -40,16 +40,44 @@ namespace RoslynRepl.Editor.Patches
         /// for open generic types and generic parameters; throws
         /// <see cref="ArgumentNullException"/> if <paramref name="type"/>
         /// is <c>null</c>.</summary>
-        public static string Render(Type type)
+        public static string Render(Type type) => Render(type, substituteParameter: null);
+
+        /// <summary>
+        /// Render with an optional callback that supplies a C# source
+        /// string for an open generic parameter. Used by
+        /// <c>PatchSyntaxRewriter</c> to bridge method-level type
+        /// arguments — the rewriter has the user's <c>TypeSyntax</c>
+        /// for each method generic argument and routes them through
+        /// here so a body that calls a generic helper like
+        /// <c>__call&lt;Foo&gt;("Bar")</c> emits the right C# type
+        /// expression at every nesting level.
+        ///
+        /// When <paramref name="substituteParameter"/> is <c>null</c>
+        /// (the default), open generic parameters and generic type
+        /// definitions are rejected with
+        /// <see cref="NotSupportedException"/> just like the simple
+        /// <see cref="Render(Type)"/> overload.
+        ///
+        /// When the callback is supplied, every <c>IsGenericParameter</c>
+        /// type encountered (anywhere in the chain — top-level,
+        /// generic argument, array element) is offered to the callback.
+        /// A non-<c>null</c> return becomes the rendered string. A
+        /// <c>null</c> return falls back to emitting the parameter
+        /// name as a bare identifier — primarily useful for diagnostic
+        /// scenarios where the resulting compile error pointing at
+        /// `T` is still more informative than a silent
+        /// <c>typeof(object)</c> cast.
+        /// </summary>
+        internal static string Render(Type type, Func<Type, string> substituteParameter)
         {
             if (type == null) throw new ArgumentNullException(nameof(type));
             var sb = new StringBuilder();
-            AppendType(sb, type);
+            AppendType(sb, type, substituteParameter);
             return sb.ToString();
         }
 
-        /// <summary>True iff <see cref="Render"/> would succeed for
-        /// this type. Useful for picker / resolver call sites that
+        /// <summary>True iff <see cref="Render(Type)"/> would succeed
+        /// for this type. Useful for picker / resolver call sites that
         /// want to short-circuit with a friendly message before they
         /// even start building a generated wrapper.</summary>
         public static bool IsRenderable(Type type)
@@ -59,12 +87,26 @@ namespace RoslynRepl.Editor.Patches
             catch (NotSupportedException) { return false; }
         }
 
-        private static void AppendType(StringBuilder sb, Type type)
+        private static void AppendType(StringBuilder sb, Type type, Func<Type, string> substituteParameter)
         {
-            // Generic parameter (the `T` in `List<T>`) — the wrapper
-            // can't emit a meaningful type expression for it.
+            // Generic parameter (the `T` in `List<T>`). With a
+            // substitution callback the rewriter supplies the user's
+            // TypeSyntax; without one we throw — the simple Render
+            // overload has no way to produce valid C# for an open T.
             if (type.IsGenericParameter)
             {
+                if (substituteParameter != null)
+                {
+                    var subbed = substituteParameter(type);
+                    if (subbed != null) { sb.Append(subbed); return; }
+                    // Fallback: the parameter is unbound. Emit the
+                    // declared name so the eventual compile error
+                    // points the user at the symbol they need to
+                    // qualify (`T`) rather than at a silent
+                    // typeof(object) substitution.
+                    sb.Append(type.Name);
+                    return;
+                }
                 throw new NotSupportedException(
                     $"Cannot render open generic parameter '{type.Name}' as a C# type expression.");
             }
@@ -75,12 +117,12 @@ namespace RoslynRepl.Editor.Patches
             // Drop the ref decoration and render the underlying
             // type so a caller-side debug print at least produces
             // valid C#.
-            if (type.IsByRef)   { AppendType(sb, type.GetElementType()); return; }
-            if (type.IsPointer) { AppendType(sb, type.GetElementType()); sb.Append('*'); return; }
+            if (type.IsByRef)   { AppendType(sb, type.GetElementType(), substituteParameter); return; }
+            if (type.IsPointer) { AppendType(sb, type.GetElementType(), substituteParameter); sb.Append('*'); return; }
 
             if (type.IsArray)
             {
-                AppendType(sb, type.GetElementType());
+                AppendType(sb, type.GetElementType(), substituteParameter);
                 int rank = type.GetArrayRank();
                 if (rank == 1) sb.Append("[]");
                 else { sb.Append('['); sb.Append(',', rank - 1); sb.Append(']'); }
@@ -94,13 +136,19 @@ namespace RoslynRepl.Editor.Patches
             var nullableUnderlying = Nullable.GetUnderlyingType(type);
             if (nullableUnderlying != null)
             {
-                AppendType(sb, nullableUnderlying);
+                AppendType(sb, nullableUnderlying, substituteParameter);
                 sb.Append('?');
                 return;
             }
 
             if (type.IsGenericTypeDefinition)
             {
+                // Without substitution we have no way to fill the
+                // generic parameter slots — reject with a friendly
+                // message. With substitution the rewriter is responsible
+                // for ensuring it never hands an open generic type
+                // definition to the renderer (it only substitutes
+                // parameters, not whole types).
                 throw new NotSupportedException(
                     $"Cannot render open generic type '{StripArity(type.Name)}<>' as a C# type expression.");
             }
@@ -156,7 +204,7 @@ namespace RoslynRepl.Editor.Patches
                     for (int j = 0; j < introduced; j++)
                     {
                         if (j > 0) sb.Append(", ");
-                        AppendType(sb, allArgs[consumed + j]);
+                        AppendType(sb, allArgs[consumed + j], substituteParameter);
                     }
                     sb.Append('>');
                     consumed += introduced;
