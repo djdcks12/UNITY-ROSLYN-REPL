@@ -201,22 +201,13 @@ namespace RoslynRepl.Editor.Diagnostics
             return false;
         }
 
+        // Single source of truth lives in ReplDiagnostics — both the
+        // REPL snippet path and the runtime patch path emit
+        // assemblies that need to count, and a local copy of the
+        // prefix list is exactly what the PR review caught letting
+        // ReplPatch_* drift out of sight.
         private static int CountDynamicReplAssemblies()
-        {
-            // Assembly.Load(byte[]) produces a regular Assembly (not
-            // IsDynamic), so filter by name prefix. Matches the
-            // "ReplDynamic_<8 hex>" naming ReplEngine.Execute uses.
-            int count = 0;
-            foreach (var a in AppDomain.CurrentDomain.GetAssemblies())
-            {
-                string name;
-                try { name = a.GetName().Name; }
-                catch { continue; }
-                if (name != null && name.StartsWith("ReplDynamic_", StringComparison.Ordinal))
-                    count++;
-            }
-            return count;
-        }
+            => ReplDiagnostics.DynamicAssemblyCount;
     }
 
     public class AssemblyEntry
