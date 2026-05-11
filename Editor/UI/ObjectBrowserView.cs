@@ -16,15 +16,41 @@ namespace RoslynRepl.Editor.UI
     /// </summary>
     public class ObjectBrowserView
     {
-        private const int MaxBrowserResults = int.MaxValue;
+        // Issue #25: the previous int.MaxValue cap let a single
+        // category change trigger a multi-thousand entry scan + sort
+        // + ListView rebuild on the editor main thread. Default cap
+        // keeps interaction responsive in big projects; "Load more"
+        // re-runs the scan unbounded so the user can opt into the
+        // long path on demand.
+        private const int DefaultMaxResults = 200;
+        // Debounce so a search typed at normal speed only kicks one
+        // Refresh at the end of the burst, not one per keystroke.
+        // 200 ms balances "feels live" against "doesn't redo the
+        // scan four times for a four-letter search". The category
+        // dropdown bypasses the debounce — that change is one
+        // explicit click, not a typing burst.
+        private const long SearchDebounceMs = 200;
 
         private readonly VisualElement _root;
         private EnumField _categoryField;
         private ToolbarSearchField _searchField;
         private ListView _listView;
         private Label _statusLabel;
+        private Button _loadMoreBtn;
 
         private readonly List<InstanceEntry> _entries = new();
+
+        // When true, the next Refresh asks InstanceLocator for an
+        // unbounded scan. Reset to false on every category / search
+        // change so a heavy scan on category A doesn't bleed into
+        // category B.
+        private bool _showAll;
+
+        // Schedule handle for the search debounce. Pause + reassign
+        // on every keystroke so the scheduled Refresh always reflects
+        // the latest text rather than a stale snapshot from the
+        // beginning of a typing burst.
+        private IVisualElementScheduledItem _searchDebounce;
 
         public event Action<InstanceEntry> OnInstanceChosen;
 
@@ -50,26 +76,44 @@ namespace RoslynRepl.Editor.UI
                 ? (InstanceCategory)_categoryField.value
                 : InstanceCategory.All;
             var filter = _searchField?.value ?? string.Empty;
+            int cap = _showAll ? int.MaxValue : DefaultMaxResults;
 
             _entries.Clear();
             try
             {
-                _entries.AddRange(InstanceLocator.Find(category, filter, MaxBrowserResults));
+                _entries.AddRange(InstanceLocator.Find(category, filter, cap));
             }
             catch (Exception ex)
             {
                 _entries.Clear();
                 if (_statusLabel != null)
                     _statusLabel.text = $"<error: {ex.GetBaseException().Message}>";
+                if (_loadMoreBtn != null) _loadMoreBtn.style.display = DisplayStyle.None;
                 _listView?.RefreshItems();
                 return;
             }
 
             _listView?.RefreshItems();
+
+            // Cap-hit detection: InstanceLocator returning exactly
+            // `cap` entries is treated as "may have hit the cap".
+            // It's a false positive when the project actually has
+            // exactly N matches, but the user-visible cost is a
+            // "Load more" button that produces zero new rows on
+            // click — preferable to silently dropping rows past
+            // the cap with no recourse.
+            bool capHit = !_showAll && _entries.Count >= DefaultMaxResults;
             if (_statusLabel != null)
-                _statusLabel.text = _entries.Count == MaxBrowserResults
-                    ? $"{MaxBrowserResults}+ items (truncated)"
-                    : $"{_entries.Count} item(s)";
+            {
+                if (_showAll)
+                    _statusLabel.text = $"{_entries.Count} item(s) (showing all)";
+                else if (capHit)
+                    _statusLabel.text = $"{_entries.Count}+ items — capped at {DefaultMaxResults}, click Load more for the full scan";
+                else
+                    _statusLabel.text = $"{_entries.Count} item(s)";
+            }
+            if (_loadMoreBtn != null)
+                _loadMoreBtn.style.display = capHit ? DisplayStyle.Flex : DisplayStyle.None;
         }
 
         private void BuildUI()
@@ -89,16 +133,33 @@ namespace RoslynRepl.Editor.UI
             header.Add(refreshBtn);
             _root.Add(header);
 
-            // Category drop-down
+            // Category drop-down. Category changes drop the
+            // expanded-all flag so a heavy unbounded scan from the
+            // previous category doesn't bleed into the next one.
             _categoryField = new EnumField(InstanceCategory.All);
             _categoryField.AddToClassList("rr-browser-category");
-            _categoryField.RegisterValueChangedCallback(_ => Refresh());
+            _categoryField.RegisterValueChangedCallback(_ =>
+            {
+                _showAll = false;
+                Refresh();
+            });
             _root.Add(_categoryField);
 
-            // Search field
+            // Search field. Debounced so typing doesn't trigger one
+            // full scan per keystroke. Pause-and-reschedule on each
+            // change so the eventual Refresh always runs against the
+            // text the user actually finished typing. _showAll
+            // resets along with the change because a fresh search
+            // has its own match count and shouldn't inherit the
+            // previous filter's "show all" choice.
             _searchField = new ToolbarSearchField();
             _searchField.AddToClassList("rr-browser-search");
-            _searchField.RegisterValueChangedCallback(_ => Refresh());
+            _searchField.RegisterValueChangedCallback(_ =>
+            {
+                _showAll = false;
+                _searchDebounce?.Pause();
+                _searchDebounce = _root.schedule.Execute(Refresh).StartingIn(SearchDebounceMs);
+            });
             _root.Add(_searchField);
 
             // ListView
@@ -119,10 +180,33 @@ namespace RoslynRepl.Editor.UI
             };
             _root.Add(_listView);
 
-            // Status row
+            // Status row + Load more affordance. The button is
+            // hidden by default and only surfaces when Refresh
+            // detects the cap was hit. Click flips _showAll and
+            // re-runs Refresh, which now asks InstanceLocator for
+            // the unbounded scan.
+            var statusRow = new VisualElement();
+            statusRow.style.flexDirection = FlexDirection.Row;
+            statusRow.style.alignItems = Align.Center;
+
             _statusLabel = new Label();
             _statusLabel.AddToClassList("rr-browser-status");
-            _root.Add(_statusLabel);
+            _statusLabel.style.flexGrow = 1;
+            statusRow.Add(_statusLabel);
+
+            _loadMoreBtn = new Button(() =>
+            {
+                _showAll = true;
+                Refresh();
+            }) { text = "Load more" };
+            _loadMoreBtn.tooltip =
+                $"Re-run the scan without the {DefaultMaxResults}-row cap. May freeze the editor briefly in projects with many matching objects.";
+            _loadMoreBtn.style.display = DisplayStyle.None;
+            _loadMoreBtn.style.marginLeft = 4;
+            _loadMoreBtn.style.marginRight = 4;
+            statusRow.Add(_loadMoreBtn);
+
+            _root.Add(statusRow);
         }
 
         private static VisualElement MakeRow()
