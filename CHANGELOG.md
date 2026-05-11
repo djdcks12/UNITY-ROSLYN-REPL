@@ -4,7 +4,7 @@ All notable changes to this package will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.7.0] - 2026-05-11
 
 ### Fixed (Pull / Apply resolver parity)
 - `PatchSourcePuller.TryPullMethodBody` and `PatchSourceWriter.ApplyToFile` now resolve the target method through the same `FindMethodForTarget` call. The earlier shape had Pull go through a private `FindMethodNode` with a richer fallback chain than the writer-side finder, so a method that pulled successfully could later fail to apply with "could not find a matching method" — leaving the user holding a body they couldn't write back. `FindMethodNode` is removed; `TryPullMethodBody` is now a thin wrapper that calls the shared finder, surfaces the expression-bodied error, and extracts the body via `ExtractBodyInside`.
