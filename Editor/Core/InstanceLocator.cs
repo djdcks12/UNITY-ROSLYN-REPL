@@ -102,16 +102,35 @@ namespace RoslynRepl.Editor.Core
             // 200) for the worst-case insert shift, vs. the
             // baseline OrderByDescending / ThenBy / ThenBy which
             // still ran a full O(N log N) sort over every entry.
-            // Result is byte-identical to the unbounded prefix.
-            var sorted = new List<InstanceEntry>(maxResults + 1);
+            //
+            // Stability tie-breaker (PR review followup): each
+            // candidate is wrapped in a RankedEntry that carries
+            // its filter-pass enumeration ordinal, and the comparer
+            // uses that ordinal as a fourth key. LINQ's OrderBy /
+            // ThenBy chain is a stable sort — same-key entries
+            // stay in their input order — but BinarySearch is not
+            // stable: it returns *any* index whose comparer returns
+            // 0, so a later duplicate row could splice in front of
+            // an earlier one. With the ordinal tie-breaker every
+            // RankedEntry is unique, BinarySearch lands in a
+            // deterministic position, and the bounded prefix
+            // matches `unbounded[0..maxResults]` byte-for-byte —
+            // including in projects with multiple instances of the
+            // same MonoBehaviour type on identically-named GOs.
+            var sorted = new List<RankedEntry>(maxResults + 1);
             bool needFilter = !string.IsNullOrEmpty(filter);
             string f = filter;
+            int ordinal = 0;
             foreach (var e in pool)
             {
                 if (needFilter && !MatchesFilter(e, f)) continue;
-                InsertSortedCapped(sorted, e, maxResults);
+                var ranked = new RankedEntry { Entry = e, Ordinal = ordinal++ };
+                InsertSortedCapped(sorted, ranked, maxResults);
             }
-            return sorted;
+
+            var result = new List<InstanceEntry>(sorted.Count);
+            foreach (var r in sorted) result.Add(r.Entry);
+            return result;
         }
 
         private static List<InstanceEntry> FindUnbounded(
@@ -137,38 +156,66 @@ namespace RoslynRepl.Editor.Core
                 || (e.DisplayName != null && e.DisplayName.IndexOf(f, StringComparison.OrdinalIgnoreCase) >= 0);
         }
 
+        // Wrapper that carries the candidate's filter-pass ordinal
+        // alongside the entry. The ordinal exists purely as a
+        // stable-sort tie-breaker for FindBounded — see the comment
+        // there for why it has to land in the comparer.
+        private sealed class RankedEntry
+        {
+            public InstanceEntry Entry;
+            public int Ordinal;
+        }
+
         // Comparer that mirrors the unbounded LINQ chain
         // (OrderByDescending IsActive → ThenBy TypeName ordinal →
-        // ThenBy DisplayName ordinal). Used by both BinarySearch and
-        // the early-skip check inside InsertSortedCapped so the
-        // "would I beat the worst kept entry?" decision is made
-        // against the same ordering the unbounded path uses.
-        private static readonly IComparer<InstanceEntry> _orderComparer =
-            Comparer<InstanceEntry>.Create((a, b) =>
+        // ThenBy DisplayName ordinal) plus an Ordinal asc tie-
+        // breaker. The first three keys reproduce the unbounded
+        // path's ordering for distinct rows; the fourth key makes
+        // the comparison strict so BinarySearch can't surface a
+        // non-deterministic insert index for two entries that
+        // collide on (IsActive, TypeName, DisplayName) — without
+        // it, a later same-key row could land in front of an
+        // earlier same-key row and the bounded preview would
+        // diverge from `unbounded[0..max]`. Used by both
+        // BinarySearch and the early-skip check inside
+        // InsertSortedCapped so the "would I beat the worst kept
+        // entry?" decision honors the same total order.
+        private static readonly IComparer<RankedEntry> _orderComparer =
+            Comparer<RankedEntry>.Create((a, b) =>
             {
+                var ea = a.Entry;
+                var eb = b.Entry;
                 // bool descending: true (Active) sorts before false.
-                int ia = a.IsActive ? 0 : 1;
-                int ib = b.IsActive ? 0 : 1;
+                int ia = ea.IsActive ? 0 : 1;
+                int ib = eb.IsActive ? 0 : 1;
                 int c = ia.CompareTo(ib);
                 if (c != 0) return c;
-                c = string.CompareOrdinal(a.TypeName ?? string.Empty, b.TypeName ?? string.Empty);
+                c = string.CompareOrdinal(ea.TypeName ?? string.Empty, eb.TypeName ?? string.Empty);
                 if (c != 0) return c;
-                return string.CompareOrdinal(a.DisplayName ?? string.Empty, b.DisplayName ?? string.Empty);
+                c = string.CompareOrdinal(ea.DisplayName ?? string.Empty, eb.DisplayName ?? string.Empty);
+                if (c != 0) return c;
+                // Stability tie-breaker: matches LINQ stable-sort
+                // semantics — earlier in the input wins when the
+                // visible sort keys are equal.
+                return a.Ordinal.CompareTo(b.Ordinal);
             });
 
-        private static void InsertSortedCapped(List<InstanceEntry> sorted, InstanceEntry e, int max)
+        private static void InsertSortedCapped(List<RankedEntry> sorted, RankedEntry r, int max)
         {
             // Early skip: if we already have `max` entries and this
             // one would sort at-or-after the worst kept entry, it
-            // can never end up in the final result. Saves the
-            // BinarySearch + Insert + Truncate triple in the common
-            // case where the pool has many entries past the prefix.
-            if (sorted.Count >= max && _orderComparer.Compare(e, sorted[sorted.Count - 1]) >= 0)
+            // can never end up in the final result. With the
+            // ordinal tie-breaker the comparer never returns 0 for
+            // distinct RankedEntry instances, so `>= 0` here is
+            // equivalent to `> 0` for the visible keys plus
+            // "ordinal is later" — both cases mean "this row would
+            // land outside the prefix".
+            if (sorted.Count >= max && _orderComparer.Compare(r, sorted[sorted.Count - 1]) >= 0)
                 return;
 
-            int idx = sorted.BinarySearch(e, _orderComparer);
+            int idx = sorted.BinarySearch(r, _orderComparer);
             if (idx < 0) idx = ~idx;
-            sorted.Insert(idx, e);
+            sorted.Insert(idx, r);
             // Trim from the tail to keep the prefix invariant.
             if (sorted.Count > max) sorted.RemoveAt(sorted.Count - 1);
         }
