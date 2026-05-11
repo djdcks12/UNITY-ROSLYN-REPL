@@ -158,8 +158,23 @@ namespace RoslynRepl.Editor.Diagnostics
             // tuning Watch panels with N expressions × M Runs and
             // wondering why memory crept up.
             sb.AppendLine();
-            sb.AppendLine($"  [diag]     Loaded REPL dynamic assemblies: {CountDynamicReplAssemblies()}");
+            int dynCount = CountDynamicReplAssemblies();
+            var severity = ReplDiagnostics.SeverityOf(dynCount);
+            string severityTag = severity switch
+            {
+                AssemblyLoadSeverity.High => "  [warn]    ",
+                AssemblyLoadSeverity.Warn => "  [hint]    ",
+                _                         => "  [diag]    ",
+            };
+            sb.AppendLine($"{severityTag}Loaded REPL dynamic assemblies: {dynCount}");
             sb.AppendLine($"             (cleared by domain reload — recompile any script or re-enter Play Mode)");
+            if (severity != AssemblyLoadSeverity.Normal)
+            {
+                int threshold = severity == AssemblyLoadSeverity.High
+                    ? ReplDiagnostics.HighThreshold
+                    : ReplDiagnostics.WarnThreshold;
+                sb.AppendLine($"             at or above {threshold} — consider 'Tools / Roslyn REPL / Force Domain Reload' to free memory.");
+            }
             sb.AppendLine($"  [diag]     Cached MetadataReferences: {AssemblyReferenceCache.CountOrZero}");
             // Note: Harmony is optional — only the Runtime Method
             // Patch feature needs it. Don't list it as Required (so

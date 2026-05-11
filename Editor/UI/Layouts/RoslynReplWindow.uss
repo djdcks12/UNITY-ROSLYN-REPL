@@ -114,6 +114,42 @@
     color: rgb(180, 180, 180);
 }
 
+/* Issue #24: small toolbar pill that surfaces the live count of
+   ReplDynamic_* assemblies. Mono can't unload them until a domain
+   reload, so the count grows monotonically across a session and
+   long sessions can quietly accumulate tens of MB. Default styling
+   is muted because the count by itself isn't actionable; the warn
+   and high modifiers escalate as the count crosses thresholds
+   defined by ReplDiagnostics (200 → warn, 500 → high). Click
+   routes to the Force Domain Reload menu via a confirm dialog. */
+.rr-asm-badge {
+    margin-left: 4px;
+    margin-right: 4px;
+    padding: 0 8px;
+    height: 16px;
+    background-color: rgba(140, 140, 140, 0.16);
+    color: rgb(160, 160, 160);
+    border-top-left-radius: 8px;
+    border-top-right-radius: 8px;
+    border-bottom-left-radius: 8px;
+    border-bottom-right-radius: 8px;
+    font-size: 10px;
+    -unity-text-align: middle-center;
+    cursor: link;
+}
+
+.rr-asm-badge--warn {
+    background-color: rgba(220, 180, 80, 0.20);
+    color: rgb(220, 180, 80);
+    -unity-font-style: bold;
+}
+
+.rr-asm-badge--high {
+    background-color: rgba(220, 90, 90, 0.22);
+    color: rgb(230, 110, 110);
+    -unity-font-style: bold;
+}
+
 /* Issue #20: persistent banner under the Code header reminding the
    user that the only way to interrupt a snippet is for the snippet
    itself to observe `ct`. The first-Run dialog is the loud version;
