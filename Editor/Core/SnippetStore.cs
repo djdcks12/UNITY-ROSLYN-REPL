@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using UnityEditor;
+using UnityEngine;
 
 namespace RoslynRepl.Editor.Core
 {
@@ -20,43 +21,41 @@ namespace RoslynRepl.Editor.Core
     }
 
     /// <summary>
-    /// EditorPrefs-backed library of named snippets, project-scoped via
-    /// <see cref="ProjectScopedPrefs"/>. Storage format mirrors
-    /// <see cref="RunHistoryStore"/>: each entry is "name_b64|code_b64",
-    /// entries joined with "\n". Base64 chars don't include '|' or '\n',
-    /// so the separators stay unambiguous regardless of what the user
-    /// typed for the name or the code.
+    /// Project-local library of named snippets. Issue #27: storage moved
+    /// from <see cref="EditorPrefs"/> to
+    /// <c>&lt;project&gt;/UserSettings/RoslynRepl/snippets.json</c>;
+    /// migration from the historical EditorPrefs blob happens on the
+    /// first <see cref="Load"/> after upgrade.
     /// </summary>
     public static class SnippetStore
     {
         public static event Action Changed;
 
-        private static string PrefsKey => ProjectScopedPrefs.BuildKey("RoslynRepl.Snippets");
+        private const string FileName = "snippets.json";
+
+        private static string LegacyPrefsKey => ProjectScopedPrefs.BuildKey("RoslynRepl.Snippets");
+
+        [Serializable]
+        private sealed class Envelope
+        {
+            public int version = 1;
+            public List<SnippetEntry> items = new List<SnippetEntry>();
+        }
 
         public static List<SnippetEntry> Load()
         {
-            var raw = EditorPrefs.GetString(PrefsKey, string.Empty);
-            if (string.IsNullOrEmpty(raw)) return new List<SnippetEntry>();
-            var list = new List<SnippetEntry>();
-            foreach (var line in raw.Split('\n'))
+            if (UserSettingsStorage.TryReadAllText(FileName, out var json))
             {
-                if (string.IsNullOrEmpty(line)) continue;
-                var pipe = line.IndexOf('|');
-                if (pipe <= 0) continue;
-                try
-                {
-                    var name = Decode(line.Substring(0, pipe));
-                    var code = Decode(line.Substring(pipe + 1));
-                    if (string.IsNullOrEmpty(name)) continue;
-                    list.Add(new SnippetEntry(name, code));
-                }
-                catch (FormatException)
-                {
-                    // Skip a corrupt entry; the rest of the library is
-                    // still usable.
-                }
+                return DecodeJson(json);
             }
-            return list;
+
+            var legacy = LoadLegacy();
+            if (legacy.Count > 0)
+            {
+                PersistInternal(legacy);
+                EditorPrefs.DeleteKey(LegacyPrefsKey);
+            }
+            return legacy;
         }
 
         /// <summary>
@@ -88,7 +87,8 @@ namespace RoslynRepl.Editor.Core
         /// <summary>Wipe every saved snippet for the current project.</summary>
         public static void Clear()
         {
-            EditorPrefs.DeleteKey(PrefsKey);
+            UserSettingsStorage.Delete(FileName);
+            EditorPrefs.DeleteKey(LegacyPrefsKey);
             Changed?.Invoke();
         }
 
@@ -117,16 +117,60 @@ namespace RoslynRepl.Editor.Core
 
         private static void Persist(List<SnippetEntry> list)
         {
-            var encoded = list
-                .Where(s => s != null && !string.IsNullOrEmpty(s.Name))
-                .Select(s => Encode(s.Name) + "|" + Encode(s.Code ?? string.Empty));
-            EditorPrefs.SetString(PrefsKey, string.Join("\n", encoded));
+            PersistInternal(list);
             Changed?.Invoke();
         }
 
-        private static string Encode(string s)
+        private static void PersistInternal(List<SnippetEntry> list)
         {
-            return Convert.ToBase64String(Encoding.UTF8.GetBytes(s ?? string.Empty));
+            var env = new Envelope { items = new List<SnippetEntry>() };
+            foreach (var s in list)
+            {
+                if (s == null || string.IsNullOrEmpty(s.Name)) continue;
+                env.items.Add(new SnippetEntry(s.Name, s.Code ?? string.Empty));
+            }
+            UserSettingsStorage.WriteAllText(FileName, JsonUtility.ToJson(env, prettyPrint: true));
+        }
+
+        private static List<SnippetEntry> DecodeJson(string json)
+        {
+            try
+            {
+                var env = JsonUtility.FromJson<Envelope>(json);
+                return env?.items ?? new List<SnippetEntry>();
+            }
+            catch
+            {
+                return new List<SnippetEntry>();
+            }
+        }
+
+        // Decode the historical EditorPrefs blob format: each entry is
+        // "name_b64|code_b64", entries joined by '\n'.
+        private static List<SnippetEntry> LoadLegacy()
+        {
+            var raw = EditorPrefs.GetString(LegacyPrefsKey, string.Empty);
+            if (string.IsNullOrEmpty(raw)) return new List<SnippetEntry>();
+            var list = new List<SnippetEntry>();
+            foreach (var line in raw.Split('\n'))
+            {
+                if (string.IsNullOrEmpty(line)) continue;
+                var pipe = line.IndexOf('|');
+                if (pipe <= 0) continue;
+                try
+                {
+                    var name = Decode(line.Substring(0, pipe));
+                    var code = Decode(line.Substring(pipe + 1));
+                    if (string.IsNullOrEmpty(name)) continue;
+                    list.Add(new SnippetEntry(name, code));
+                }
+                catch (FormatException)
+                {
+                    // Skip a corrupt entry; the rest of the library
+                    // is still usable.
+                }
+            }
+            return list;
         }
 
         private static string Decode(string b64)

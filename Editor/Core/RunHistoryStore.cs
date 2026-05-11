@@ -1,18 +1,21 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Text;
 using UnityEditor;
+using UnityEngine;
 
 namespace RoslynRepl.Editor.Core
 {
     /// <summary>
-    /// EditorPrefs-backed history of recently-executed snippets, project-
-    /// scoped so each Unity project keeps its own ring. Entries are stored
-    /// most-recent-first; on every <see cref="Push"/> the new entry is
-    /// inserted at index 0, identical preceding entries are de-duplicated
-    /// (so re-running the same snippet doesn't churn the list), and the
-    /// tail past <see cref="Capacity"/> is dropped.
+    /// Project-local history of recently-executed snippets. Issue #27:
+    /// storage moved from <see cref="EditorPrefs"/> to
+    /// <c>&lt;project&gt;/UserSettings/RoslynRepl/runHistory.json</c>,
+    /// for the same lifecycle / size reasons as
+    /// <see cref="WatchStore"/>. Entries are stored most-recent-first;
+    /// on every <see cref="Push"/> the new entry is inserted at index 0,
+    /// identical preceding entries are de-duplicated, and the tail past
+    /// <see cref="Capacity"/> is dropped. First load after upgrade
+    /// auto-migrates from the historical EditorPrefs key.
     /// </summary>
     public static class RunHistoryStore
     {
@@ -20,28 +23,31 @@ namespace RoslynRepl.Editor.Core
 
         public static event Action Changed;
 
-        private static string PrefsKey => ProjectScopedPrefs.BuildKey("RoslynRepl.RunHistory");
+        private const string FileName = "runHistory.json";
+
+        private static string LegacyPrefsKey => ProjectScopedPrefs.BuildKey("RoslynRepl.RunHistory");
+
+        [Serializable]
+        private sealed class Envelope
+        {
+            public int version = 1;
+            public List<string> items = new List<string>();
+        }
 
         public static List<string> Load()
         {
-            var raw = EditorPrefs.GetString(PrefsKey, string.Empty);
-            if (string.IsNullOrEmpty(raw)) return new List<string>();
-            var list = new List<string>(Capacity);
-            foreach (var token in raw.Split('\n'))
+            if (UserSettingsStorage.TryReadAllText(FileName, out var json))
             {
-                if (string.IsNullOrEmpty(token)) continue;
-                try
-                {
-                    var bytes = Convert.FromBase64String(token);
-                    list.Add(Encoding.UTF8.GetString(bytes));
-                }
-                catch (FormatException)
-                {
-                    // Skip a malformed entry rather than nuking the whole
-                    // store — the rest of the ring is still usable.
-                }
+                return DecodeJson(json);
             }
-            return list;
+
+            var legacy = LoadLegacy();
+            if (legacy.Count > 0)
+            {
+                PersistInternal(legacy);
+                EditorPrefs.DeleteKey(LegacyPrefsKey);
+            }
+            return legacy;
         }
 
         public static void Push(string code)
@@ -66,15 +72,57 @@ namespace RoslynRepl.Editor.Core
 
         public static void Clear()
         {
-            EditorPrefs.DeleteKey(PrefsKey);
+            UserSettingsStorage.Delete(FileName);
+            EditorPrefs.DeleteKey(LegacyPrefsKey);
             Changed?.Invoke();
         }
 
         private static void Persist(List<string> list)
         {
-            var encoded = list.Select(s => Convert.ToBase64String(Encoding.UTF8.GetBytes(s ?? string.Empty)));
-            EditorPrefs.SetString(PrefsKey, string.Join("\n", encoded));
+            PersistInternal(list);
             Changed?.Invoke();
+        }
+
+        private static void PersistInternal(List<string> list)
+        {
+            var env = new Envelope { items = new List<string>() };
+            foreach (var s in list) env.items.Add(s ?? string.Empty);
+            UserSettingsStorage.WriteAllText(FileName, JsonUtility.ToJson(env, prettyPrint: true));
+        }
+
+        private static List<string> DecodeJson(string json)
+        {
+            try
+            {
+                var env = JsonUtility.FromJson<Envelope>(json);
+                return env?.items ?? new List<string>();
+            }
+            catch
+            {
+                return new List<string>();
+            }
+        }
+
+        private static List<string> LoadLegacy()
+        {
+            var raw = EditorPrefs.GetString(LegacyPrefsKey, string.Empty);
+            if (string.IsNullOrEmpty(raw)) return new List<string>();
+            var list = new List<string>(Capacity);
+            foreach (var token in raw.Split('\n'))
+            {
+                if (string.IsNullOrEmpty(token)) continue;
+                try
+                {
+                    var bytes = Convert.FromBase64String(token);
+                    list.Add(Encoding.UTF8.GetString(bytes));
+                }
+                catch (FormatException)
+                {
+                    // Skip a malformed entry rather than nuking the
+                    // whole store.
+                }
+            }
+            return list;
         }
     }
 }
