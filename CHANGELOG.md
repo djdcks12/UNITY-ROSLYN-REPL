@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed (Object Browser scan cap — review notes)
+- `InstanceLocator.Find` no longer materializes + sorts the full pool when the caller passes a finite `maxResults`. The previous shape ran `OrderByDescending(IsActive).ThenBy(TypeName).ThenBy(DisplayName).Take(maxResults).ToList()`, which forced a full O(N log N) sort over every candidate before the cap took effect. Cap-200 was a UI-row limit, not a scan-cost limit. Reported in PR review for #25.
+- New private `FindBounded` path: walks every candidate once, but maintains only a sorted prefix of size `maxResults` via `BinarySearch`-ed insert + tail truncate. The shared `_orderComparer` mirrors the original LINQ chain (Active descending → TypeName ordinal → DisplayName ordinal). An early-skip — "if the prefix is full and this entry would land past index `maxResults`, drop it without inserting" — lets the common case (long pool, small cap) avoid the insert + shift cost entirely.
+- Result is byte-identical to the unbounded prefix, so the bounded preview the user sees on every Refresh matches what "Load more" would surface; no cross-category bias from an earlier draft that broke the enumerator early. Verified via probe (50/50 entries match the unbounded `[0..49]`).
+- `FindUnbounded` keeps the original LINQ shape verbatim — `Load more` callers ask for `int.MaxValue` and get the full sorted list back.
+
 ### Added (Object Browser scan cap + debounce)
 - `ObjectBrowserView` now caps the per-Refresh result count at `DefaultMaxResults = 200` instead of `int.MaxValue`. The previous shape ran an unbounded `InstanceLocator.Find` on every category change, every keystroke, and every refresh-button click — a fresh sweep + sort + ListView rebuild on the editor main thread that could stall for seconds in projects with thousands of MonoBehaviours / ScriptableObjects. The cap keeps the common case responsive without dropping access to the full list.
 - Search field RegisterValueChangedCallback now schedules `Refresh` via `_root.schedule.Execute(...).StartingIn(200ms)` instead of firing on every keystroke. The handle is paused + reassigned per keystroke so the eventual scan runs against the final text. Category dropdown bypasses the debounce — that change is one explicit click, not a typing burst.
