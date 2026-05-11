@@ -335,10 +335,18 @@ namespace RoslynRepl.Editor.Patches
             return method;
         }
 
-        private static Type[] ResolveParamTypes(string commaJoined)
+        // Issue #41: parameter type names are split by
+        // MethodPatchSpec.SplitParamTypes, which uses a delimiter
+        // that cannot collide with closed-generic FullName output
+        // (semicolon — illegal in CLR full type names) and falls
+        // back to the legacy comma form only for non-generic data.
+        // The historic Split(',') here silently shredded
+        // List<int> / Dictionary<string,int> entries because their
+        // FullName carries embedded commas.
+        private static Type[] ResolveParamTypes(string parameterTypes)
         {
-            if (string.IsNullOrEmpty(commaJoined)) return Type.EmptyTypes;
-            var parts = commaJoined.Split(',').Select(s => s.Trim()).Where(s => s.Length > 0).ToArray();
+            var parts = MethodPatchSpec.SplitParamTypes(parameterTypes);
+            if (parts.Length == 0) return Type.EmptyTypes;
             var types = new Type[parts.Length];
             for (int i = 0; i < parts.Length; i++)
             {

@@ -4,6 +4,13 @@ All notable changes to this package will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed (Generic parameter types in patch specs)
+- `MethodPatchSpec.ParameterTypes` now uses `;` as the per-parameter separator instead of `,`. Closed-generic CLR `Type.FullName` output embeds commas (`List`1[[System.Int32, mscorlib, Version=…, …]]`), so the historic comma split in `PatchEngine.ResolveParamTypes` shredded any generic parameter into garbage and the spec failed to resolve at Apply / reload / source export — even though the form picker would happily list the method as patchable. Semicolon is illegal in CLR full type names, so it can't collide with anything inside a single parameter's name.
+- New `MethodPatchSpec.JoinParamTypes` / `SplitParamTypes` helpers centralize the encoding. `Browse → Fill form` and the manual form field both go through the join helper; the engine resolver, the diff, and the active-list display all go through the split helper. Legacy comma-joined data still loads (split falls back to `,` when the value contains no `;` and no `[`), so plain non-generic specs persisted on 0.7.1 keep working. Legacy data that had embedded brackets (i.e. it was already broken) surfaces a clean "type not found" error from the type resolver instead of silently picking the wrong overload.
+- The Params field tooltip and the active-list row label now reflect the new semicolon-separated form. The row label still renders with `, ` between entries for readability — the raw semicolon form is only the on-disk encoding. Closes #41.
+
 ## [0.7.1] - 2026-05-11
 
 ### Changed (OpenUPM package id)

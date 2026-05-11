@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace RoslynRepl.Editor.Patches
 {
@@ -52,9 +53,23 @@ namespace RoslynRepl.Editor.Patches
     ///
     /// The triple (TargetTypeName, MethodName, ParameterTypes) uniquely
     /// identifies a patchable method in the AppDomain. ParameterTypes is
-    /// a comma-joined list of full type names — necessary for disambig-
-    /// uation when the target has overloads, and stable enough across
-    /// editor sessions to be a safe persistence key.
+    /// a <see cref="ParamSeparator"/>-joined list of full type names —
+    /// necessary for disambiguation when the target has overloads, and
+    /// stable enough across editor sessions to be a safe persistence key.
+    ///
+    /// Issue #41 (v0.7.2): the historical separator was <c>','</c>, which
+    /// silently broke for generic parameter types because closed-generic
+    /// <see cref="Type.FullName"/> embeds commas (assembly-qualified inner
+    /// type list, <c>List`1[[System.Int32, mscorlib, …]]</c>). Splitting
+    /// on <c>','</c> shredded such entries into garbage. The current
+    /// separator is <c>;</c> — illegal in CLR full type names, so it
+    /// can't collide with anything inside a single parameter's name
+    /// while still being typeable in the form field. <see cref="JoinParamTypes"/>
+    /// always emits the new form; <see cref="SplitParamTypes"/> falls
+    /// back to comma-splitting only when the value contains no <c>;</c>
+    /// AND no <c>[</c> (so legacy non-generic specs keep loading, but
+    /// legacy generic specs surface a clear "couldn't resolve" error
+    /// instead of silently picking the wrong overload).
     ///
     /// PatchBody is the user-edited replacement body (everything between
     /// the method's outer braces). OriginalBody is the snapshot pulled
@@ -75,11 +90,67 @@ namespace RoslynRepl.Editor.Patches
         public PatchStatus Status;
         public string LastError;
 
+        /// <summary>Separator used inside <see cref="ParameterTypes"/>
+        /// to delimit individual parameter type names. <c>;</c> is illegal
+        /// in CLR <see cref="Type.FullName"/> output, so it cannot collide
+        /// with embedded commas inside a closed-generic assembly-qualified
+        /// inner type list.</summary>
+        public const char ParamSeparator = ';';
+
         public string Key => Keyed(TargetTypeName, MethodName, ParameterTypes);
 
         public static string Keyed(string typeName, string methodName, string parameterTypes)
         {
             return $"{typeName ?? string.Empty}::{methodName ?? string.Empty}::{parameterTypes ?? string.Empty}";
+        }
+
+        /// <summary>Build the persisted ParameterTypes value from a
+        /// structured list of per-parameter full type names. Always
+        /// emits the current <see cref="ParamSeparator"/> form.</summary>
+        public static string JoinParamTypes(IEnumerable<string> paramTypeNames)
+        {
+            if (paramTypeNames == null) return string.Empty;
+            return string.Join(ParamSeparator.ToString(),
+                paramTypeNames
+                    .Where(s => !string.IsNullOrEmpty(s))
+                    .Select(s => s.Trim()));
+        }
+
+        /// <summary>Split a persisted ParameterTypes value back into
+        /// individual parameter type names. Prefers the current
+        /// <see cref="ParamSeparator"/>; falls back to <c>','</c> only
+        /// when the value contains no <c>;</c> AND no <c>[</c> — the
+        /// legacy non-generic shape — so old saved specs keep loading.
+        /// Legacy generic specs (commas + brackets) used to silently
+        /// resolve to the wrong overload; now they surface a clean
+        /// "type not found" upstream because the malformed slice gets
+        /// passed straight to the type resolver.</summary>
+        public static string[] SplitParamTypes(string raw)
+        {
+            if (string.IsNullOrEmpty(raw)) return Array.Empty<string>();
+            char delimiter;
+            if (raw.IndexOf(ParamSeparator) >= 0)
+            {
+                delimiter = ParamSeparator;
+            }
+            else if (raw.IndexOf('[') < 0)
+            {
+                // Legacy non-generic form: every entry is a flat
+                // FullName with no embedded commas, so the historic
+                // comma split is still safe.
+                delimiter = ',';
+            }
+            else
+            {
+                // Single closed-generic FullName with no separator —
+                // treat the whole string as one entry rather than
+                // shredding the assembly-qualified inner list.
+                return new[] { raw.Trim() };
+            }
+            return raw.Split(delimiter)
+                      .Select(s => s.Trim())
+                      .Where(s => s.Length > 0)
+                      .ToArray();
         }
     }
 
