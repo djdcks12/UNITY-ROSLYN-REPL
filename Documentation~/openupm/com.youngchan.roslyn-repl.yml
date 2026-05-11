@@ -2,14 +2,14 @@
 #
 # When the package owner is ready to publish on OpenUPM:
 #   1. Copy this file into the openupm/openupm repo at
-#        data/packages/com.roslyn-repl.yml
+#        data/packages/com.youngchan.roslyn-repl.yml
 #   2. Open a pull request against openupm/openupm.
-#   3. Merge a tagged GitHub release on this repo (e.g. `v0.7.0`)
+#   3. Merge a tagged GitHub release on this repo (e.g. `v0.7.1`)
 #      so OpenUPM CI has a version to publish.
 #
 # Reference: https://openupm.com/docs/adding-upm-package.html
 
-name: com.roslyn-repl
+name: com.youngchan.roslyn-repl
 displayName: Unity Roslyn REPL
 repoUrl: https://github.com/djdcks12/UNITY-ROSLYN-REPL
 parentRepoUrl: ""

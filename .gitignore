@@ -13,6 +13,10 @@
 Thumbs.db
 desktop.ini
 
+# Local release artifacts
+*.tgz
+*.tgz.meta
+
 # Unity (this folder is a UPM package, not a Unity project; these dirs
 # only appear if someone accidentally opens the package as a project)
 Library/

@@ -3,20 +3,20 @@ using System.Diagnostics;
 using System.IO;
 using UnityEditor;
 using UnityEngine;
+using RoslynRepl.Editor.Core;
 using Debug = UnityEngine.Debug;
 
 namespace RoslynRepl.Editor.Diagnostics
 {
     public static class InstallRoslynMenu
     {
-        private const string PackageRoot = "Packages/com.roslyn-repl";
         private const string RoslynScriptRel = "Tools~/install-roslyn.ps1";
         private const string HarmonyScriptRel = "Tools~/install-harmony.ps1";
 
         [MenuItem("Tools/Roslyn REPL/Install Roslyn DLLs", priority = 200)]
         public static void Install()
         {
-            var packageAbs = Path.GetFullPath(PackageRoot);
+            var packageAbs = Path.GetFullPath(ReplPackagePaths.PackageRoot);
             var roslynScript = Path.Combine(packageAbs, RoslynScriptRel);
             var harmonyScript = Path.Combine(packageAbs, HarmonyScriptRel);
 

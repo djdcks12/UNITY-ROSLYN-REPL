@@ -10,9 +10,8 @@ namespace RoslynRepl.Editor.UI
 {
     public class RoslynReplWindow : EditorWindow
     {
-        private const string PackageRoot = "Packages/com.roslyn-repl";
-        private const string UxmlPath = PackageRoot + "/Editor/UI/Layouts/RoslynReplWindow.uxml";
-        private const string UssPath  = PackageRoot + "/Editor/UI/Layouts/RoslynReplWindow.uss";
+        private static string UxmlPath => ReplPackagePaths.AssetPath("Editor/UI/Layouts/RoslynReplWindow.uxml");
+        private static string UssPath  => ReplPackagePaths.AssetPath("Editor/UI/Layouts/RoslynReplWindow.uss");
 
         private const string SessionKey_CodeText = "RoslynRepl.CodeText";
 
@@ -1063,7 +1062,7 @@ return UnityEngine.Application.unityVersion;";
         {
             try
             {
-                var json = System.IO.File.ReadAllText(PackageRoot + "/package.json");
+                var json = System.IO.File.ReadAllText(ReplPackagePaths.AssetPath("package.json"));
                 const string key = "\"version\"";
                 var i = json.IndexOf(key, StringComparison.Ordinal);
                 if (i < 0) return "?";

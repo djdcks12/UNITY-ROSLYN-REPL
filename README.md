@@ -20,7 +20,7 @@ Add the package to `Packages/manifest.json`:
 ```json
 {
   "dependencies": {
-    "com.roslyn-repl": "https://github.com/djdcks12/UNITY-ROSLYN-REPL.git"
+    "com.youngchan.roslyn-repl": "https://github.com/djdcks12/UNITY-ROSLYN-REPL.git"
   }
 }
 ```
@@ -28,7 +28,7 @@ Add the package to `Packages/manifest.json`:
 Pin a release tag when you want a stable version:
 
 ```json
-"com.roslyn-repl": "https://github.com/djdcks12/UNITY-ROSLYN-REPL.git#v0.7.0"
+"com.youngchan.roslyn-repl": "https://github.com/djdcks12/UNITY-ROSLYN-REPL.git#v0.7.1"
 ```
 
 ### From Disk
@@ -41,7 +41,7 @@ Pin a release tag when you want a stable version:
 You can also place the package directly at:
 
 ```text
-Packages/com.roslyn-repl/
+Packages/com.youngchan.roslyn-repl/
 ```
 
 ### OpenUPM
@@ -51,7 +51,7 @@ The package includes OpenUPM metadata. After it is published there, install it t
 ```text
 Name:   OpenUPM
 URL:    https://package.openupm.com
-Scope:  com.roslyn-repl
+Scope:  com.youngchan.roslyn-repl
 ```
 
 Until then, use the Git URL or disk install flow.

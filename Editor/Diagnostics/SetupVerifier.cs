@@ -11,8 +11,6 @@ namespace RoslynRepl.Editor.Diagnostics
 {
     public static class SetupVerifier
     {
-        private const string PackageRoot = "Packages/com.roslyn-repl";
-
         private static readonly string[] RequiredAssemblies =
         {
             "Microsoft.CodeAnalysis",
@@ -97,7 +95,7 @@ namespace RoslynRepl.Editor.Diagnostics
         {
             if (string.IsNullOrEmpty(location) || location.StartsWith("<")) return AssemblyOrigin.Unknown;
             var s = location.Replace('\\', '/');
-            if (s.Contains(PackageRoot + "/Editor/Plugins/Roslyn")) return AssemblyOrigin.BundledByUs;
+            if (ReplPackagePaths.IsBundledRoslynAssemblyPath(s)) return AssemblyOrigin.BundledByUs;
             if (s.Contains("/Unity/Hub/Editor/") || s.Contains("/Editor/Data/Managed/") || s.Contains("/Editor/Data/MonoBleedingEdge/")) return AssemblyOrigin.UnityShipped;
             if (s.Contains("/Assets/Plugins/NuGet/")) return AssemblyOrigin.NuGetForUnity;
             if (s.Contains("/Library/PackageCache/") || s.Contains("/Packages/")) return AssemblyOrigin.OtherPackage;

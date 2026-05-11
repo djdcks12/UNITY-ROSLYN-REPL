@@ -4,6 +4,13 @@ All notable changes to this package will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.7.1] - 2026-05-11
+
+### Changed (OpenUPM package id)
+- Package id renamed from `com.roslyn-repl` to `com.youngchan.roslyn-repl` so the package satisfies OpenUPM's reverse-domain package-name convention before the first public registry release.
+- Installation snippets, OpenUPM metadata, the Harmony patch id, and package-root lookups now use the new id. Runtime/editor asset lookups resolve through Unity Package Manager metadata with a legacy `Packages/com.roslyn-repl` fallback so existing local checkout folders keep working during development.
+- The OpenUPM descriptor was renamed to `Documentation~/openupm/com.youngchan.roslyn-repl.yml`; copy that file to `openupm/openupm/data/packages/com.youngchan.roslyn-repl.yml` when submitting the registry PR.
+
 ## [0.7.0] - 2026-05-11
 
 ### Fixed (Pull / Apply resolver parity)
@@ -195,8 +202,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - README "Menus" lists the new `Reset Project Data` menu and explains when to reach for it (stale or sensitive entries, decommissioning, machine handoff).
 
 ### Changed (Phase 9 — discoverability rename)
-- `displayName` rebranded `Roslyn REPL` → `Unity Roslyn REPL` so OpenUPM and Package Manager UI searches for the literal `unity` keyword surface this package. The package id (`com.roslyn-repl`), C# namespaces (`RoslynRepl.Editor.*`), assembly definition, menu paths, and on-disk folder layout are all unchanged — anyone already depending on the package by name doesn't need to migrate, and nothing internal needs to be edited.
-- GitHub repository renamed `ROSLYN-REPL` → `UNITY-ROSLYN-REPL` for the same discoverability reason. All `repository.url`, `documentationUrl`, `changelogUrl`, `licensesUrl` references in `package.json`, README installation snippets (Git URL options, both `main` and tagged), and the OpenUPM descriptor (`Documentation~/openupm/com.roslyn-repl.yml`) point at the new URL. GitHub auto-redirects from the old slug, so existing clones, PR links, and outbound references keep resolving.
+- `displayName` rebranded `Roslyn REPL` → `Unity Roslyn REPL` so OpenUPM and Package Manager UI searches for the literal `unity` keyword surface this package. The C# namespaces (`RoslynRepl.Editor.*`), assembly definition, menu paths, and on-disk source layout stay unchanged.
+- GitHub repository renamed `ROSLYN-REPL` → `UNITY-ROSLYN-REPL` for the same discoverability reason. All `repository.url`, `documentationUrl`, `changelogUrl`, `licensesUrl` references in `package.json`, README installation snippets (Git URL options, both `main` and tagged), and the OpenUPM descriptor point at the new URL. GitHub auto-redirects from the old slug, so existing clones, PR links, and outbound references keep resolving.
 - `unity` added to `package.json: keywords` and to the OpenUPM `topics` list.
 
 ### Added (Phase 7 — distribution)
@@ -204,7 +211,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `Tools / Roslyn REPL / Import Default Snippets` menu invokes the import and surfaces an `EditorUtility.DisplayDialog` summary (`X added, Y skipped`). If the Snippets popup is open, `SnippetLibraryWindow.NotifyChanged()` refreshes its list immediately.
 - README expanded with Quick start, Window guide (ASCII layout + toolbar / side-panel reference tables), Inside snippets (`_` and `ct` accessors), Keyboard shortcuts table, Menus list, and a Troubleshooting section covering six recurring friction points. Roadmap marks Phase 7 shipped; OpenUPM submission moves to its own "Open" section since it's an external workflow rather than a code change.
 - `package.json` metadata filled out for OpenUPM submission: `description` rewritten to cover the full Phase 1–7 scope, `author.url`, `repository`, `documentationUrl`, `changelogUrl`, `licensesUrl`, and the `keywords` list expanded with `watch` and `snippet`. Version bumped `0.1.0` → `0.7.0` to mark the first release that ships the planned feature set; semver stays sub-1.0 so a future API breakage doesn't violate a stability contract we haven't earned yet.
-- `Documentation~/openupm/com.roslyn-repl.yml` — the OpenUPM registry descriptor in its final form, ready to copy into `openupm/openupm/data/packages/` as a single-PR submission once the maintainer is ready.
+- `Documentation~/openupm/com.youngchan.roslyn-repl.yml` — the OpenUPM registry descriptor in its final form, ready to copy into `openupm/openupm/data/packages/` as a single-PR submission once the maintainer is ready.
 - README "Installation" section restructured into four options: OpenUPM (marked pending), Git URL (with both `main` and pinned-tag examples), in-project copy, and Add-From-Disk — so the doc tells the same story whether or not the registry submission has landed yet.
 
 ### Added (Phase 6 — watch panel)

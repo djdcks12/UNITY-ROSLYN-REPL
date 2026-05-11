@@ -37,7 +37,7 @@ namespace RoslynRepl.Editor.Patches
     /// </summary>
     public static class PatchEngine
     {
-        public const string HarmonyId = "com.roslyn-repl.runtime-patch";
+        public const string HarmonyId = "com.youngchan.roslyn-repl.runtime-patch";
 
         // Per-applied-patch handle so Revert knows what to undo. Keyed by
         // the same MethodPatchSpec.Key so the registry and the engine
