@@ -423,6 +423,16 @@ Tools / Roslyn REPL / Reset Project Data
 
 Reset clears snippets, history, watches, custom usings, previous result `_`, visible Output, stored runtime patch specs, and the in-memory compiled-watch cache. Active Harmony patches are reverted as part of the reset.
 
+### Memory and Domain Reload
+
+Each Run, Watch refresh, and Apply Patch loads a small dynamic assembly that can't be unloaded until the script domain reloads. The toolbar shows a `💾 N asm` indicator when any are loaded. The pill turns yellow as the count climbs and red when it's high enough that you'd notice the memory in a profiler. Click it to open a confirm dialog, or use:
+
+```text
+Tools / Roslyn REPL / Force Domain Reload
+```
+
+The reload also runs every time you recompile a script or toggle Play Mode, so most of the time the count takes care of itself.
+
 ## Safety Notes
 
 This tool executes editor code in your Unity project. Treat snippets and patches like editor scripts:

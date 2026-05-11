@@ -41,6 +41,7 @@ return UnityEngine.Application.unityVersion;";
         private Label _durationLabel;
         private Label _modeLabel;
         private Label _patchBadge;
+        private Label _asmBadge;
         private Label _outputSummary;
         private ObjectBrowserView _browser;
         private WatchPanelView _watch;
@@ -69,6 +70,31 @@ return UnityEngine.Application.unityVersion;";
             Open();
             var win = GetWindow<RoslynReplWindow>();
             win.SetPatchesModeActive(true);
+        }
+
+        [MenuItem("Tools/Roslyn REPL/Force Domain Reload", priority = 220)]
+        public static void ForceDomainReload()
+        {
+            // Issue #24: long sessions accumulate ReplDynamic_*
+            // assemblies that Mono can't unload. The reload tears
+            // them all out at once, but it also re-runs every
+            // [InitializeOnLoad] static ctor and resets in-memory
+            // state — so guard with an explicit confirm so the user
+            // doesn't lose work mid-edit by clicking the toolbar
+            // badge by accident.
+            int count = RoslynRepl.Editor.Diagnostics.ReplDiagnostics.DynamicAssemblyCount;
+            bool proceed = EditorUtility.DisplayDialog(
+                "Roslyn REPL — Force Domain Reload",
+                $"Reload the script domain now to free {count} dynamic assembl{(count == 1 ? "y" : "ies")}?\n\n" +
+                "This will:\n" +
+                "  • drop every loaded ReplDynamic_* assembly,\n" +
+                "  • reset the in-memory `_` carry-over,\n" +
+                "  • re-run every [InitializeOnLoad] static constructor.\n\n" +
+                "Save your work first. The reload takes a few seconds.",
+                "Reload now",
+                "Cancel");
+            if (!proceed) return;
+            EditorUtility.RequestScriptReload();
         }
 
         [MenuItem("Tools/Roslyn REPL/Import Default Snippets", priority = 30)]
@@ -253,6 +279,7 @@ return UnityEngine.Application.unityVersion;";
             _durationLabel = root.Q<Label>("duration-label");
             _modeLabel     = root.Q<Label>("mode-label");
             _patchBadge    = root.Q<Label>("patch-badge");
+            _asmBadge      = root.Q<Label>("asm-badge");
             _outputSummary = root.Q<Label>("output-summary-label");
 
             // Issue #22: keep the toolbar badge live against
@@ -276,6 +303,18 @@ return UnityEngine.Application.unityVersion;";
                     "unchanged — Apply ↔ Revert from the Patches view.";
             }
             UpdatePatchBadge();
+
+            // Issue #24 surface: count of dynamic assemblies the
+            // engine has loaded since the last domain reload. The
+            // AssemblyCountChanged event fires on every load, so a
+            // single subscribe is enough — no polling.
+            RoslynRepl.Editor.Diagnostics.ReplDiagnostics.AssemblyCountChanged -= UpdateAsmBadge;
+            RoslynRepl.Editor.Diagnostics.ReplDiagnostics.AssemblyCountChanged += UpdateAsmBadge;
+            if (_asmBadge != null)
+            {
+                _asmBadge.RegisterCallback<MouseDownEvent>(_ => ForceDomainReload());
+            }
+            UpdateAsmBadge();
 
             // Note: Output / Patches mode tabs in the lower pane
             // header. Clicking either label flips the visible host
@@ -422,6 +461,7 @@ return UnityEngine.Application.unityVersion;";
             SnippetLibraryWindow.OnSaveRequested -= SaveCurrentEditorAsSnippet;
             RoslynRepl.Editor.Patches.PatchRegistry.Changed -= UpdatePatchBadge;
             RoslynRepl.Editor.Patches.PatchAutoReapply.SettingsChanged -= UpdatePatchBadge;
+            RoslynRepl.Editor.Diagnostics.ReplDiagnostics.AssemblyCountChanged -= UpdateAsmBadge;
             // Drop the watch panel's WatchStore subscription so this
             // window's instance doesn't keep refreshing in the
             // background after it's closed (or before it's rebuilt by
@@ -471,6 +511,50 @@ return UnityEngine.Application.unityVersion;";
             {
                 _patchBadge.style.display = DisplayStyle.None;
             }
+        }
+
+        private void UpdateAsmBadge()
+        {
+            if (_asmBadge == null) return;
+            int count = RoslynRepl.Editor.Diagnostics.ReplDiagnostics.DynamicAssemblyCount;
+            if (count == 0)
+            {
+                _asmBadge.style.display = DisplayStyle.None;
+                return;
+            }
+
+            _asmBadge.text = $"💾 {count} asm";
+            _asmBadge.RemoveFromClassList("rr-asm-badge--warn");
+            _asmBadge.RemoveFromClassList("rr-asm-badge--high");
+
+            var severity = RoslynRepl.Editor.Diagnostics.ReplDiagnostics.SeverityOf(count);
+            switch (severity)
+            {
+                case RoslynRepl.Editor.Diagnostics.AssemblyLoadSeverity.High:
+                    _asmBadge.AddToClassList("rr-asm-badge--high");
+                    _asmBadge.tooltip =
+                        $"{count} ReplDynamic_* assemblies loaded since the last domain reload " +
+                        $"(at or above the {RoslynRepl.Editor.Diagnostics.ReplDiagnostics.HighThreshold} threshold).\n" +
+                        "Memory will keep growing every Run / Watch refresh / Apply Patch until reload.\n" +
+                        "Click to open the Force Domain Reload confirm dialog.";
+                    break;
+                case RoslynRepl.Editor.Diagnostics.AssemblyLoadSeverity.Warn:
+                    _asmBadge.AddToClassList("rr-asm-badge--warn");
+                    _asmBadge.tooltip =
+                        $"{count} ReplDynamic_* assemblies loaded since the last domain reload " +
+                        $"(at or above the {RoslynRepl.Editor.Diagnostics.ReplDiagnostics.WarnThreshold} hint level).\n" +
+                        "Mono can't unload these — they release on script recompile, Play Mode toggle, or Force Domain Reload.\n" +
+                        "Click to open the reload confirm dialog.";
+                    break;
+                default:
+                    _asmBadge.tooltip =
+                        $"{count} ReplDynamic_* assemblies loaded since the last domain reload.\n" +
+                        "These release on script recompile, Play Mode toggle, or Force Domain Reload.\n" +
+                        "Click to open the reload confirm dialog.";
+                    break;
+            }
+
+            _asmBadge.style.display = DisplayStyle.Flex;
         }
 
         public void SetPatchesModeActive(bool active)

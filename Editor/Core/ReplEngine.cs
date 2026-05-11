@@ -343,14 +343,17 @@ namespace RoslynRepl.Editor.Core
             var asm = args?.LoadedAssembly;
             if (asm == null) return;
 
-            // Skip the engine's own emitted assemblies — every cache
-            // miss path ends with `Assembly.Load(ms.ToArray())`, and
-            // that load fires this same event. Wiping the cache there
-            // would defeat the entire feature.
+            // Skip every engine-emitted assembly — both the REPL
+            // snippet path (ReplDynamic_*) and the runtime patch
+            // path (ReplPatch_*) load through Assembly.Load and fire
+            // this same event. Wiping the cache on either would
+            // defeat the cache, and routing through the shared
+            // ReplDiagnostics predicate keeps the prefix list
+            // declared in one place.
             string name;
             try { name = asm.GetName().Name ?? string.Empty; }
             catch { name = string.Empty; }
-            if (name.StartsWith("ReplDynamic_", StringComparison.Ordinal)) return;
+            if (RoslynRepl.Editor.Diagnostics.ReplDiagnostics.IsReplGeneratedAssembly(name)) return;
             if (asm.IsDynamic) return;
 
             InvalidateCompileCache();

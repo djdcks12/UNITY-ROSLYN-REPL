@@ -158,8 +158,23 @@ namespace RoslynRepl.Editor.Diagnostics
             // tuning Watch panels with N expressions × M Runs and
             // wondering why memory crept up.
             sb.AppendLine();
-            sb.AppendLine($"  [diag]     Loaded REPL dynamic assemblies: {CountDynamicReplAssemblies()}");
+            int dynCount = CountDynamicReplAssemblies();
+            var severity = ReplDiagnostics.SeverityOf(dynCount);
+            string severityTag = severity switch
+            {
+                AssemblyLoadSeverity.High => "  [warn]    ",
+                AssemblyLoadSeverity.Warn => "  [hint]    ",
+                _                         => "  [diag]    ",
+            };
+            sb.AppendLine($"{severityTag}Loaded REPL dynamic assemblies: {dynCount}");
             sb.AppendLine($"             (cleared by domain reload — recompile any script or re-enter Play Mode)");
+            if (severity != AssemblyLoadSeverity.Normal)
+            {
+                int threshold = severity == AssemblyLoadSeverity.High
+                    ? ReplDiagnostics.HighThreshold
+                    : ReplDiagnostics.WarnThreshold;
+                sb.AppendLine($"             at or above {threshold} — consider 'Tools / Roslyn REPL / Force Domain Reload' to free memory.");
+            }
             sb.AppendLine($"  [diag]     Cached MetadataReferences: {AssemblyReferenceCache.CountOrZero}");
             // Note: Harmony is optional — only the Runtime Method
             // Patch feature needs it. Don't list it as Required (so
@@ -186,22 +201,13 @@ namespace RoslynRepl.Editor.Diagnostics
             return false;
         }
 
+        // Single source of truth lives in ReplDiagnostics — both the
+        // REPL snippet path and the runtime patch path emit
+        // assemblies that need to count, and a local copy of the
+        // prefix list is exactly what the PR review caught letting
+        // ReplPatch_* drift out of sight.
         private static int CountDynamicReplAssemblies()
-        {
-            // Assembly.Load(byte[]) produces a regular Assembly (not
-            // IsDynamic), so filter by name prefix. Matches the
-            // "ReplDynamic_<8 hex>" naming ReplEngine.Execute uses.
-            int count = 0;
-            foreach (var a in AppDomain.CurrentDomain.GetAssemblies())
-            {
-                string name;
-                try { name = a.GetName().Name; }
-                catch { continue; }
-                if (name != null && name.StartsWith("ReplDynamic_", StringComparison.Ordinal))
-                    count++;
-            }
-            return count;
-        }
+            => ReplDiagnostics.DynamicAssemblyCount;
     }
 
     public class AssemblyEntry
