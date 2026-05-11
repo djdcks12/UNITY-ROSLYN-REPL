@@ -92,19 +92,31 @@ namespace RoslynRepl.Editor.Patches
         ///
         ///   Pass 2 (fallback): if Pass 1 found nothing, collect a
         ///   *global* fallback pool from every path:
-        ///     • Semantic-built file with no strict match and
-        ///       exactly one arity candidate → that candidate is a
-        ///       fallback. Multi-candidate semantic-built files
-        ///       contribute nothing (we already proved no strict
-        ///       match exists, and we won't guess between
-        ///       overloads).
+        ///     • Semantic-built file with exactly one arity
+        ///       candidate → re-classify the candidate via the
+        ///       tri-state matcher (<see cref="ParamMatch"/>). Only
+        ///       <see cref="ParamMatch.Unresolved"/> joins the
+        ///       pool — semantics couldn't resolve a param type, so
+        ///       the candidate is uncertain rather than wrong.
+        ///       <see cref="ParamMatch.Mismatch"/> is dropped:
+        ///       Roslyn explicitly resolved the param to a CLR type
+        ///       that disagrees with the target, so this is a
+        ///       known-wrong overload (the Apply(B.Model) target
+        ///       vs. a partial declaring `using Model = A.Model;
+        ///       void Apply(Model m)` failure mode the tri-state
+        ///       gate exists to block). <see cref="ParamMatch.Exact"/>
+        ///       is impossible here — Pass 1 would have returned it.
+        ///     • Semantic-built multi-candidate file → contributes
+        ///       nothing. Pass 1 already proved no strict match
+        ///       exists, and we won't guess between overloads.
         ///     • Semantic-build-failed file with exactly one arity
-        ///       candidate → that candidate is a fallback.
+        ///       candidate → joins the pool unconditionally; we
+        ///       have no semantic verdict to discriminate against.
         ///     • Semantic-build-failed file with multiple arity
         ///       candidates → only the syntactic-name matches join
-        ///       the pool. No "first candidate as last-resort" fall
-        ///       back: silently picking the wrong overload is the
-        ///       exact failure mode this rewrite exists to fix.
+        ///       the pool. No "first candidate as last-resort"
+        ///       fallback: silently picking the wrong overload is
+        ///       the exact failure mode this rewrite exists to fix.
         ///
         ///   The fallback is taken only when the global pool has
         ///   exactly one member. Two or more members → return null
