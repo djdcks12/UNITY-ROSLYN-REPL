@@ -191,6 +191,15 @@ namespace RoslynRepl.Editor.Patches
             // boundary between "Pull used to handle this case" and
             // "we'd be guessing between two equally-likely
             // overloads".
+            //
+            // Tri-state matcher (PR review): a semantic-built file
+            // whose single candidate Roslyn explicitly resolved to
+            // the *wrong* CLR type does NOT join the fallback pool.
+            // Letting it through would let an alias-mismatched
+            // partial win the global selection just because some
+            // other partial happened to be missing or unparseable
+            // — exactly the failure the rewrite is supposed to
+            // avoid.
             var fallbacks = new List<(PerPathContext ctx, TypeDeclarationSyntax td, MethodDeclarationSyntax m)>();
             foreach (var ctx in contexts)
             {
@@ -201,7 +210,21 @@ namespace RoslynRepl.Editor.Patches
                     // files can fall back — multiple unresolved
                     // overloads stay ambiguous.
                     if (ctx.Candidates.Count == 1)
-                        fallbacks.Add((ctx, ctx.Candidates[0].td, ctx.Candidates[0].m));
+                    {
+                        var only = ctx.Candidates[0];
+                        var classification = ClassifyParamTypesSemantic(only.m, paramTypes, ctx.Model);
+                        // Exact would have been picked in Pass 1.
+                        // Reaching here means the candidate is
+                        // either Unresolved (semantics couldn't
+                        // resolve a param type — broken assembly
+                        // ref, generic, etc.) or Mismatch
+                        // (semantics resolved and disagreed).
+                        // Only Unresolved is a legitimate
+                        // fallback; Mismatch is a known-wrong
+                        // verdict and gets dropped.
+                        if (classification == ParamMatch.Unresolved)
+                            fallbacks.Add((ctx, only.td, only.m));
+                    }
                 }
                 else
                 {
@@ -532,18 +555,42 @@ namespace RoslynRepl.Editor.Patches
             return true;
         }
 
-        private static bool MatchesParamTypesSemantic(
+        // Tri-state result for the semantic param-type matcher.
+        // The previous bool collapsed two cases (PR review for #30):
+        //   - Roslyn semantics resolved the param type and it disagrees
+        //     with the target's CLR type → this candidate is *known
+        //     wrong*, must not feed the fallback pool.
+        //   - Roslyn couldn't resolve at all (broken assembly reference,
+        //     missing using, generic parameter) → uncertain, candidate
+        //     can still join the fallback pool when nothing better is
+        //     available globally.
+        // Splitting them prevents the "single semantic-built candidate
+        // explicitly mismatches but still wins the global fallback"
+        // failure mode.
+        private enum ParamMatch
+        {
+            Exact,        // every param resolved and matches target
+            Unresolved,   // at least one param's type couldn't be resolved
+            Mismatch,     // a param resolved but to a different CLR type
+        }
+
+        private static ParamMatch ClassifyParamTypesSemantic(
             MethodDeclarationSyntax m,
             Type[] paramTypes,
             SemanticModel model)
         {
-            if (model == null) return false;
+            if (model == null) return ParamMatch.Unresolved;
+
+            bool sawUnresolved = false;
             for (int i = 0; i < paramTypes.Length; i++)
             {
                 var typeSyntax = m.ParameterList.Parameters[i].Type;
-                if (typeSyntax == null) return false;
                 var t = paramTypes[i];
-                if (t == null) return false;
+                if (typeSyntax == null || t == null)
+                {
+                    sawUnresolved = true;
+                    continue;
+                }
 
                 // Either path can land us on the same ITypeSymbol;
                 // GetSymbolInfo returns the named type symbol when
@@ -551,14 +598,26 @@ namespace RoslynRepl.Editor.Patches
                 // built-ins like `int` whose Symbol may be null.
                 var sym = model.GetSymbolInfo(typeSyntax).Symbol as ITypeSymbol
                     ?? model.GetTypeInfo(typeSyntax).Type;
-                if (sym == null) return false;
+                if (sym == null) { sawUnresolved = true; continue; }
 
                 var resolved = ResolveTypeFromITypeSymbol(sym);
-                if (resolved == null) return false;
-                if (resolved != t) return false;
+                if (resolved == null) { sawUnresolved = true; continue; }
+
+                // Definitive disagreement — semantics gave us a
+                // concrete CLR type that isn't the one the caller
+                // asked for. Short-circuit; no point looking at
+                // other params, and we don't want any later
+                // "Unresolved" param to mask this verdict.
+                if (resolved != t) return ParamMatch.Mismatch;
             }
-            return true;
+            return sawUnresolved ? ParamMatch.Unresolved : ParamMatch.Exact;
         }
+
+        private static bool MatchesParamTypesSemantic(
+            MethodDeclarationSyntax m,
+            Type[] paramTypes,
+            SemanticModel model)
+            => ClassifyParamTypesSemantic(m, paramTypes, model) == ParamMatch.Exact;
 
         // Build a single-file Compilation just to ask the SemanticModel
         // a question. Cost is one CSharpCompilation.Create + one
