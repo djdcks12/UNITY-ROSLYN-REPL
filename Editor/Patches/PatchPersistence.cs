@@ -90,12 +90,16 @@ namespace RoslynRepl.Editor.Patches
             // might still hold values for projects upgraded from 0.7.1.
             // Decode the legacy pipe-separated blob, write the JSON file,
             // drop the legacy key.
+            //
+            // Capture HasKey *before* LoadLegacy so we drop the
+            // registry-backed key even when the decoded list is empty
+            // (empty blob, every line failed to base64-decode) —
+            // leaving the key behind would defeat the EditorPrefs-
+            // cleanup goal of issue #27. PR-review followup.
+            bool hadLegacy = EditorPrefs.HasKey(LegacyPrefsKey);
             var legacy = LoadLegacy();
-            if (legacy.Count > 0)
-            {
-                PersistInternal(legacy);
-                EditorPrefs.DeleteKey(LegacyPrefsKey);
-            }
+            if (hadLegacy) EditorPrefs.DeleteKey(LegacyPrefsKey);
+            if (legacy.Count > 0) PersistInternal(legacy);
             return legacy;
         }
 

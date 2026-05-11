@@ -44,12 +44,16 @@ namespace RoslynRepl.Editor.Core
             // EditorPrefs key might still hold values for projects
             // that upgraded from 0.7.1. Decode the legacy format,
             // write the new file, drop the old key.
+            //
+            // Capture HasKey *before* LoadLegacy so we can drop the
+            // registry-backed key even when its decoded list is empty
+            // (empty blob, all-corrupt entries) — leaving an empty key
+            // behind would defeat the EditorPrefs-cleanup goal of
+            // issue #27. PR-review followup.
+            bool hadLegacy = EditorPrefs.HasKey(LegacyPrefsKey);
             var legacy = LoadLegacy();
-            if (legacy.Count > 0)
-            {
-                PersistInternal(legacy);
-                EditorPrefs.DeleteKey(LegacyPrefsKey);
-            }
+            if (hadLegacy) EditorPrefs.DeleteKey(LegacyPrefsKey);
+            if (legacy.Count > 0) PersistInternal(legacy);
             return legacy;
         }
 

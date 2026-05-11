@@ -41,12 +41,14 @@ namespace RoslynRepl.Editor.Core
                 return DecodeJson(json);
             }
 
+            // Capture HasKey *before* LoadLegacy so we drop the
+            // registry-backed key even when its decoded list is empty
+            // (empty blob, all-corrupt entries) — see WatchStore.Load
+            // for the same reasoning. PR-review followup on #27.
+            bool hadLegacy = EditorPrefs.HasKey(LegacyPrefsKey);
             var legacy = LoadLegacy();
-            if (legacy.Count > 0)
-            {
-                PersistInternal(legacy);
-                EditorPrefs.DeleteKey(LegacyPrefsKey);
-            }
+            if (hadLegacy) EditorPrefs.DeleteKey(LegacyPrefsKey);
+            if (legacy.Count > 0) PersistInternal(legacy);
             return legacy;
         }
 
