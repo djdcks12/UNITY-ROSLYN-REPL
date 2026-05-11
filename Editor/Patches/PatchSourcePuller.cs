@@ -60,18 +60,55 @@ namespace RoslynRepl.Editor.Patches
         }
 
         /// <summary>
-        /// Semantic-aware method-declaration locator shared with
-        /// `PatchSourceWriter.ApplyToFile`. Walks every MonoScript
-        /// path the declaring type maps to (covers partial classes
-        /// split across files), parses each, builds a one-shot
-        /// SemanticModel for it, and matches the target by name +
-        /// arity + each parameter's resolved CLR type. This is the
-        /// same matching depth the body-extractor uses, so Pull and
-        /// Apply To File can never disagree on which overload is
-        /// "the" target — even with per-file `using Model = …`
-        /// aliases that map the same simple name to different types.
-        /// Returns null when no file produces an exact semantic
-        /// match.
+        /// Semantic-aware method-declaration locator shared by Pull
+        /// Original (<see cref="TryPullMethodBody"/>) and Apply To
+        /// File (<see cref="PatchSourceWriter"/>). Walks every
+        /// MonoScript path the declaring type maps to (covers
+        /// partial classes split across files), parses each, builds
+        /// a one-shot SemanticModel for it, and matches the target
+        /// by name + arity + each parameter's resolved CLR type.
+        ///
+        /// Issue #30 (resolver parity): Pull and Apply must never
+        /// disagree. Earlier shape had Pull go through a private
+        /// FindMethodNode that fell back to "single arity-match
+        /// candidate" and "first candidate" when semantic / syntactic
+        /// matching failed, while this finder returned null in those
+        /// cases. Result: a method that pulled successfully could
+        /// later fail to apply. This finder now folds the same
+        /// fallback chain in, and TryPullMethodBody routes through
+        /// it, so the two surfaces resolve to the same FoundMethod
+        /// for any input.
+        ///
+        /// Per-path resolution order:
+        ///   1. Collect every (TypeDecl, MethodDecl) pair whose
+        ///      simple name + arity matches.
+        ///   2. SemanticModel built →
+        ///        a. Return the first candidate whose parameter
+        ///           types resolve through the file's using/alias
+        ///           context to the target's CLR types. This is the
+        ///           strict path that handles per-file alias edge
+        ///           cases.
+        ///        b. Semantic build succeeded but no candidate
+        ///           matched semantically:
+        ///             - Exactly one candidate in this file →
+        ///               return it. Single arity-match is
+        ///               unambiguous; semantics may have failed
+        ///               because the file references types from
+        ///               an unloaded assembly.
+        ///             - Multiple candidates → continue to the
+        ///               next path. We won't guess between
+        ///               overloads when semantics couldn't
+        ///               disambiguate.
+        ///   3. Semantic build failed entirely (Roslyn semantic
+        ///      analysis errored on the file) →
+        ///        a. Single candidate → return it.
+        ///        b. Multiple candidates → return the first that
+        ///           matches syntactically by parameter type
+        ///           name; if none does, return the first
+        ///           candidate as last-resort. Pull used to do
+        ///           this, and dropping it here regressed the
+        ///           "I just pulled this body" case.
+        ///   4. No path produced a match → null.
         /// </summary>
         public static FoundMethod FindMethodForTarget(MethodInfo target)
         {
@@ -103,8 +140,12 @@ namespace RoslynRepl.Editor.Patches
                 var typeDecls = FindMatchingTypeDeclarations(root, target.DeclaringType);
                 if (typeDecls.Count == 0) continue;
 
-                var model = BuildSingleFileSemanticModel(root);
-
+                // Collect every (typeDecl, methodDecl) pair the
+                // file declares for this name + arity. We need the
+                // full list up front because the fallback rules
+                // below depend on the candidate count, not just on
+                // "first match wins".
+                var candidates = new List<(TypeDeclarationSyntax td, MethodDeclarationSyntax m)>();
                 foreach (var td in typeDecls)
                 {
                     foreach (var member in td.Members)
@@ -112,29 +153,64 @@ namespace RoslynRepl.Editor.Patches
                         if (!(member is MethodDeclarationSyntax m)) continue;
                         if (m.Identifier.ValueText != target.Name) continue;
                         if (m.ParameterList.Parameters.Count != paramTypes.Length) continue;
-
-                        // Prefer semantic match (handles per-file
-                        // alias contexts). When the SemanticModel
-                        // can't resolve, fall back to syntactic so a
-                        // single-overload file with broken-Roslyn
-                        // semantics still routes correctly.
-                        bool match = MatchesParamTypesSemantic(m, paramTypes, model);
-                        if (!match && model == null)
-                            match = MatchesParamTypesSyntactic(m, paramTypes);
-                        if (!match) continue;
-
-                        return new FoundMethod
-                        {
-                            SourcePath = path,
-                            Source = source,
-                            Root = root,
-                            TypeDecl = td,
-                            Method = m,
-                        };
+                        candidates.Add((td, m));
                     }
                 }
+                if (candidates.Count == 0) continue;
+
+                var model = BuildSingleFileSemanticModel(root);
+
+                if (model != null)
+                {
+                    // Strict semantic match first.
+                    foreach (var c in candidates)
+                    {
+                        if (MatchesParamTypesSemantic(c.m, paramTypes, model))
+                            return MakeFound(path, source, root, c.td, c.m);
+                    }
+                    // Semantic resolved nothing. If exactly one
+                    // arity match exists in this file, accept it —
+                    // semantics may have failed because the file
+                    // pulls in symbols from an unloaded assembly,
+                    // and refusing here would block Pull on a body
+                    // that Apply also can't reach later. Multiple
+                    // candidates without semantic disambiguation
+                    // stay ambiguous; try the next path.
+                    if (candidates.Count == 1)
+                        return MakeFound(path, source, root, candidates[0].td, candidates[0].m);
+                    continue;
+                }
+
+                // Semantic build failed for this file entirely. Try
+                // syntactic match; fall back to single candidate or
+                // the first candidate as Pull historically did.
+                if (candidates.Count == 1)
+                    return MakeFound(path, source, root, candidates[0].td, candidates[0].m);
+                foreach (var c in candidates)
+                {
+                    if (MatchesParamTypesSyntactic(c.m, paramTypes))
+                        return MakeFound(path, source, root, c.td, c.m);
+                }
+                return MakeFound(path, source, root, candidates[0].td, candidates[0].m);
             }
             return null;
+        }
+
+        private static FoundMethod MakeFound(
+            string path,
+            string source,
+            SyntaxNode root,
+            TypeDeclarationSyntax td,
+            MethodDeclarationSyntax m)
+        {
+            return new FoundMethod
+            {
+                SourcePath = path,
+                Source = source,
+                Root = root,
+                TypeDecl = td,
+                Method = m,
+            };
         }
 
         /// <summary>
@@ -159,46 +235,44 @@ namespace RoslynRepl.Editor.Patches
             if (declaringType == null)
                 return Fail("Method has no declaring type (anonymous?).");
 
-            var paths = ResolveScriptPaths(declaringType);
-            if (paths.Count == 0)
-                return Fail($"No MonoScript found for {declaringType.FullName}. " +
-                            "Ensure the type lives in a `.cs` file inside Assets/ or Packages/.");
-
-            var paramTypes = method.GetParameters().Select(p => p.ParameterType).ToArray();
-            string lastParseError = null;
-
-            foreach (var path in paths)
+            // Issue #30 (resolver parity): route Pull through the same
+            // FindMethodForTarget call Apply To File uses, so the two
+            // surfaces always agree on which (path, MethodDeclSyntax)
+            // tuple represents "the" target. The previous shape used a
+            // private FindMethodNode whose fallback chain (single arity
+            // candidate, syntactic match, last-resort first candidate)
+            // was richer than the writer's finder — Pull would succeed
+            // on a body Apply could no longer locate. Sharing the
+            // finder closes that gap by construction.
+            var found = FindMethodForTarget(method);
+            if (found == null)
             {
-                string source;
-                try { source = File.ReadAllText(path); }
-                catch (Exception ex) { lastParseError = $"Could not read '{path}': {ex.Message}"; continue; }
+                var paths = ResolveScriptPaths(declaringType);
+                if (paths.Count == 0)
+                    return Fail($"No MonoScript found for {declaringType.FullName}. " +
+                                "Ensure the type lives in a `.cs` file inside Assets/ or Packages/.");
 
-                MethodDeclarationSyntax match;
-                try { match = FindMethodNode(source, declaringType, method.Name, paramTypes); }
-                catch (Exception ex) { lastParseError = $"Roslyn parse failed for '{path}': {ex.Message}"; continue; }
-
-                if (match == null) continue;
-                if (match.Body == null)
-                {
-                    // Expression-bodied (`=> expr`) — we don't
-                    // unwrap those. Surface a specific message rather
-                    // than silently returning empty.
-                    return Fail($"{declaringType.Name}.{method.Name} is expression-bodied; only block-bodied methods can be pulled. Convert the source to a `{{ … }}` body or write the patch from scratch.");
-                }
-
-                var body = ExtractBodyInside(source, match.Body);
-                return new PullResult
-                {
-                    Success = true,
-                    Body = body,
-                    SourcePath = path,
-                };
+                var paramTypes = method.GetParameters().Select(p => p.ParameterType).ToArray();
+                return Fail(
+                    $"Could not find a method matching {declaringType.Name}.{method.Name}({string.Join(", ", paramTypes.Select(t => t?.Name))}) " +
+                    $"in any of the {paths.Count} candidate file(s). " +
+                    "Method may be auto-generated or in an assembly without source available.");
             }
 
-            return Fail(
-                $"Could not find a method matching {declaringType.Name}.{method.Name}({string.Join(", ", paramTypes.Select(t => t?.Name))}) " +
-                $"in any of the {paths.Count} candidate file(s). " +
-                (lastParseError != null ? "Last error: " + lastParseError : "Method may be auto-generated or in an assembly without source available."));
+            if (found.Method.Body == null)
+            {
+                // Expression-bodied (`=> expr`) — we don't unwrap
+                // those. Surface a specific message rather than
+                // silently returning empty.
+                return Fail($"{declaringType.Name}.{method.Name} is expression-bodied; only block-bodied methods can be pulled. Convert the source to a `{{ … }}` body or write the patch from scratch.");
+            }
+
+            return new PullResult
+            {
+                Success = true,
+                Body = ExtractBodyInside(found.Source, found.Method.Body),
+                SourcePath = found.SourcePath,
+            };
         }
 
         // ─── Source file context ──────────────────────────────────
@@ -609,87 +683,15 @@ namespace RoslynRepl.Editor.Patches
             return result;
         }
 
-        // Step 2 — Roslyn-parse the source and look for a method
-        // declaration whose name + parameter count match. Parameter
-        // type names are checked best-effort (full name first, then
-        // short name); count alone disambiguates the common cases
-        // and avoids the headache of comparing Roslyn's syntax-level
-        // type strings to System.Type's reflection metadata.
-        //
-        // Scoped to the declaring type's syntax declarations so a file
-        // hosting two top-level classes — or an outer class + nested
-        // helper class — that happen to share a method name + arity
-        // can't leak the wrong body. We walk the ancestor chain
-        // (Outer → Inner) when the target is a nested type, and gather
-        // methods *directly* under each matching declaration, never
-        // descending into further nested types of those.
-        private static MethodDeclarationSyntax FindMethodNode(string source, Type declaringType, string methodName, Type[] paramTypes)
-        {
-            var tree = CSharpSyntaxTree.ParseText(source);
-            var root = tree.GetRoot();
-
-            var typeDecls = FindMatchingTypeDeclarations(root, declaringType);
-            if (typeDecls.Count == 0) return null;
-
-            var candidates = new List<MethodDeclarationSyntax>();
-            foreach (var td in typeDecls)
-            {
-                foreach (var member in td.Members)
-                {
-                    if (member is MethodDeclarationSyntax m
-                        && m.Identifier.ValueText == methodName
-                        && m.ParameterList.Parameters.Count == paramTypes.Length)
-                    {
-                        candidates.Add(m);
-                    }
-                }
-            }
-
-            if (candidates.Count == 0) return null;
-
-            // Try semantic disambiguation first — even when there's
-            // only one arity-matching candidate in this file, we
-            // verify its parameter types resolve to what the caller
-            // requested. Two partial files can each have a single
-            // `void Apply(Model)` whose `Model` aliases to a
-            // different CLR type; without semantic verification this
-            // method would happily return the first file's body
-            // when the user's spec actually targeted the other.
-            // SemanticModel.GetSymbolInfo gives us the resolved type
-            // through the file's own using/alias context.
-            var model = BuildSingleFileSemanticModel(root);
-            if (model != null)
-            {
-                foreach (var c in candidates)
-                {
-                    if (MatchesParamTypesSemantic(c, paramTypes, model)) return c;
-                }
-
-                // SemanticModel built but resolved no candidate —
-                // either the file's overloads target different
-                // CLR types than the caller asked for (correct: try
-                // the next path), or semantics genuinely failed
-                // (e.g., file references a type from an unloaded
-                // assembly). Fall through to the syntactic path
-                // only when we have a *single* arity match — no
-                // ambiguity for syntactic to make worse — so we
-                // don't silently miss the body for the broken-
-                // semantic edge case.
-                if (candidates.Count == 1) return candidates[0];
-                return null;
-            }
-
-            // Semantic build failed entirely — fall back to syntactic
-            // matching. Single arity match is unambiguous; multiple
-            // arity matches go through the simple-name comparison and
-            // accept the first hit.
-            if (candidates.Count == 1) return candidates[0];
-            foreach (var c in candidates)
-            {
-                if (MatchesParamTypesSyntactic(c, paramTypes)) return c;
-            }
-            return candidates[0];
-        }
+        // FindMethodNode (the Pull-only variant) was removed in the
+        // resolver-parity change for issue #30. Both Pull and Apply
+        // now share FindMethodForTarget, which carries the same
+        // candidate-collection + semantic / syntactic / single-
+        // candidate / first-candidate fallback chain that used to
+        // live here. The shared finder also returns the parsed
+        // TypeDeclarationSyntax and the source string so callers can
+        // skip the "re-parse to extract the body" step the previous
+        // shape made Pull do.
 
         // Resolve every TypeDeclarationSyntax in the file whose simple
         // name + ancestor type chain + enclosing namespace matches the
