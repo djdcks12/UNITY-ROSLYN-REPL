@@ -162,6 +162,8 @@ Browse:
 
 Double-click an entry in Output mode to generate an inspection snippet. Switch the lower pane to Patches mode and double-click an entry to pick a method from that object's runtime type.
 
+The list shows up to 200 results by default and the search field waits a moment after you stop typing before re-scanning, so the panel stays responsive on big projects. When the cap is reached, a **Load more** button appears next to the result count for the times you really want the full list.
+
 ### Snippet Library
 
 Save useful probes and reload them later. Snippets are stored per project, so one Unity project does not inherit another project's debugging helpers.
