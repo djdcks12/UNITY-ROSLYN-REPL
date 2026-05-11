@@ -9,7 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Changed (OpenUPM package id)
 - Package id renamed from `com.roslyn-repl` to `com.youngchan.roslyn-repl` so the package satisfies OpenUPM's reverse-domain package-name convention before the first public registry release.
 - Installation snippets, OpenUPM metadata, the Harmony patch id, and package-root lookups now use the new id. Runtime/editor asset lookups resolve through Unity Package Manager metadata with a legacy `Packages/com.roslyn-repl` fallback so existing local checkout folders keep working during development.
-- The OpenUPM descriptor was renamed to `Documentation~/openupm/com.youngchan.roslyn-repl.yml`; copy that file to `openupm/openupm/data/packages/com.youngchan.roslyn-repl.yml` when submitting the registry PR.
+- The OpenUPM descriptor was renamed to `Documentation~/openupm/com.youngchan.roslyn-repl.yml`, and the README now lists OpenUPM as the primary install path after the package went live at `https://openupm.com/packages/com.youngchan.roslyn-repl/`.
 
 ## [0.7.0] - 2026-05-11
 
@@ -212,7 +212,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - README expanded with Quick start, Window guide (ASCII layout + toolbar / side-panel reference tables), Inside snippets (`_` and `ct` accessors), Keyboard shortcuts table, Menus list, and a Troubleshooting section covering six recurring friction points. Roadmap marks Phase 7 shipped; OpenUPM submission moves to its own "Open" section since it's an external workflow rather than a code change.
 - `package.json` metadata filled out for OpenUPM submission: `description` rewritten to cover the full Phase 1–7 scope, `author.url`, `repository`, `documentationUrl`, `changelogUrl`, `licensesUrl`, and the `keywords` list expanded with `watch` and `snippet`. Version bumped `0.1.0` → `0.7.0` to mark the first release that ships the planned feature set; semver stays sub-1.0 so a future API breakage doesn't violate a stability contract we haven't earned yet.
 - `Documentation~/openupm/com.youngchan.roslyn-repl.yml` — the OpenUPM registry descriptor in its final form, ready to copy into `openupm/openupm/data/packages/` as a single-PR submission once the maintainer is ready.
-- README "Installation" section restructured into four options: OpenUPM (marked pending), Git URL (with both `main` and pinned-tag examples), in-project copy, and Add-From-Disk — so the doc tells the same story whether or not the registry submission has landed yet.
+- README "Installation" section restructured into OpenUPM, Git URL, and Add-From-Disk flows so the docs match the package's distribution channels.
 
 ### Added (Phase 6 — watch panel)
 - `RoslynRepl.Editor.Core.WatchStore`: project-scoped, `EditorPrefs`-backed list of watch expressions. Same base64-per-entry storage as `RunHistoryStore` so any character a user types is safe. De-dupes exact duplicates so accidental double-Enter doesn't add the same row twice.

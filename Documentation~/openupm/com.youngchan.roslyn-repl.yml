@@ -1,11 +1,7 @@
 # OpenUPM package descriptor.
 #
-# When the package owner is ready to publish on OpenUPM:
-#   1. Copy this file into the openupm/openupm repo at
-#        data/packages/com.youngchan.roslyn-repl.yml
-#   2. Open a pull request against openupm/openupm.
-#   3. Merge a tagged GitHub release on this repo (e.g. `v0.7.1`)
-#      so OpenUPM CI has a version to publish.
+# Published on OpenUPM:
+#   https://openupm.com/packages/com.youngchan.roslyn-repl/
 #
 # Reference: https://openupm.com/docs/adding-upm-package.html
 
@@ -17,7 +13,7 @@ description: |
   Editor-only C# REPL for Unity, powered by Roslyn. Compile and execute
   arbitrary C# at runtime, inspect any MonoBehaviour / ScriptableObject /
   singleton in memory, watch expressions live, save named snippets, and
-  review run history — all from a UI Toolkit window inside the Editor.
+  review run history - all from a UI Toolkit window inside the Editor.
   Zero project dependencies.
 licenseSpdxId: MIT
 licenseName: MIT License

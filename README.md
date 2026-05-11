@@ -13,19 +13,41 @@ Roslyn REPL for Unity is an editor-only toolkit for developers who want a faster
 - Unity 2022.3 or newer is recommended.
 - The package is editor-only and is designed to stay out of Player builds.
 
-### Git URL
+### OpenUPM
 
-Add the package to `Packages/manifest.json`:
+Install with the OpenUPM CLI:
+
+```powershell
+openupm add com.youngchan.roslyn-repl
+```
+
+Or add OpenUPM as a scoped registry in Unity:
+
+```text
+Name:   OpenUPM
+URL:    https://package.openupm.com
+Scope:  com.youngchan
+```
+
+Then add the package by name:
 
 ```json
 {
   "dependencies": {
-    "com.youngchan.roslyn-repl": "https://github.com/djdcks12/UNITY-ROSLYN-REPL.git"
+    "com.youngchan.roslyn-repl": "0.7.1"
   }
 }
 ```
 
-Pin a release tag when you want a stable version:
+Package page:
+
+```text
+https://openupm.com/packages/com.youngchan.roslyn-repl/
+```
+
+### Git URL
+
+Use the Git URL if you prefer not to add a scoped registry:
 
 ```json
 "com.youngchan.roslyn-repl": "https://github.com/djdcks12/UNITY-ROSLYN-REPL.git#v0.7.1"
@@ -43,18 +65,6 @@ You can also place the package directly at:
 ```text
 Packages/com.youngchan.roslyn-repl/
 ```
-
-### OpenUPM
-
-The package includes OpenUPM metadata. After it is published there, install it through a scoped registry:
-
-```text
-Name:   OpenUPM
-URL:    https://package.openupm.com
-Scope:  com.youngchan.roslyn-repl
-```
-
-Until then, use the Git URL or disk install flow.
 
 ## First Setup
 
