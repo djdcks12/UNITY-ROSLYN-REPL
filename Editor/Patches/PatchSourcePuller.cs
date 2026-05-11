@@ -68,47 +68,48 @@ namespace RoslynRepl.Editor.Patches
         /// a one-shot SemanticModel for it, and matches the target
         /// by name + arity + each parameter's resolved CLR type.
         ///
-        /// Issue #30 (resolver parity): Pull and Apply must never
-        /// disagree. Earlier shape had Pull go through a private
-        /// FindMethodNode that fell back to "single arity-match
-        /// candidate" and "first candidate" when semantic / syntactic
-        /// matching failed, while this finder returned null in those
-        /// cases. Result: a method that pulled successfully could
-        /// later fail to apply. This finder now folds the same
-        /// fallback chain in, and TryPullMethodBody routes through
-        /// it, so the two surfaces resolve to the same FoundMethod
-        /// for any input.
+        /// Two-pass resolution (issue #30 follow-up review): a
+        /// strict semantic match in a *later* path always beats a
+        /// fallback in an *earlier* path. The earlier shape walked
+        /// path-by-path and returned the per-path fallback as soon
+        /// as it ran out of strict matches in that one file —
+        /// which, in a partial class with per-file `using Model
+        /// = …` aliases, picked the wrong file's body when each
+        /// part declared exactly one arity-matching overload but
+        /// only one of them resolved to the target's CLR type.
         ///
-        /// Per-path resolution order:
-        ///   1. Collect every (TypeDecl, MethodDecl) pair whose
-        ///      simple name + arity matches.
-        ///   2. SemanticModel built →
-        ///        a. Return the first candidate whose parameter
-        ///           types resolve through the file's using/alias
-        ///           context to the target's CLR types. This is the
-        ///           strict path that handles per-file alias edge
-        ///           cases.
-        ///        b. Semantic build succeeded but no candidate
-        ///           matched semantically:
-        ///             - Exactly one candidate in this file →
-        ///               return it. Single arity-match is
-        ///               unambiguous; semantics may have failed
-        ///               because the file references types from
-        ///               an unloaded assembly.
-        ///             - Multiple candidates → continue to the
-        ///               next path. We won't guess between
-        ///               overloads when semantics couldn't
-        ///               disambiguate.
-        ///   3. Semantic build failed entirely (Roslyn semantic
-        ///      analysis errored on the file) →
-        ///        a. Single candidate → return it.
-        ///        b. Multiple candidates → return the first that
-        ///           matches syntactically by parameter type
-        ///           name; if none does, return the first
-        ///           candidate as last-resort. Pull used to do
-        ///           this, and dropping it here regressed the
-        ///           "I just pulled this body" case.
-        ///   4. No path produced a match → null.
+        /// New shape:
+        ///   Pre-scan: parse every path once, collect every
+        ///   arity-matching (TypeDecl, MethodDecl) pair, and cache
+        ///   the SemanticModel (or null when Roslyn semantics
+        ///   failed for the file).
+        ///
+        ///   Pass 1 (strict): walk every cached path/candidate and
+        ///   return the first one whose semantic parameter types
+        ///   exactly match the target's CLR types. Files whose
+        ///   semantic build failed are skipped here — they can't
+        ///   produce a strict match by definition.
+        ///
+        ///   Pass 2 (fallback): if Pass 1 found nothing, collect a
+        ///   *global* fallback pool from every path:
+        ///     • Semantic-built file with no strict match and
+        ///       exactly one arity candidate → that candidate is a
+        ///       fallback. Multi-candidate semantic-built files
+        ///       contribute nothing (we already proved no strict
+        ///       match exists, and we won't guess between
+        ///       overloads).
+        ///     • Semantic-build-failed file with exactly one arity
+        ///       candidate → that candidate is a fallback.
+        ///     • Semantic-build-failed file with multiple arity
+        ///       candidates → only the syntactic-name matches join
+        ///       the pool. No "first candidate as last-resort" fall
+        ///       back: silently picking the wrong overload is the
+        ///       exact failure mode this rewrite exists to fix.
+        ///
+        ///   The fallback is taken only when the global pool has
+        ///   exactly one member. Two or more members → return null
+        ///   so the caller surfaces "Could not find a method
+        ///   matching ..." rather than commit to a guess.
         /// </summary>
         public static FoundMethod FindMethodForTarget(MethodInfo target)
         {
@@ -118,17 +119,24 @@ namespace RoslynRepl.Editor.Patches
 
             var paramTypes = target.GetParameters().Select(p => p.ParameterType).ToArray();
 
+            // Pre-scan: parse + collect candidates + cache semantic
+            // model per path. We need the full picture before any
+            // return decision — partial classes with per-file
+            // aliases mean a later path's strict semantic match
+            // must always win over an earlier path's fallback.
+            //
+            // Single read of the file — `source` is the exact text
+            // we parse. The original code did
+            // `File.ReadAllText(path)` then `TryParseFile(path)`
+            // which read the file *again*; an IDE / autosave / VCS
+            // write between those reads would pair MethodInfo
+            // spans from version B with `source` from version A,
+            // and the writer's later splice would mangle the file.
+            // Locking the parse to the same string we hold closes
+            // that race.
+            var contexts = new List<PerPathContext>();
             foreach (var path in paths)
             {
-                // Single read of the file — `source` is the exact
-                // text we parse. The original code did
-                // `File.ReadAllText(path)` then `TryParseFile(path)`
-                // which read the file *again*; an IDE / autosave /
-                // VCS write between those reads would pair MethodInfo
-                // spans from version B with `source` from version A,
-                // and the writer's later splice would mangle the
-                // file. Locking the parse to the same string we hold
-                // closes that race.
                 string source;
                 try { source = File.ReadAllText(path); }
                 catch { continue; }
@@ -140,11 +148,6 @@ namespace RoslynRepl.Editor.Patches
                 var typeDecls = FindMatchingTypeDeclarations(root, target.DeclaringType);
                 if (typeDecls.Count == 0) continue;
 
-                // Collect every (typeDecl, methodDecl) pair the
-                // file declares for this name + arity. We need the
-                // full list up front because the fallback rules
-                // below depend on the candidate count, not just on
-                // "first match wins".
                 var candidates = new List<(TypeDeclarationSyntax td, MethodDeclarationSyntax m)>();
                 foreach (var td in typeDecls)
                 {
@@ -158,42 +161,85 @@ namespace RoslynRepl.Editor.Patches
                 }
                 if (candidates.Count == 0) continue;
 
-                var model = BuildSingleFileSemanticModel(root);
-
-                if (model != null)
+                contexts.Add(new PerPathContext
                 {
-                    // Strict semantic match first.
-                    foreach (var c in candidates)
+                    Path = path,
+                    Source = source,
+                    Root = root,
+                    Candidates = candidates,
+                    Model = BuildSingleFileSemanticModel(root),
+                });
+            }
+            if (contexts.Count == 0) return null;
+
+            // Pass 1: strict semantic match across ALL paths. A
+            // later partial that resolves exactly always beats an
+            // earlier partial whose alias points at a different
+            // CLR type.
+            foreach (var ctx in contexts)
+            {
+                if (ctx.Model == null) continue;
+                foreach (var c in ctx.Candidates)
+                {
+                    if (MatchesParamTypesSemantic(c.m, paramTypes, ctx.Model))
+                        return MakeFound(ctx.Path, ctx.Source, ctx.Root, c.td, c.m);
+                }
+            }
+
+            // Pass 2: fallback. Collect globally. Auto-select only
+            // when the pool has exactly one member — that's the
+            // boundary between "Pull used to handle this case" and
+            // "we'd be guessing between two equally-likely
+            // overloads".
+            var fallbacks = new List<(PerPathContext ctx, TypeDeclarationSyntax td, MethodDeclarationSyntax m)>();
+            foreach (var ctx in contexts)
+            {
+                if (ctx.Model != null)
+                {
+                    // Strict pass already ruled out semantic
+                    // matches in this file. Only single-candidate
+                    // files can fall back — multiple unresolved
+                    // overloads stay ambiguous.
+                    if (ctx.Candidates.Count == 1)
+                        fallbacks.Add((ctx, ctx.Candidates[0].td, ctx.Candidates[0].m));
+                }
+                else
+                {
+                    // Semantic build failed entirely. Single arity
+                    // candidate is unambiguous; multi-candidate
+                    // files use syntactic name match — but the
+                    // earlier "first candidate as last-resort"
+                    // is dropped on purpose.
+                    if (ctx.Candidates.Count == 1)
                     {
-                        if (MatchesParamTypesSemantic(c.m, paramTypes, model))
-                            return MakeFound(path, source, root, c.td, c.m);
+                        fallbacks.Add((ctx, ctx.Candidates[0].td, ctx.Candidates[0].m));
                     }
-                    // Semantic resolved nothing. If exactly one
-                    // arity match exists in this file, accept it —
-                    // semantics may have failed because the file
-                    // pulls in symbols from an unloaded assembly,
-                    // and refusing here would block Pull on a body
-                    // that Apply also can't reach later. Multiple
-                    // candidates without semantic disambiguation
-                    // stay ambiguous; try the next path.
-                    if (candidates.Count == 1)
-                        return MakeFound(path, source, root, candidates[0].td, candidates[0].m);
-                    continue;
+                    else
+                    {
+                        foreach (var c in ctx.Candidates)
+                        {
+                            if (MatchesParamTypesSyntactic(c.m, paramTypes))
+                                fallbacks.Add((ctx, c.td, c.m));
+                        }
+                    }
                 }
+            }
 
-                // Semantic build failed for this file entirely. Try
-                // syntactic match; fall back to single candidate or
-                // the first candidate as Pull historically did.
-                if (candidates.Count == 1)
-                    return MakeFound(path, source, root, candidates[0].td, candidates[0].m);
-                foreach (var c in candidates)
-                {
-                    if (MatchesParamTypesSyntactic(c.m, paramTypes))
-                        return MakeFound(path, source, root, c.td, c.m);
-                }
-                return MakeFound(path, source, root, candidates[0].td, candidates[0].m);
+            if (fallbacks.Count == 1)
+            {
+                var sel = fallbacks[0];
+                return MakeFound(sel.ctx.Path, sel.ctx.Source, sel.ctx.Root, sel.td, sel.m);
             }
             return null;
+        }
+
+        private sealed class PerPathContext
+        {
+            public string Path;
+            public string Source;
+            public SyntaxNode Root;
+            public List<(TypeDeclarationSyntax td, MethodDeclarationSyntax m)> Candidates;
+            public SemanticModel Model; // null if Roslyn semantic build failed for this file
         }
 
         private static FoundMethod MakeFound(
