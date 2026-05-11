@@ -16,6 +16,41 @@ namespace RoslynRepl.Editor.UI
 
         private const string SessionKey_CodeText = "RoslynRepl.CodeText";
 
+        // Marshal Run snippet onto a Player Update coroutine before
+        // invoking. Default true: most snippets expect to behave like
+        // a normal Button.onClick (popup spawns / canvas updates /
+        // SuperScrollView Init all rely on the player layout cycle).
+        // Edit Mode ignores this and runs synchronously since there's
+        // no Player Update to yield to. Stored machine-wide because
+        // it's a "how do I want REPL to feel" preference, not a
+        // project setting.
+        private const string PrefsKey_RunOnPlayerFrame = "RoslynRepl.RunOnPlayerFrame";
+        private const string RunOnPlayerFrameMenuPath = "Tools/Roslyn REPL/Run on Player Frame";
+
+        public static bool RunOnPlayerFrameEnabled
+        {
+            get => EditorPrefs.GetBool(PrefsKey_RunOnPlayerFrame, true);
+            set
+            {
+                EditorPrefs.SetBool(PrefsKey_RunOnPlayerFrame, value);
+                Menu.SetChecked(RunOnPlayerFrameMenuPath, value);
+            }
+        }
+
+        [MenuItem(RunOnPlayerFrameMenuPath, priority = 215)]
+        private static void ToggleRunOnPlayerFrame() => RunOnPlayerFrameEnabled = !RunOnPlayerFrameEnabled;
+
+        [MenuItem(RunOnPlayerFrameMenuPath, validate = true)]
+        private static bool ToggleRunOnPlayerFrameValidate()
+        {
+            // Refresh the checkmark on every menu open so a flip
+            // from elsewhere (programmatic setter, another window)
+            // shows correctly. Same pattern PatchAutoReapply uses
+            // for its menu toggle.
+            Menu.SetChecked(RunOnPlayerFrameMenuPath, RunOnPlayerFrameEnabled);
+            return true;
+        }
+
         // Issue #20: ack flag for the cooperative-cancel safety dialog.
         // Stored in machine-wide EditorPrefs (not project-scoped) — the
         // user only needs to learn the threading model once per
@@ -643,18 +678,39 @@ return UnityEngine.Application.unityVersion;";
             // in the Usings editor (which writes EditorPrefs synchronously)
             // take effect immediately, no window restart required.
             var options = new ReplOptions { Usings = UsingsStore.EffectiveUsings() };
-            var result = ReplEngine.Execute(code, options);
-            // Record the snippet whenever Execute returns — including
-            // failures, since users often want to scroll back to a broken
-            // run, fix the error, and try again. RunHistoryStore de-dupes
-            // identical consecutive entries so re-running the same code
-            // doesn't churn the ring.
+
+            // History push happens up front (regardless of where
+            // Execute fires) so a Run that fails or is marshalled
+            // a frame later still shows up in History immediately.
             RunHistoryStore.Push(code);
+
+            // Player-frame marshal. When the toggle is on AND the
+            // editor is in Play Mode, the actual Execute is deferred
+            // to a coroutine that yields one player frame so the
+            // invocation lands inside the next Player Update — same
+            // phase a real Button.onClick fires from. Without this,
+            // popup spawns / canvas updates / SuperScrollView Init
+            // see stale layout state and snippet results don't
+            // match what calling the same code from a button does.
+            // Edit Mode skips the marshal automatically (no Player
+            // Update to wait for) and runs synchronously.
+            if (RunOnPlayerFrameEnabled && EditorApplication.isPlaying)
+            {
+                ReplEngine.ExecuteOnPlayerFrame(code, options, OnRunComplete);
+            }
+            else
+            {
+                OnRunComplete(ReplEngine.Execute(code, options));
+            }
+        }
+
+        private void OnRunComplete(ReplResult result)
+        {
             RenderResult(result);
             // Re-evaluate every watched expression after the user's
-            // run lands, so values reflect any side effects the snippet
-            // produced (e.g. mutating a manager state visible to a
-            // watch).
+            // run lands, so values reflect any side effects the
+            // snippet produced (e.g. mutating a manager state
+            // visible to a watch).
             _watch?.Refresh();
         }
 
