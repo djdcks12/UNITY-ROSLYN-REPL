@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace RoslynRepl.Editor.Patches
 {
@@ -52,9 +53,23 @@ namespace RoslynRepl.Editor.Patches
     ///
     /// The triple (TargetTypeName, MethodName, ParameterTypes) uniquely
     /// identifies a patchable method in the AppDomain. ParameterTypes is
-    /// a comma-joined list of full type names — necessary for disambig-
-    /// uation when the target has overloads, and stable enough across
-    /// editor sessions to be a safe persistence key.
+    /// a <see cref="ParamSeparator"/>-joined list of full type names —
+    /// necessary for disambiguation when the target has overloads, and
+    /// stable enough across editor sessions to be a safe persistence key.
+    ///
+    /// Issue #41 (v0.7.2): the historical separator was <c>','</c>, which
+    /// silently broke for generic parameter types because closed-generic
+    /// <see cref="Type.FullName"/> embeds commas (assembly-qualified inner
+    /// type list, <c>List`1[[System.Int32, mscorlib, …]]</c>). Splitting
+    /// on <c>','</c> shredded such entries into garbage. The current
+    /// separator is <c>;</c> — illegal in CLR full type names, so it
+    /// can't collide with anything inside a single parameter's name
+    /// while still being typeable in the form field. <see cref="JoinParamTypes"/>
+    /// always emits the new form; <see cref="SplitParamTypes"/> falls
+    /// back to comma-splitting only when the value contains no <c>;</c>
+    /// AND no <c>[</c> (so legacy non-generic specs keep loading, but
+    /// legacy generic specs surface a clear "couldn't resolve" error
+    /// instead of silently picking the wrong overload).
     ///
     /// PatchBody is the user-edited replacement body (everything between
     /// the method's outer braces). OriginalBody is the snapshot pulled
@@ -75,11 +90,90 @@ namespace RoslynRepl.Editor.Patches
         public PatchStatus Status;
         public string LastError;
 
+        /// <summary>Separator used inside <see cref="ParameterTypes"/>
+        /// to delimit individual parameter type names. <c>;</c> is illegal
+        /// in CLR <see cref="Type.FullName"/> output, so it cannot collide
+        /// with embedded commas inside a closed-generic assembly-qualified
+        /// inner type list.</summary>
+        public const char ParamSeparator = ';';
+
         public string Key => Keyed(TargetTypeName, MethodName, ParameterTypes);
 
+        /// <summary>Build the registry key for a (typeName, methodName,
+        /// parameterTypes) triple. The parameterTypes value is run
+        /// through <see cref="NormalizeParamTypes"/> first so a legacy
+        /// comma-joined spec persisted on 0.7.1 ends up at the same
+        /// key as a freshly Browse-picked semicolon-joined spec for
+        /// the same method — without it the two would map to
+        /// different registry slots and `Apply` would install a
+        /// second Harmony prefix instead of replacing the first.
+        /// </summary>
         public static string Keyed(string typeName, string methodName, string parameterTypes)
         {
-            return $"{typeName ?? string.Empty}::{methodName ?? string.Empty}::{parameterTypes ?? string.Empty}";
+            var canonical = NormalizeParamTypes(parameterTypes);
+            return $"{typeName ?? string.Empty}::{methodName ?? string.Empty}::{canonical}";
+        }
+
+        /// <summary>Canonicalize a ParameterTypes string into the
+        /// current <see cref="ParamSeparator"/> form. Idempotent —
+        /// already-canonical strings round-trip unchanged. Used by
+        /// <see cref="Keyed"/> and by the registry's load / mutate
+        /// surfaces so legacy comma-joined data and current
+        /// semicolon-joined data don't fork into separate entries
+        /// for the same physical method.</summary>
+        public static string NormalizeParamTypes(string raw)
+        {
+            if (string.IsNullOrEmpty(raw)) return string.Empty;
+            return JoinParamTypes(SplitParamTypes(raw));
+        }
+
+        /// <summary>Build the persisted ParameterTypes value from a
+        /// structured list of per-parameter full type names. Always
+        /// emits the current <see cref="ParamSeparator"/> form.</summary>
+        public static string JoinParamTypes(IEnumerable<string> paramTypeNames)
+        {
+            if (paramTypeNames == null) return string.Empty;
+            return string.Join(ParamSeparator.ToString(),
+                paramTypeNames
+                    .Where(s => !string.IsNullOrEmpty(s))
+                    .Select(s => s.Trim()));
+        }
+
+        /// <summary>Split a persisted ParameterTypes value back into
+        /// individual parameter type names. Prefers the current
+        /// <see cref="ParamSeparator"/>; falls back to <c>','</c> only
+        /// when the value contains no <c>;</c> AND no <c>[</c> — the
+        /// legacy non-generic shape — so old saved specs keep loading.
+        /// Legacy generic specs (commas + brackets) used to silently
+        /// resolve to the wrong overload; now they surface a clean
+        /// "type not found" upstream because the malformed slice gets
+        /// passed straight to the type resolver.</summary>
+        public static string[] SplitParamTypes(string raw)
+        {
+            if (string.IsNullOrEmpty(raw)) return Array.Empty<string>();
+            char delimiter;
+            if (raw.IndexOf(ParamSeparator) >= 0)
+            {
+                delimiter = ParamSeparator;
+            }
+            else if (raw.IndexOf('[') < 0)
+            {
+                // Legacy non-generic form: every entry is a flat
+                // FullName with no embedded commas, so the historic
+                // comma split is still safe.
+                delimiter = ',';
+            }
+            else
+            {
+                // Single closed-generic FullName with no separator —
+                // treat the whole string as one entry rather than
+                // shredding the assembly-qualified inner list.
+                return new[] { raw.Trim() };
+            }
+            return raw.Split(delimiter)
+                      .Select(s => s.Trim())
+                      .Where(s => s.Length > 0)
+                      .ToArray();
         }
     }
 
@@ -201,6 +295,13 @@ namespace RoslynRepl.Editor.Patches
             if (string.IsNullOrEmpty(spec.TargetTypeName)) throw new ArgumentException("TargetTypeName is required", nameof(spec));
             if (string.IsNullOrEmpty(spec.MethodName))     throw new ArgumentException("MethodName is required",     nameof(spec));
             spec.ParameterTypes ??= string.Empty;
+            // Issue #41 P2: rewrite to the canonical separator form so
+            // the in-memory ParameterTypes value matches what `Keyed`
+            // computes the lookup key from. Without this a Browse
+            // → Apply for a method whose legacy spec was loaded with
+            // commas would store `Type;Type` while the previous spec
+            // sat under `Type,Type`, leaving both entries live.
+            spec.ParameterTypes = MethodPatchSpec.NormalizeParamTypes(spec.ParameterTypes);
             _byKey[spec.Key] = spec;
             // Any explicit registry write — Apply, Revert, save a
             // draft from the form — is the user's intent for this
@@ -304,6 +405,13 @@ namespace RoslynRepl.Editor.Patches
                 if (s == null || string.IsNullOrEmpty(s.TargetTypeName) || string.IsNullOrEmpty(s.MethodName))
                     continue;
                 s.ParameterTypes ??= string.Empty;
+                // Issue #41 P2: legacy specs persisted with the historic
+                // comma separator land here verbatim from PatchPersistence.
+                // Canonicalise on load so the in-memory ParameterTypes
+                // value matches what Keyed / Find expect — otherwise a
+                // legacy entry and a freshly-Browsed entry for the same
+                // method end up in two different registry slots.
+                s.ParameterTypes = MethodPatchSpec.NormalizeParamTypes(s.ParameterTypes);
                 _byKey[s.Key] = s;
             }
             Changed?.Invoke();

@@ -4,6 +4,25 @@ All notable changes to this package will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed (Generic parameter types in patch specs)
+- `MethodPatchSpec.ParameterTypes` now uses `;` as the per-parameter separator instead of `,`. Closed-generic CLR `Type.FullName` output embeds commas inside the assembly-qualified inner type list:
+
+  ```text
+  List`1[[System.Int32, mscorlib, Version=4.0.0.0, Culture=neutral, PublicKeyToken=…]]
+  ```
+
+  so the historic comma split in `PatchEngine.ResolveParamTypes` shredded any generic parameter into garbage and the spec failed to resolve at Apply / reload / source export — even though the form picker would happily list the method as patchable. Semicolon is illegal in CLR full type names, so it can't collide with anything inside a single parameter's name.
+- New `MethodPatchSpec.JoinParamTypes` / `SplitParamTypes` helpers centralize the encoding. `Browse → Fill form` and the manual form field both go through the join helper; the engine resolver, the diff, and the active-list display all go through the split helper. Legacy comma-joined data still loads (split falls back to `,` when the value contains no `;` and no `[`), so plain non-generic specs persisted on 0.7.1 keep working. Legacy data that had embedded brackets (i.e. it was already broken) surfaces a clean "type not found" error from the type resolver instead of silently picking the wrong overload.
+- New `MethodPatchSpec.NormalizeParamTypes(string)` runs at every registry boundary — `Keyed`, `AddOrUpdate`, and `LoadFromPersistence` — so a legacy comma-joined entry persisted on 0.7.1 lands at the same registry slot as a freshly Browsed semicolon-joined entry for the same method. Without it `Apply` couldn't see the previously-installed Harmony prefix and would stack a second one. Caught in PR review for #41.
+- The Params field tooltip and the active-list row label now reflect the new semicolon-separated form. The row label still renders with `, ` between entries for readability — the raw semicolon form is only the on-disk encoding. Closes #41.
+
+### Fixed (Generic-aware C# type renderer for patch wrappers)
+- New `RoslynRepl.Editor.Patches.CSharpTypeName.Render(Type)` is the single renderer the patch wrapper uses for both the `Prefix` declaring-type / parameter-type emission and every `typeof()` reference inside generated helper bodies. Handles closed generics (`List<int>` / `Dictionary<string, int>`), nested types (the historic `+` → `.`), nested generics with per-level introduced-arity attribution (`Outer<int>.Inner` / `Outer<int>.Inner<string>`), arrays of any rank, and `Nullable<T>` (rendered as the `T?` short form). The historic `target.DeclaringType.FullName.Replace('+', '.')` only worked for plain non-nested non-generic types — anything with a backtick / bracket in the FullName produced CLR-internal arity markers in the wrapper source and the Roslyn compile failed even after the spec resolved correctly to a real method.
+- `PatchSyntaxRewriter.TypeRef` and `PatchSyntaxRewriter.RenderCSharpTypeWithSubstitution` now route through `CSharpTypeName.Render` too. The rewriter previously carried its own copy of the renderer with the same backtick-truncation bug — so even after the wrapper signature was fixed, a body that read a `private Outer<int>.Inner<string>` member through `__get<T>` / `__call<T>` / `typeof(...)` would still emit invalid C# for that member's type and the wrapper would fail to compile on the next Apply. `CSharpTypeName.Render` gained an internal `(Type, Func<Type, string>)` overload so the rewriter's substitution callback (method-level generic argument → user `TypeSyntax`) can plug into the same nested-chain walk; the duplicate buggy renderer is gone. Reported in PR review.
+- Open generic types (generic type definitions, generic parameters) raise `NotSupportedException` at the renderer; `PatchEngine.ResolveTargetMethod` catches the upstream form (`type.IsGenericTypeDefinition`) and rejects with a friendly "specify a closed type, e.g. `Foo<...>`" message before the wrapper renderer ever runs. Closes #42.
+
 ## [0.7.1] - 2026-05-11
 
 ### Changed (OpenUPM package id)
