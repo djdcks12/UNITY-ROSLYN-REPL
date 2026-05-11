@@ -79,6 +79,57 @@ namespace RoslynRepl.Editor.Core
             return FindUnbounded(pool, filter);
         }
 
+        /// <summary>
+        /// Materialise every <see cref="InstanceCategory.All"/> entry
+        /// once so a caller that needs to run several filtered queries
+        /// against the same live-object set (e.g. a Watch refresh
+        /// cycle that evaluates many fallback expressions) can reuse
+        /// the work. Issue #43: the prior shape made every fallback
+        /// expression call <see cref="Find"/> with category=All, and
+        /// Find re-ran <c>Resources.FindObjectsOfTypeAll&lt;MB&gt;()</c>
+        /// + <c>Resources.FindObjectsOfTypeAll&lt;SO&gt;()</c> +
+        /// <c>SingletonScanner.Find()</c> from scratch each time —
+        /// linear in the project's loaded-scene size, paid N times for
+        /// N watches. The snapshot is unfiltered and uncapped; pair it
+        /// with <see cref="FindFromSnapshot"/> to get the same
+        /// per-call ordering / cap behaviour as <see cref="Find"/>
+        /// without re-paying the discovery cost. Pool entries hold
+        /// strong references to live objects, so the caller is
+        /// responsible for dropping the snapshot once the refresh
+        /// cycle is over (otherwise destroyed objects would survive
+        /// past their natural lifetime).
+        /// </summary>
+        public static List<InstanceEntry> SnapshotAll()
+        {
+            var list = new List<InstanceEntry>();
+            list.AddRange(FindMonoBehaviours());
+            list.AddRange(FindScriptableObjects());
+            list.AddRange(SingletonScanner.Find());
+            return list;
+        }
+
+        /// <summary>
+        /// Apply the same filter + bounded / unbounded top-K logic
+        /// <see cref="Find"/> uses, but against a caller-supplied
+        /// snapshot from <see cref="SnapshotAll"/>. The discovery
+        /// scan (FindObjectsOfTypeAll / SingletonScanner) is *not*
+        /// re-run here — the entire point is to amortise that cost
+        /// across multiple Find-shaped calls in one refresh cycle.
+        /// </summary>
+        public static List<InstanceEntry> FindFromSnapshot(
+            IEnumerable<InstanceEntry> snapshot,
+            string filter,
+            int maxResults = 200)
+        {
+            if (snapshot == null) return new List<InstanceEntry>();
+            if (maxResults <= 0)  return new List<InstanceEntry>();
+
+            if (maxResults < int.MaxValue)
+                return FindBounded(snapshot, filter, maxResults);
+
+            return FindUnbounded(snapshot, filter);
+        }
+
         private static List<InstanceEntry> FindBounded(
             IEnumerable<InstanceEntry> pool,
             string filter,

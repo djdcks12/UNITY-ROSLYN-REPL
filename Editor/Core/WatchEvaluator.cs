@@ -55,6 +55,17 @@ namespace RoslynRepl.Editor.Core
         private readonly Dictionary<string, string> _previousPreviews = new();
         private readonly List<WatchResult> _current = new();
 
+        // Issue #43: per-refresh fallback scope. RefreshAll opens one
+        // scope, every EvaluateOne in the same refresh shares the
+        // global instance pool through it, and the try/finally drops
+        // the snapshot before the next refresh so destroyed Unity
+        // objects don't get pinned past their natural lifetime. When
+        // EvaluateOne is called outside RefreshAll (one-off API
+        // surface — currently only the test path), the field is null
+        // and the fallback opens its own throwaway scope so the call
+        // still works on its own.
+        private WatchEvaluationScope _refreshScope;
+
         public IReadOnlyList<WatchResult> Current => _current;
 
         /// <summary>
@@ -68,9 +79,27 @@ namespace RoslynRepl.Editor.Core
             var expressions = WatchStore.Load();
             _current.Clear();
 
-            foreach (var expr in expressions)
+            // Open one fallback scope for the whole refresh so the
+            // global instance pool ('All' = MonoBehaviours +
+            // ScriptableObjects + Singletons) materialises *once*
+            // even if every watch falls back. The previous shape
+            // ran InstanceLocator.Find inside each EvaluateOne, and
+            // Find re-walked Resources.FindObjectsOfTypeAll twice
+            // per call (qualified pass + unqualified pass) — N
+            // fallback watches paid the discovery cost 2N times in
+            // a single Run.
+            _refreshScope = new WatchEvaluationScope();
+            try
             {
-                _current.Add(EvaluateOne(expr));
+                foreach (var expr in expressions)
+                {
+                    _current.Add(EvaluateOne(expr));
+                }
+            }
+            finally
+            {
+                _refreshScope.Dispose();
+                _refreshScope = null;
             }
 
             // Drop snapshot entries for expressions the user removed so
@@ -177,7 +206,7 @@ namespace RoslynRepl.Editor.Core
             return result;
         }
 
-        private static bool TryEvaluateFallbackPath(string expression, WatchResult result)
+        private bool TryEvaluateFallbackPath(string expression, WatchResult result)
         {
             try
             {
@@ -263,7 +292,7 @@ namespace RoslynRepl.Editor.Core
             return TryResolvePathFromIndex(current, path, index, out value, allowProperty: true);
         }
 
-        private static bool TryEvaluateGlobalPath(string path, out object value, out InstanceEntry matched, out bool capHit)
+        private bool TryEvaluateGlobalPath(string path, out object value, out InstanceEntry matched, out bool capHit)
         {
             value = null;
             matched = null;
@@ -271,86 +300,102 @@ namespace RoslynRepl.Editor.Core
 
             TryReadIdentifier(path, 0, out var rootName);
 
-            // Owner-qualified pass first, with the rootName threaded
-            // into the InstanceLocator filter. The previous shape did
-            // a single sweep with `filter = ""` and the 1000-entry cap,
-            // which silently dropped exact-owner matches whose entry
-            // sorted past the cap (a real failure mode in big scenes).
-            // Running the qualified pass against a name-filtered pool
-            // lets the cap apply to the *narrowed* set instead — a
-            // type called "GameManager" with a few candidate instances
-            // is virtually never going to overflow 1000, so the cap
-            // disappears as a concern for explicit paths.
-            if (!string.IsNullOrEmpty(rootName))
+            // Issue #43: pull the global instance pool from the
+            // shared per-refresh scope so several fallback watches in
+            // the same Run pay the FindObjectsOfTypeAll cost once
+            // instead of N × 2 (qualified + unqualified per watch).
+            // When EvaluateOne is called outside RefreshAll
+            // (`_refreshScope == null`), open a throwaway scope just
+            // for this call so the standalone semantics survive.
+            bool ownsScope = _refreshScope == null;
+            var scope = _refreshScope ?? new WatchEvaluationScope();
+            try
             {
-                var qualified = InstanceLocator.Find(InstanceCategory.All, rootName, GlobalSearchMaxEntries);
-                foreach (var entry in qualified)
+                // Owner-qualified pass first, with the rootName threaded
+                // into the per-call filter. The previous shape did
+                // a single sweep with `filter = ""` and the 1000-entry cap,
+                // which silently dropped exact-owner matches whose entry
+                // sorted past the cap (a real failure mode in big scenes).
+                // Running the qualified pass against a name-filtered pool
+                // lets the cap apply to the *narrowed* set instead — a
+                // type called "GameManager" with a few candidate instances
+                // is virtually never going to overflow 1000, so the cap
+                // disappears as a concern for explicit paths.
+                if (!string.IsNullOrEmpty(rootName))
                 {
-                    var root = entry?.Value;
-                    if (root == null || IsDestroyedUnityObject(root)) continue;
-                    if (!IsEntryNameMatch(entry, rootName)) continue;
-
-                    int index = rootName.Length;
-                    if (index == path.Length)
+                    var qualified = scope.Find(rootName, GlobalSearchMaxEntries);
+                    foreach (var entry in qualified)
                     {
-                        value = root;
-                        matched = entry;
-                        return true;
-                    }
+                        var root = entry?.Value;
+                        if (root == null || IsDestroyedUnityObject(root)) continue;
+                        if (!IsEntryNameMatch(entry, rootName)) continue;
 
-                    if (path[index] == '.' || path[index] == '[')
-                    {
-                        // The user explicitly named *this* instance via
-                        // TypeName / DisplayName, so property getter
-                        // invocation is consistent with the user's intent.
-                        // e.g. `GameManager.Config` resolves Config as a
-                        // property if needed.
-                        if (TryResolvePathFromIndex(root, path, index, out value, allowProperty: true))
+                        int index = rootName.Length;
+                        if (index == path.Length)
                         {
+                            value = root;
                             matched = entry;
                             return true;
                         }
+
+                        if (path[index] == '.' || path[index] == '[')
+                        {
+                            // The user explicitly named *this* instance via
+                            // TypeName / DisplayName, so property getter
+                            // invocation is consistent with the user's intent.
+                            // e.g. `GameManager.Config` resolves Config as a
+                            // property if needed.
+                            if (TryResolvePathFromIndex(root, path, index, out value, allowProperty: true))
+                            {
+                                matched = entry;
+                                return true;
+                            }
+                        }
                     }
                 }
-            }
 
-            // Unqualified fallback: the original path-against-everyone
-            // sweep, capped. Runs only after the owner-qualified pass
-            // didn't resolve, so an explicit `GameManager.Config` never
-            // races against a fields-only `Config` match somewhere
-            // earlier in the pool.
-            var entries = InstanceLocator.Find(InstanceCategory.All, string.Empty, GlobalSearchMaxEntries);
-            // Approximate "the cap stopped us" as "we filled the
-            // requested budget exactly". InstanceLocator doesn't tell
-            // us whether more entries existed beyond the cap, but in
-            // practice a Unity project with exactly 1000 browseable
-            // instances is vanishingly rare and the false-positive on
-            // the hint side just nudges the user to qualify the owner
-            // anyway, which is the right reflex.
-            capHit = entries.Count >= GlobalSearchMaxEntries;
-            if (entries.Count == 0) return false;
+                // Unqualified fallback: the original path-against-everyone
+                // sweep, capped. Runs only after the owner-qualified pass
+                // didn't resolve, so an explicit `GameManager.Config` never
+                // races against a fields-only `Config` match somewhere
+                // earlier in the pool.
+                var entries = scope.Find(string.Empty, GlobalSearchMaxEntries);
+                // Approximate "the cap stopped us" as "we filled the
+                // requested budget exactly". InstanceLocator doesn't tell
+                // us whether more entries existed beyond the cap, but in
+                // practice a Unity project with exactly 1000 browseable
+                // instances is vanishingly rare and the false-positive on
+                // the hint side just nudges the user to qualify the owner
+                // anyway, which is the right reflex.
+                capHit = entries.Count >= GlobalSearchMaxEntries;
+                if (entries.Count == 0) return false;
 
-            foreach (var entry in entries)
-            {
-                var root = entry?.Value;
-                if (root == null || IsDestroyedUnityObject(root)) continue;
-
-                // The user typed `Count` / `IsReady` / `_data` and we're
-                // guessing which live instance they meant. First-match
-                // wins, so allowing property getters here would silently
-                // invoke arbitrary user code on the first owner whose
-                // type happens to declare `Count` as a property — every
-                // Run, every refresh, with no breadcrumb to which object
-                // actually fired. Restrict to fields-only; users who
-                // want a property must qualify the owner.
-                if (TryResolvePathFromIndex(root, path, 0, out value, allowProperty: false))
+                foreach (var entry in entries)
                 {
-                    matched = entry;
-                    return true;
-                }
-            }
+                    var root = entry?.Value;
+                    if (root == null || IsDestroyedUnityObject(root)) continue;
 
-            return false;
+                    // The user typed `Count` / `IsReady` / `_data` and we're
+                    // guessing which live instance they meant. First-match
+                    // wins, so allowing property getters here would silently
+                    // invoke arbitrary user code on the first owner whose
+                    // type happens to declare `Count` as a property — every
+                    // Run, every refresh, with no breadcrumb to which object
+                    // actually fired. Restrict to fields-only; users who
+                    // want a property must qualify the owner.
+                    if (TryResolvePathFromIndex(root, path, 0, out value, allowProperty: false))
+                    {
+                        matched = entry;
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+            finally
+            {
+                if (ownsScope) scope.Dispose();
+            }
         }
 
         private static bool TryResolvePathFromIndex(object root, string path, int index, out object value, bool allowProperty)
@@ -630,6 +675,49 @@ namespace RoslynRepl.Editor.Core
         public void ClearChangeFlags()
         {
             foreach (var r in _current) r.JustChanged = false;
+        }
+    }
+
+    /// <summary>
+    /// Per-refresh fallback context for <see cref="WatchEvaluator"/>.
+    /// Issue #43: the global instance pool that the fallback path walks
+    /// (MonoBehaviour + ScriptableObject + Singleton entries from the
+    /// whole loaded scene set) is expensive to build —
+    /// <c>Resources.FindObjectsOfTypeAll</c> walks every loaded Unity
+    /// object and the singleton scanner reflects across the AppDomain.
+    /// One scope amortises that cost across every fallback expression
+    /// in a single Refresh; the snapshot is built lazily on first use
+    /// (so a refresh where every watch compiles cleanly never pays
+    /// the cost) and dropped on <see cref="Dispose"/> so destroyed
+    /// Unity objects don't get pinned past their natural lifetime.
+    /// </summary>
+    internal sealed class WatchEvaluationScope : IDisposable
+    {
+        private List<InstanceEntry> _snapshot;
+
+        /// <summary>Top-K filtered view over the cached unfiltered
+        /// snapshot. Materialises the snapshot on first call so a
+        /// refresh whose watches all compile cleanly pays nothing.
+        /// Mirrors <see cref="InstanceLocator.Find"/> with category
+        /// fixed at <see cref="InstanceCategory.All"/> — the only
+        /// category the fallback path uses.</summary>
+        public List<InstanceEntry> Find(string filter, int maxResults)
+        {
+            if (_snapshot == null) _snapshot = InstanceLocator.SnapshotAll();
+            return InstanceLocator.FindFromSnapshot(_snapshot, filter, maxResults);
+        }
+
+        public void Dispose()
+        {
+            // Drop strong references to live Unity objects. The
+            // engine collected destroyed objects during the refresh
+            // (IsDestroyedUnityObject filtering), but holding the
+            // snapshot for the time between refreshes would let the
+            // refresh-end-to-next-refresh-start window pin destroyed
+            // objects past Object.Destroy time and keep them visible
+            // to GC roots — exactly the lifetime hazard the issue
+            // called out as a non-goal.
+            _snapshot = null;
         }
     }
 }

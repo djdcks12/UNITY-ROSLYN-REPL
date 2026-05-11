@@ -4,6 +4,12 @@ All notable changes to this package will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed (Watch fallback discovery cache)
+- Watch evaluation no longer re-runs the global instance discovery sweep for every fallback expression in a Refresh. The earlier shape made each unqualified or owner-qualified fallback call `InstanceLocator.Find(InstanceCategory.All, …)` directly, and `Find` rebuilt the pool from scratch every time — `Resources.FindObjectsOfTypeAll<MonoBehaviour>()` + `Resources.FindObjectsOfTypeAll<ScriptableObject>()` + `SingletonScanner.Find()` for each call, twice per fallback expression (qualified pass + unqualified pass). N fallback watches paid the discovery cost 2N times in a single Run, which felt slow on projects with many loaded scenes.
+- New `WatchEvaluationScope` opens once per `WatchEvaluator.RefreshAll` and lazily snapshots the global pool the first time any fallback expression needs it. Every later fallback call in the same refresh reuses the snapshot through `InstanceLocator.FindFromSnapshot`, which keeps the per-call filter + cap behaviour identical to the original `Find` path. The scope is disposed in a `finally` so destroyed Unity objects don't get pinned past the refresh — references are only held for the lifetime of one Refresh, never across refreshes. `EvaluateOne` called outside a Refresh (one-off API surface) opens its own throwaway scope so the standalone semantics survive. Closes #43.
+
 ## [0.7.1] - 2026-05-11
 
 ### Changed (OpenUPM package id)
