@@ -60,18 +60,68 @@ namespace RoslynRepl.Editor.Patches
         }
 
         /// <summary>
-        /// Semantic-aware method-declaration locator shared with
-        /// `PatchSourceWriter.ApplyToFile`. Walks every MonoScript
-        /// path the declaring type maps to (covers partial classes
-        /// split across files), parses each, builds a one-shot
-        /// SemanticModel for it, and matches the target by name +
-        /// arity + each parameter's resolved CLR type. This is the
-        /// same matching depth the body-extractor uses, so Pull and
-        /// Apply To File can never disagree on which overload is
-        /// "the" target — even with per-file `using Model = …`
-        /// aliases that map the same simple name to different types.
-        /// Returns null when no file produces an exact semantic
-        /// match.
+        /// Semantic-aware method-declaration locator shared by Pull
+        /// Original (<see cref="TryPullMethodBody"/>) and Apply To
+        /// File (<see cref="PatchSourceWriter"/>). Walks every
+        /// MonoScript path the declaring type maps to (covers
+        /// partial classes split across files), parses each, builds
+        /// a one-shot SemanticModel for it, and matches the target
+        /// by name + arity + each parameter's resolved CLR type.
+        ///
+        /// Two-pass resolution (issue #30 follow-up review): a
+        /// strict semantic match in a *later* path always beats a
+        /// fallback in an *earlier* path. The earlier shape walked
+        /// path-by-path and returned the per-path fallback as soon
+        /// as it ran out of strict matches in that one file —
+        /// which, in a partial class with per-file `using Model
+        /// = …` aliases, picked the wrong file's body when each
+        /// part declared exactly one arity-matching overload but
+        /// only one of them resolved to the target's CLR type.
+        ///
+        /// New shape:
+        ///   Pre-scan: parse every path once, collect every
+        ///   arity-matching (TypeDecl, MethodDecl) pair, and cache
+        ///   the SemanticModel (or null when Roslyn semantics
+        ///   failed for the file).
+        ///
+        ///   Pass 1 (strict): walk every cached path/candidate and
+        ///   return the first one whose semantic parameter types
+        ///   exactly match the target's CLR types. Files whose
+        ///   semantic build failed are skipped here — they can't
+        ///   produce a strict match by definition.
+        ///
+        ///   Pass 2 (fallback): if Pass 1 found nothing, collect a
+        ///   *global* fallback pool from every path:
+        ///     • Semantic-built file with exactly one arity
+        ///       candidate → re-classify the candidate via the
+        ///       tri-state matcher (<see cref="ParamMatch"/>). Only
+        ///       <see cref="ParamMatch.Unresolved"/> joins the
+        ///       pool — semantics couldn't resolve a param type, so
+        ///       the candidate is uncertain rather than wrong.
+        ///       <see cref="ParamMatch.Mismatch"/> is dropped:
+        ///       Roslyn explicitly resolved the param to a CLR type
+        ///       that disagrees with the target, so this is a
+        ///       known-wrong overload (the Apply(B.Model) target
+        ///       vs. a partial declaring `using Model = A.Model;
+        ///       void Apply(Model m)` failure mode the tri-state
+        ///       gate exists to block). <see cref="ParamMatch.Exact"/>
+        ///       is impossible here — Pass 1 would have returned it.
+        ///     • Semantic-built multi-candidate file → contributes
+        ///       nothing. Pass 1 already proved no strict match
+        ///       exists, and we won't guess between overloads.
+        ///     • Semantic-build-failed file with exactly one arity
+        ///       candidate → joins the pool unconditionally; we
+        ///       have no semantic verdict to discriminate against.
+        ///     • Semantic-build-failed file with multiple arity
+        ///       candidates → only the syntactic-name matches join
+        ///       the pool. No "first candidate as last-resort"
+        ///       fallback: silently picking the wrong overload is
+        ///       the exact failure mode this rewrite exists to fix.
+        ///
+        ///   The fallback is taken only when the global pool has
+        ///   exactly one member. Two or more members → return null
+        ///   so the caller surfaces "Could not find a method
+        ///   matching ..." rather than commit to a guess.
         /// </summary>
         public static FoundMethod FindMethodForTarget(MethodInfo target)
         {
@@ -81,17 +131,24 @@ namespace RoslynRepl.Editor.Patches
 
             var paramTypes = target.GetParameters().Select(p => p.ParameterType).ToArray();
 
+            // Pre-scan: parse + collect candidates + cache semantic
+            // model per path. We need the full picture before any
+            // return decision — partial classes with per-file
+            // aliases mean a later path's strict semantic match
+            // must always win over an earlier path's fallback.
+            //
+            // Single read of the file — `source` is the exact text
+            // we parse. The original code did
+            // `File.ReadAllText(path)` then `TryParseFile(path)`
+            // which read the file *again*; an IDE / autosave / VCS
+            // write between those reads would pair MethodInfo
+            // spans from version B with `source` from version A,
+            // and the writer's later splice would mangle the file.
+            // Locking the parse to the same string we hold closes
+            // that race.
+            var contexts = new List<PerPathContext>();
             foreach (var path in paths)
             {
-                // Single read of the file — `source` is the exact
-                // text we parse. The original code did
-                // `File.ReadAllText(path)` then `TryParseFile(path)`
-                // which read the file *again*; an IDE / autosave /
-                // VCS write between those reads would pair MethodInfo
-                // spans from version B with `source` from version A,
-                // and the writer's later splice would mangle the
-                // file. Locking the parse to the same string we hold
-                // closes that race.
                 string source;
                 try { source = File.ReadAllText(path); }
                 catch { continue; }
@@ -103,8 +160,7 @@ namespace RoslynRepl.Editor.Patches
                 var typeDecls = FindMatchingTypeDeclarations(root, target.DeclaringType);
                 if (typeDecls.Count == 0) continue;
 
-                var model = BuildSingleFileSemanticModel(root);
-
+                var candidates = new List<(TypeDeclarationSyntax td, MethodDeclarationSyntax m)>();
                 foreach (var td in typeDecls)
                 {
                     foreach (var member in td.Members)
@@ -112,29 +168,130 @@ namespace RoslynRepl.Editor.Patches
                         if (!(member is MethodDeclarationSyntax m)) continue;
                         if (m.Identifier.ValueText != target.Name) continue;
                         if (m.ParameterList.Parameters.Count != paramTypes.Length) continue;
+                        candidates.Add((td, m));
+                    }
+                }
+                if (candidates.Count == 0) continue;
 
-                        // Prefer semantic match (handles per-file
-                        // alias contexts). When the SemanticModel
-                        // can't resolve, fall back to syntactic so a
-                        // single-overload file with broken-Roslyn
-                        // semantics still routes correctly.
-                        bool match = MatchesParamTypesSemantic(m, paramTypes, model);
-                        if (!match && model == null)
-                            match = MatchesParamTypesSyntactic(m, paramTypes);
-                        if (!match) continue;
+                contexts.Add(new PerPathContext
+                {
+                    Path = path,
+                    Source = source,
+                    Root = root,
+                    Candidates = candidates,
+                    Model = BuildSingleFileSemanticModel(root),
+                });
+            }
+            if (contexts.Count == 0) return null;
 
-                        return new FoundMethod
+            // Pass 1: strict semantic match across ALL paths. A
+            // later partial that resolves exactly always beats an
+            // earlier partial whose alias points at a different
+            // CLR type.
+            foreach (var ctx in contexts)
+            {
+                if (ctx.Model == null) continue;
+                foreach (var c in ctx.Candidates)
+                {
+                    if (MatchesParamTypesSemantic(c.m, paramTypes, ctx.Model))
+                        return MakeFound(ctx.Path, ctx.Source, ctx.Root, c.td, c.m);
+                }
+            }
+
+            // Pass 2: fallback. Collect globally. Auto-select only
+            // when the pool has exactly one member — that's the
+            // boundary between "Pull used to handle this case" and
+            // "we'd be guessing between two equally-likely
+            // overloads".
+            //
+            // Tri-state matcher (PR review): a semantic-built file
+            // whose single candidate Roslyn explicitly resolved to
+            // the *wrong* CLR type does NOT join the fallback pool.
+            // Letting it through would let an alias-mismatched
+            // partial win the global selection just because some
+            // other partial happened to be missing or unparseable
+            // — exactly the failure the rewrite is supposed to
+            // avoid.
+            var fallbacks = new List<(PerPathContext ctx, TypeDeclarationSyntax td, MethodDeclarationSyntax m)>();
+            foreach (var ctx in contexts)
+            {
+                if (ctx.Model != null)
+                {
+                    // Strict pass already ruled out semantic
+                    // matches in this file. Only single-candidate
+                    // files can fall back — multiple unresolved
+                    // overloads stay ambiguous.
+                    if (ctx.Candidates.Count == 1)
+                    {
+                        var only = ctx.Candidates[0];
+                        var classification = ClassifyParamTypesSemantic(only.m, paramTypes, ctx.Model);
+                        // Exact would have been picked in Pass 1.
+                        // Reaching here means the candidate is
+                        // either Unresolved (semantics couldn't
+                        // resolve a param type — broken assembly
+                        // ref, generic, etc.) or Mismatch
+                        // (semantics resolved and disagreed).
+                        // Only Unresolved is a legitimate
+                        // fallback; Mismatch is a known-wrong
+                        // verdict and gets dropped.
+                        if (classification == ParamMatch.Unresolved)
+                            fallbacks.Add((ctx, only.td, only.m));
+                    }
+                }
+                else
+                {
+                    // Semantic build failed entirely. Single arity
+                    // candidate is unambiguous; multi-candidate
+                    // files use syntactic name match — but the
+                    // earlier "first candidate as last-resort"
+                    // is dropped on purpose.
+                    if (ctx.Candidates.Count == 1)
+                    {
+                        fallbacks.Add((ctx, ctx.Candidates[0].td, ctx.Candidates[0].m));
+                    }
+                    else
+                    {
+                        foreach (var c in ctx.Candidates)
                         {
-                            SourcePath = path,
-                            Source = source,
-                            Root = root,
-                            TypeDecl = td,
-                            Method = m,
-                        };
+                            if (MatchesParamTypesSyntactic(c.m, paramTypes))
+                                fallbacks.Add((ctx, c.td, c.m));
+                        }
                     }
                 }
             }
+
+            if (fallbacks.Count == 1)
+            {
+                var sel = fallbacks[0];
+                return MakeFound(sel.ctx.Path, sel.ctx.Source, sel.ctx.Root, sel.td, sel.m);
+            }
             return null;
+        }
+
+        private sealed class PerPathContext
+        {
+            public string Path;
+            public string Source;
+            public SyntaxNode Root;
+            public List<(TypeDeclarationSyntax td, MethodDeclarationSyntax m)> Candidates;
+            public SemanticModel Model; // null if Roslyn semantic build failed for this file
+        }
+
+        private static FoundMethod MakeFound(
+            string path,
+            string source,
+            SyntaxNode root,
+            TypeDeclarationSyntax td,
+            MethodDeclarationSyntax m)
+        {
+            return new FoundMethod
+            {
+                SourcePath = path,
+                Source = source,
+                Root = root,
+                TypeDecl = td,
+                Method = m,
+            };
         }
 
         /// <summary>
@@ -159,46 +316,44 @@ namespace RoslynRepl.Editor.Patches
             if (declaringType == null)
                 return Fail("Method has no declaring type (anonymous?).");
 
-            var paths = ResolveScriptPaths(declaringType);
-            if (paths.Count == 0)
-                return Fail($"No MonoScript found for {declaringType.FullName}. " +
-                            "Ensure the type lives in a `.cs` file inside Assets/ or Packages/.");
-
-            var paramTypes = method.GetParameters().Select(p => p.ParameterType).ToArray();
-            string lastParseError = null;
-
-            foreach (var path in paths)
+            // Issue #30 (resolver parity): route Pull through the same
+            // FindMethodForTarget call Apply To File uses, so the two
+            // surfaces always agree on which (path, MethodDeclSyntax)
+            // tuple represents "the" target. The previous shape used a
+            // private FindMethodNode whose fallback chain (single arity
+            // candidate, syntactic match, last-resort first candidate)
+            // was richer than the writer's finder — Pull would succeed
+            // on a body Apply could no longer locate. Sharing the
+            // finder closes that gap by construction.
+            var found = FindMethodForTarget(method);
+            if (found == null)
             {
-                string source;
-                try { source = File.ReadAllText(path); }
-                catch (Exception ex) { lastParseError = $"Could not read '{path}': {ex.Message}"; continue; }
+                var paths = ResolveScriptPaths(declaringType);
+                if (paths.Count == 0)
+                    return Fail($"No MonoScript found for {declaringType.FullName}. " +
+                                "Ensure the type lives in a `.cs` file inside Assets/ or Packages/.");
 
-                MethodDeclarationSyntax match;
-                try { match = FindMethodNode(source, declaringType, method.Name, paramTypes); }
-                catch (Exception ex) { lastParseError = $"Roslyn parse failed for '{path}': {ex.Message}"; continue; }
-
-                if (match == null) continue;
-                if (match.Body == null)
-                {
-                    // Expression-bodied (`=> expr`) — we don't
-                    // unwrap those. Surface a specific message rather
-                    // than silently returning empty.
-                    return Fail($"{declaringType.Name}.{method.Name} is expression-bodied; only block-bodied methods can be pulled. Convert the source to a `{{ … }}` body or write the patch from scratch.");
-                }
-
-                var body = ExtractBodyInside(source, match.Body);
-                return new PullResult
-                {
-                    Success = true,
-                    Body = body,
-                    SourcePath = path,
-                };
+                var paramTypes = method.GetParameters().Select(p => p.ParameterType).ToArray();
+                return Fail(
+                    $"Could not find a method matching {declaringType.Name}.{method.Name}({string.Join(", ", paramTypes.Select(t => t?.Name))}) " +
+                    $"in any of the {paths.Count} candidate file(s). " +
+                    "Method may be auto-generated or in an assembly without source available.");
             }
 
-            return Fail(
-                $"Could not find a method matching {declaringType.Name}.{method.Name}({string.Join(", ", paramTypes.Select(t => t?.Name))}) " +
-                $"in any of the {paths.Count} candidate file(s). " +
-                (lastParseError != null ? "Last error: " + lastParseError : "Method may be auto-generated or in an assembly without source available."));
+            if (found.Method.Body == null)
+            {
+                // Expression-bodied (`=> expr`) — we don't unwrap
+                // those. Surface a specific message rather than
+                // silently returning empty.
+                return Fail($"{declaringType.Name}.{method.Name} is expression-bodied; only block-bodied methods can be pulled. Convert the source to a `{{ … }}` body or write the patch from scratch.");
+            }
+
+            return new PullResult
+            {
+                Success = true,
+                Body = ExtractBodyInside(found.Source, found.Method.Body),
+                SourcePath = found.SourcePath,
+            };
         }
 
         // ─── Source file context ──────────────────────────────────
@@ -412,18 +567,42 @@ namespace RoslynRepl.Editor.Patches
             return true;
         }
 
-        private static bool MatchesParamTypesSemantic(
+        // Tri-state result for the semantic param-type matcher.
+        // The previous bool collapsed two cases (PR review for #30):
+        //   - Roslyn semantics resolved the param type and it disagrees
+        //     with the target's CLR type → this candidate is *known
+        //     wrong*, must not feed the fallback pool.
+        //   - Roslyn couldn't resolve at all (broken assembly reference,
+        //     missing using, generic parameter) → uncertain, candidate
+        //     can still join the fallback pool when nothing better is
+        //     available globally.
+        // Splitting them prevents the "single semantic-built candidate
+        // explicitly mismatches but still wins the global fallback"
+        // failure mode.
+        private enum ParamMatch
+        {
+            Exact,        // every param resolved and matches target
+            Unresolved,   // at least one param's type couldn't be resolved
+            Mismatch,     // a param resolved but to a different CLR type
+        }
+
+        private static ParamMatch ClassifyParamTypesSemantic(
             MethodDeclarationSyntax m,
             Type[] paramTypes,
             SemanticModel model)
         {
-            if (model == null) return false;
+            if (model == null) return ParamMatch.Unresolved;
+
+            bool sawUnresolved = false;
             for (int i = 0; i < paramTypes.Length; i++)
             {
                 var typeSyntax = m.ParameterList.Parameters[i].Type;
-                if (typeSyntax == null) return false;
                 var t = paramTypes[i];
-                if (t == null) return false;
+                if (typeSyntax == null || t == null)
+                {
+                    sawUnresolved = true;
+                    continue;
+                }
 
                 // Either path can land us on the same ITypeSymbol;
                 // GetSymbolInfo returns the named type symbol when
@@ -431,14 +610,26 @@ namespace RoslynRepl.Editor.Patches
                 // built-ins like `int` whose Symbol may be null.
                 var sym = model.GetSymbolInfo(typeSyntax).Symbol as ITypeSymbol
                     ?? model.GetTypeInfo(typeSyntax).Type;
-                if (sym == null) return false;
+                if (sym == null) { sawUnresolved = true; continue; }
 
                 var resolved = ResolveTypeFromITypeSymbol(sym);
-                if (resolved == null) return false;
-                if (resolved != t) return false;
+                if (resolved == null) { sawUnresolved = true; continue; }
+
+                // Definitive disagreement — semantics gave us a
+                // concrete CLR type that isn't the one the caller
+                // asked for. Short-circuit; no point looking at
+                // other params, and we don't want any later
+                // "Unresolved" param to mask this verdict.
+                if (resolved != t) return ParamMatch.Mismatch;
             }
-            return true;
+            return sawUnresolved ? ParamMatch.Unresolved : ParamMatch.Exact;
         }
+
+        private static bool MatchesParamTypesSemantic(
+            MethodDeclarationSyntax m,
+            Type[] paramTypes,
+            SemanticModel model)
+            => ClassifyParamTypesSemantic(m, paramTypes, model) == ParamMatch.Exact;
 
         // Build a single-file Compilation just to ask the SemanticModel
         // a question. Cost is one CSharpCompilation.Create + one
@@ -609,87 +800,15 @@ namespace RoslynRepl.Editor.Patches
             return result;
         }
 
-        // Step 2 — Roslyn-parse the source and look for a method
-        // declaration whose name + parameter count match. Parameter
-        // type names are checked best-effort (full name first, then
-        // short name); count alone disambiguates the common cases
-        // and avoids the headache of comparing Roslyn's syntax-level
-        // type strings to System.Type's reflection metadata.
-        //
-        // Scoped to the declaring type's syntax declarations so a file
-        // hosting two top-level classes — or an outer class + nested
-        // helper class — that happen to share a method name + arity
-        // can't leak the wrong body. We walk the ancestor chain
-        // (Outer → Inner) when the target is a nested type, and gather
-        // methods *directly* under each matching declaration, never
-        // descending into further nested types of those.
-        private static MethodDeclarationSyntax FindMethodNode(string source, Type declaringType, string methodName, Type[] paramTypes)
-        {
-            var tree = CSharpSyntaxTree.ParseText(source);
-            var root = tree.GetRoot();
-
-            var typeDecls = FindMatchingTypeDeclarations(root, declaringType);
-            if (typeDecls.Count == 0) return null;
-
-            var candidates = new List<MethodDeclarationSyntax>();
-            foreach (var td in typeDecls)
-            {
-                foreach (var member in td.Members)
-                {
-                    if (member is MethodDeclarationSyntax m
-                        && m.Identifier.ValueText == methodName
-                        && m.ParameterList.Parameters.Count == paramTypes.Length)
-                    {
-                        candidates.Add(m);
-                    }
-                }
-            }
-
-            if (candidates.Count == 0) return null;
-
-            // Try semantic disambiguation first — even when there's
-            // only one arity-matching candidate in this file, we
-            // verify its parameter types resolve to what the caller
-            // requested. Two partial files can each have a single
-            // `void Apply(Model)` whose `Model` aliases to a
-            // different CLR type; without semantic verification this
-            // method would happily return the first file's body
-            // when the user's spec actually targeted the other.
-            // SemanticModel.GetSymbolInfo gives us the resolved type
-            // through the file's own using/alias context.
-            var model = BuildSingleFileSemanticModel(root);
-            if (model != null)
-            {
-                foreach (var c in candidates)
-                {
-                    if (MatchesParamTypesSemantic(c, paramTypes, model)) return c;
-                }
-
-                // SemanticModel built but resolved no candidate —
-                // either the file's overloads target different
-                // CLR types than the caller asked for (correct: try
-                // the next path), or semantics genuinely failed
-                // (e.g., file references a type from an unloaded
-                // assembly). Fall through to the syntactic path
-                // only when we have a *single* arity match — no
-                // ambiguity for syntactic to make worse — so we
-                // don't silently miss the body for the broken-
-                // semantic edge case.
-                if (candidates.Count == 1) return candidates[0];
-                return null;
-            }
-
-            // Semantic build failed entirely — fall back to syntactic
-            // matching. Single arity match is unambiguous; multiple
-            // arity matches go through the simple-name comparison and
-            // accept the first hit.
-            if (candidates.Count == 1) return candidates[0];
-            foreach (var c in candidates)
-            {
-                if (MatchesParamTypesSyntactic(c, paramTypes)) return c;
-            }
-            return candidates[0];
-        }
+        // FindMethodNode (the Pull-only variant) was removed in the
+        // resolver-parity change for issue #30. Both Pull and Apply
+        // now share FindMethodForTarget, which carries the same
+        // candidate-collection + semantic / syntactic / single-
+        // candidate / first-candidate fallback chain that used to
+        // live here. The shared finder also returns the parsed
+        // TypeDeclarationSyntax and the source string so callers can
+        // skip the "re-parse to extract the body" step the previous
+        // shape made Pull do.
 
         // Resolve every TypeDeclarationSyntax in the file whose simple
         // name + ancestor type chain + enclosing namespace matches the
