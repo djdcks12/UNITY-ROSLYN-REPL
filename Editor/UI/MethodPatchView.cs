@@ -547,6 +547,40 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
                 return;
             }
 
+            // Click-time snapshot guard (issue #26 PR review). The
+            // Apply-to-file button's enable state lives on
+            // RefreshDiff, which is now debounced by
+            // DiffDebounceMs — so the button can stay enabled for
+            // up to that window after the user's last keystroke
+            // edited Type / Method / Params away from whatever
+            // target Pull Original captured. Without this gate the
+            // window lets a click slip through where:
+            //   1. Pull captured snapshot S for target A.
+            //   2. User retypes Type/Method/Params to target B.
+            //   3. Inside the debounce, RefreshDiff hasn't run, so
+            //      _applyToFileBtn is still SetEnabled(true).
+            //   4. User clicks Apply to file. ResolveSnapshot now
+            //      keys off target B and returns null (no Pull was
+            //      ever done for B), but the call site below used
+            //      to pass that null straight into PatchSourceWriter
+            //      — and the writer skips conflict detection when
+            //      expectedSnapshot is null, so it would happily
+            //      splice the user's body (still authored against A)
+            //      into B's source file with no comparison against
+            //      what's already on disk.
+            // Re-running ResolveSnapshot here against the *current*
+            // form key catches that exact slip, and calling
+            // RefreshDiff right after collapses the visible button
+            // / summary state without waiting for the debounce
+            // tail.
+            var snapshot = ResolveSnapshot();
+            if (snapshot == null)
+            {
+                SetStatus("Apply to file needs a Pull Original snapshot for this target. Click Pull Original (or pick the method via Browse) first.", error: true);
+                RefreshDiff();
+                return;
+            }
+
             var declName = target.DeclaringType?.FullName ?? target.DeclaringType?.Name ?? "<unknown>";
             var ok = UnityEditor.EditorUtility.DisplayDialog(
                 "Apply patch to source file?",
@@ -558,15 +592,13 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
                 "Cancel");
             if (!ok) return;
 
-            // Pass the current snapshot in so the writer can detect
-            // a conflict — the file might have been edited (by the
-            // user, an IDE, or source control) since Pull captured
-            // the snapshot. Splicing a stale body would silently
-            // overwrite the newer content. The writer aborts on
-            // mismatch and ConflictDetected gives the UI a hook to
-            // surface a "Pull again" hint instead of a generic
-            // failure.
-            var snapshot = ResolveSnapshot();
+            // Snapshot was resolved before the dialog and held in
+            // `snapshot`. The dialog is modal — the form fields
+            // can't change during it — so reusing the captured
+            // value is safe and avoids a redundant ResolveSnapshot.
+            // PatchSourceWriter then runs its conflict check
+            // against the file on disk and surfaces
+            // ConflictDetected if the file moved since Pull.
             var result = PatchSourceWriter.ApplyToFile(target, body, snapshot);
             if (result.Success)
             {
