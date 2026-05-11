@@ -64,6 +64,18 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
         private string _lastPulledKey;
         private string _lastPulledOriginal;
 
+        // Issue #26: PatchSourceDiff is O(N*M) line-LCS. Small
+        // bodies are fine, but a freshly Pull'd long method that
+        // the user is actively editing turns every keystroke into
+        // a fresh diff over the whole body, which UI Toolkit feels
+        // as input lag. Schedule + debounce handle so the diff
+        // only re-runs after the user stops typing for a beat.
+        // 200ms matches the Object Browser's search debounce —
+        // same "feels live but doesn't run on every keystroke"
+        // budget — and reads together as a single house style.
+        private const long DiffDebounceMs = 200;
+        private IVisualElementScheduledItem _diffDebounce;
+
         public MethodPatchView(VisualElement host)
         {
             _host = host ?? throw new ArgumentNullException(nameof(host));
@@ -84,6 +96,16 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
         {
             PatchRegistry.Changed -= OnRegistryChanged;
             PatchAutoReapply.SettingsChanged -= OnAutoReapplySettingsChanged;
+            // Drop any pending diff so a soon-to-be-disposed view
+            // doesn't fire RefreshDiff against torn-down fields.
+            _diffDebounce?.Pause();
+            _diffDebounce = null;
+        }
+
+        private void ScheduleDiffRefresh()
+        {
+            _diffDebounce?.Pause();
+            _diffDebounce = _host.schedule.Execute(RefreshDiff).StartingIn(DiffDebounceMs);
         }
 
         private void OnAutoReapplySettingsChanged()
@@ -310,10 +332,16 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             // body) changes — the snapshot is keyed off the form
             // identity, so a swap should rebuild against the new
             // spec's stored OriginalBody (or no snapshot, if none).
-            _bodyField.RegisterValueChangedCallback(_ => RefreshDiff());
-            _targetField.RegisterValueChangedCallback(_ => RefreshDiff());
-            _methodField.RegisterValueChangedCallback(_ => RefreshDiff());
-            _paramsField.RegisterValueChangedCallback(_ => RefreshDiff());
+            // Routed through a single debounced scheduler so a
+            // typing burst across any of these four fields
+            // collapses into one RefreshDiff after the user
+            // settles. Pause + reassign on each change so the
+            // eventual diff runs against the final form state, not
+            // a stale snapshot from the start of the burst.
+            _bodyField.RegisterValueChangedCallback(_ => ScheduleDiffRefresh());
+            _targetField.RegisterValueChangedCallback(_ => ScheduleDiffRefresh());
+            _methodField.RegisterValueChangedCallback(_ => ScheduleDiffRefresh());
+            _paramsField.RegisterValueChangedCallback(_ => ScheduleDiffRefresh());
 
             // Auto-reapply toggle. Same setting as the Tools menu
             // item, exposed inline here so users browsing the
