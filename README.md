@@ -117,6 +117,8 @@ Run snippets with the **Run** button, `F5`, or `Ctrl+Enter`.
 
 The REPL window gives you a multiline C# editor with line numbers, caret position, keyboard shortcuts, compile diagnostics, runtime exceptions, captured logs, and execution timing.
 
+In Play Mode the snippet is run one frame later through a tiny coroutine, so it fires from the same player update phase a real `Button.onClick` would. That makes results match what you'd see by triggering the same code from a UI button, instead of off the editor's input handler. You can flip this off from `Tools / Roslyn REPL / Run on Player Frame` if you want immediate evaluation; it's on by default.
+
 Snippets run on the Unity Editor main thread, so normal editor and Unity APIs are available:
 
 ```csharp

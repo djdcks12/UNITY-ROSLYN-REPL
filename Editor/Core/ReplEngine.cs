@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -7,6 +8,8 @@ using System.Reflection;
 using System.Threading;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
+using UnityEditor;
+using UnityEngine;
 
 namespace RoslynRepl.Editor.Core
 {
@@ -357,6 +360,128 @@ namespace RoslynRepl.Editor.Core
             if (asm.IsDynamic) return;
 
             InvalidateCompileCache();
+        }
+
+        // ─── Player-frame marshal (issue: same-call-different-result) ──
+        //
+        // A snippet executed straight from Run lives inside the editor
+        // input phase — it isn't fired from EventSystem.Update like a
+        // real Button.onClick would be. Most snippets don't care, but
+        // any code that spawns a popup / canvas / SuperScrollView whose
+        // first init reads viewport metrics ends up reading them
+        // *outside the player layout cycle*, and the popup ships with
+        // stale layout + stale coroutine timing. The runtime symptom
+        // is "the same one-line call gives a different result depending
+        // on whether I clicked the button or pressed Run".
+        //
+        // ExecuteOnPlayerFrame marshals the actual Execute call onto a
+        // ReplCoroutineHost coroutine that yields one frame, so the
+        // invocation lands inside the next Player Update — the same
+        // phase a real onClick fires from. Result + log lifecycle is
+        // unchanged (ReplResult comes back the same way), it just
+        // arrives one frame late, via a callback so the call site
+        // doesn't have to spin-wait on the main thread.
+        //
+        // Edit Mode has no Player Update cycle, so the helper falls
+        // back to a synchronous Execute and reports the result on the
+        // same frame. Callers that want the marshal but happen to
+        // be invoked outside Play Mode get the safest available
+        // semantics rather than a deadlock.
+        public static void ExecuteOnPlayerFrame(string userCode, ReplOptions options, Action<ReplResult> onComplete)
+        {
+            if (onComplete == null) throw new ArgumentNullException(nameof(onComplete));
+
+            // Edit Mode (or about-to-leave Play Mode): no player
+            // frame to wait for. Run synchronously so the caller
+            // still gets a result.
+            if (!EditorApplication.isPlaying)
+            {
+                onComplete(Execute(userCode, options));
+                return;
+            }
+
+            var host = ReplCoroutineHost.EnsureInstance();
+            if (host == null)
+            {
+                // Edge case: isPlaying flipped between the check
+                // above and the host creation. Fall back to sync
+                // rather than dropping the result silently.
+                onComplete(Execute(userCode, options));
+                return;
+            }
+
+            host.Run(Co());
+
+            IEnumerator Co()
+            {
+                // One Player Update tick. The next frame's Update
+                // → coroutine resume happens inside the player
+                // loop, so the Execute below fires from the same
+                // phase a Button.onClick would.
+                yield return null;
+                ReplResult result;
+                try { result = Execute(userCode, options); }
+                catch (Exception ex)
+                {
+                    // Defensive: Execute already wraps internal
+                    // failures in ReplResult, but if something
+                    // pathological happens the caller still needs
+                    // a result object to render.
+                    result = ReplResult.RuntimeError(ex, new List<LogEntry>(), TimeSpan.Zero);
+                }
+                try { onComplete(result); }
+                catch (Exception ex)
+                {
+                    UnityEngine.Debug.LogError("[Roslyn REPL] ExecuteOnPlayerFrame onComplete threw: " + ex);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Hidden runtime MonoBehaviour the engine uses to step a
+    /// coroutine through the Player Update phase. Defined here
+    /// alongside ReplEngine instead of in its own file because
+    /// keeping both in one compilation unit dodges a Unity quirk
+    /// where a freshly-added Editor-folder MonoBehaviour can fail
+    /// to compile on the same domain reload that introduces it,
+    /// leaving the rest of the engine with an unresolved reference.
+    /// Same-file sibling makes the dependency atomic.
+    ///
+    /// Lifetime: created lazily by <see cref="EnsureInstance"/>
+    /// while the editor is in Play Mode, marked HideAndDontSave +
+    /// DontDestroyOnLoad. Unity destroys the runtime GameObject
+    /// when Play Mode exits; the static reference clears in
+    /// <see cref="OnDestroy"/> so the next Play Mode run gets a
+    /// fresh host.
+    /// </summary>
+    public sealed class ReplCoroutineHost : MonoBehaviour
+    {
+        private static ReplCoroutineHost _instance;
+
+        public static ReplCoroutineHost EnsureInstance()
+        {
+            if (_instance != null) return _instance;
+            // Only valid in Play Mode — coroutines outside Play
+            // Mode don't get a Player Update tick to advance them.
+            if (!EditorApplication.isPlayingOrWillChangePlaymode && !Application.isPlaying)
+                return null;
+
+            var go = new GameObject("__ReplCoroutineHost");
+            go.hideFlags = HideFlags.HideAndDontSave;
+            DontDestroyOnLoad(go);
+            _instance = go.AddComponent<ReplCoroutineHost>();
+            return _instance;
+        }
+
+        public Coroutine Run(IEnumerator routine) => StartCoroutine(routine);
+
+        private void OnDestroy()
+        {
+            // Clear the static reference if Unity tears the host
+            // down (Play Mode exit, scene unload edge cases). The
+            // next EnsureInstance call will recreate.
+            if (_instance == this) _instance = null;
         }
     }
 }
