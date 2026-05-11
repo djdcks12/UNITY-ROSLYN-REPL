@@ -1,18 +1,19 @@
 # Roslyn REPL for Unity
 
-Run C# inside the Unity Editor, inspect live objects, save useful probes, and patch methods temporarily while you debug.
+[English](README.md) | [한국어](README_kr.md)
 
-Roslyn REPL for Unity is an editor-only toolkit for developers who want a faster feedback loop than creating throwaway editor scripts or sprinkling temporary logs through gameplay code. Open one window, run a snippet, inspect the result, keep the useful parts, and move on.
+Run C# inside the Unity Editor, inspect live objects, keep useful probes, and temporarily patch methods while you debug.
 
-## Installation
+Roslyn REPL for Unity is an editor-only toolkit for developers who want a faster feedback loop than creating throwaway editor scripts or sprinkling temporary logs through gameplay code. Open one window, run a snippet, inspect the result, save what is useful, and move on.
 
-### Unity Version
+## Install
 
-Unity 2022.3 or newer is recommended.
+### Requirements
 
-The package is editor-only. It is designed to stay out of player builds.
+- Unity 2022.3 or newer is recommended.
+- The package is editor-only and is designed to stay out of Player builds.
 
-### Install From Git URL
+### Git URL
 
 Add the package to `Packages/manifest.json`:
 
@@ -24,13 +25,13 @@ Add the package to `Packages/manifest.json`:
 }
 ```
 
-To pin a version:
+Pin a release tag when you want a stable version:
 
 ```json
 "com.roslyn-repl": "https://github.com/djdcks12/UNITY-ROSLYN-REPL.git#v0.7.0"
 ```
 
-### Install From Disk
+### From Disk
 
 1. Open Unity Package Manager.
 2. Click `+`.
@@ -45,7 +46,7 @@ Packages/com.roslyn-repl/
 
 ### OpenUPM
 
-The package includes OpenUPM metadata. Once the package is published there, install it through a scoped registry:
+The package includes OpenUPM metadata. After it is published there, install it through a scoped registry:
 
 ```text
 Name:   OpenUPM
@@ -57,35 +58,38 @@ Until then, use the Git URL or disk install flow.
 
 ## First Setup
 
-After the package is installed, install the compiler dependencies once:
-
-```text
-Tools / Roslyn REPL / Install Roslyn DLLs
-```
-
-This installs Roslyn and Harmony into the package's editor plugin folder.
-
-Then run:
+Roslyn and Harmony are shipped under `Editor/Plugins/` as editor-only plugins. After importing the package, run:
 
 ```text
 Tools / Roslyn REPL / Verify Setup
 ```
 
-`Verify Setup` checks that the compiler assemblies are available and reports common duplicate-assembly situations.
+`Verify Setup` checks that the compiler and patching assemblies are available and reports duplicate-assembly situations. If the dependencies are missing or were removed, run:
+
+```text
+Tools / Roslyn REPL / Install Roslyn DLLs
+```
 
 ## Why Use It?
 
 - Run C# snippets directly in the Unity Editor.
 - Inspect scene objects, ScriptableObjects, dictionaries, lists, and custom classes as expandable trees.
-- Keep reusable snippets and run history per project.
-- Watch expressions after each run, similar to a lightweight debugger watch panel.
 - Browse live scene objects, loaded assets, and common singleton patterns.
-- Add custom `using` directives once and reuse them across snippets.
-- Use `_` as the previous result for quick follow-up queries.
-- Temporarily replace a method body at runtime with a patch powered by Harmony.
-- Keep everything editor-only, with no player-build dependency.
+- Keep reusable snippets and run history per project.
+- Add project-specific `using` directives once and reuse them across snippets.
+- Use `_` as the previous result for quick follow-up expressions.
+- Watch expressions after each run, similar to a lightweight debugger watch panel.
+- Temporarily replace a method body at runtime with a Harmony-powered patch.
+- Keep the tool editor-only, with no Player-build dependency.
 
-## Quick Look
+## Quick Start
+
+1. Open `Tools / Roslyn REPL / Open`.
+2. Type a snippet.
+3. Press **Run**, `F5`, or `Ctrl+Enter`.
+4. Inspect logs and returned values in Output.
+5. Save useful probes through **Snippets**.
+6. Add repeated checks through **Watch**.
 
 ```csharp
 return UnityEngine.Application.unityVersion;
@@ -98,6 +102,7 @@ return scene.GetRootGameObjects()
     .Select(go => new
     {
         go.name,
+        active = go.activeInHierarchy,
         childCount = go.transform.childCount
     })
     .ToArray();
@@ -109,15 +114,13 @@ return UnityEngine.Object.FindObjectsByType<UnityEngine.Camera>(
     UnityEngine.FindObjectsSortMode.None);
 ```
 
-Run snippets with the **Run** button, `F5`, or `Ctrl+Enter`.
-
 ## Features
 
 ### Interactive C# REPL
 
-The REPL window gives you a multiline C# editor with line numbers, caret position, keyboard shortcuts, compile diagnostics, runtime exceptions, captured logs, and execution timing.
+The main window gives you a multiline C# editor with line numbers, caret position, keyboard shortcuts, compile diagnostics, runtime exceptions, captured logs, and execution timing.
 
-In Play Mode the snippet is run one frame later through a tiny coroutine, so it fires from the same player update phase a real `Button.onClick` would. That makes results match what you'd see by triggering the same code from a UI button, instead of off the editor's input handler. You can flip this off from `Tools / Roslyn REPL / Run on Player Frame` if you want immediate evaluation; it's on by default.
+In Play Mode, snippets run one frame later through a tiny coroutine so the call lands in the same Player Update phase as a normal `Button.onClick`. This helps UI, popup, canvas, and scroll-view code behave the same from the REPL as it does from an in-game button. You can turn this off from `Tools / Roslyn REPL / Run on Player Frame` when you need immediate evaluation.
 
 Snippets run on the Unity Editor main thread, so normal editor and Unity APIs are available:
 
@@ -126,7 +129,7 @@ var selected = UnityEditor.Selection.activeObject;
 return selected != null ? selected.name : "Nothing selected";
 ```
 
-Use `return` when you want the Output panel to render a value. Log-only snippets are supported too:
+Use `return` when you want Output to render a value. Log-only snippets are supported too:
 
 ```csharp
 Debug.Log("No return value needed");
@@ -139,11 +142,10 @@ Returned values are rendered as an expandable tree instead of a flat `ToString()
 The renderer handles:
 
 - primitive values,
-- strings,
-- enums,
+- strings and enums,
 - Unity objects,
 - plain C# objects,
-- fields and safe properties,
+- fields and safe user-defined properties,
 - arrays and lists,
 - dictionaries,
 - nested object graphs,
@@ -164,40 +166,19 @@ Browse:
 
 Double-click an entry in Output mode to generate an inspection snippet. Switch the lower pane to Patches mode and double-click an entry to pick a method from that object's runtime type.
 
-The list shows up to 200 results by default and the search field waits a moment after you stop typing before re-scanning, so the panel stays responsive on big projects. When the cap is reached, a **Load more** button appears next to the result count for the times you really want the full list.
+The browser caps the first page at 200 results and debounces search input so large projects remain responsive. When more results exist, **Load more** appears next to the count.
 
-### Snippet Library
+### Snippets, History, and Usings
 
-Save useful probes and reload them later. Snippets are stored per project, so one Unity project does not inherit another project's debugging helpers.
+Save useful probes and reload them later. Snippets and run history are project-scoped, so one Unity project does not inherit another project's debugging helpers.
 
-Typical snippet ideas:
-
-- inspect the active scene,
-- list loaded managers,
-- dump selected object data,
-- scan ScriptableObject assets,
-- check current Play Mode state,
-- run project-specific diagnostics.
-
-Import the built-in starter snippets from:
+Import starter snippets from:
 
 ```text
 Tools / Roslyn REPL / Import Default Snippets
 ```
 
-Default snippet import is non-destructive. Your edited snippets are not overwritten.
-
-### Run History
-
-Every executed snippet can be reopened from History. This is useful when you are iterating quickly and want to recover the exact probe that produced a result.
-
-History is project-scoped and local to your machine.
-
-### Custom Usings
-
-Add project namespaces once and write shorter snippets afterward.
-
-Open **Usings** and add entries without the `using` keyword:
+Add project namespaces once from **Usings** and write shorter snippets afterward:
 
 ```text
 MyGame.Runtime
@@ -205,7 +186,7 @@ MyGame.EditorTools
 System.Text.RegularExpressions
 ```
 
-The REPL combines built-in usings with your project-specific custom list when compiling snippets.
+The REPL combines built-in usings with your custom list on every run.
 
 ### Previous Result With `_`
 
@@ -235,13 +216,13 @@ Selection.activeObject
 GameManager.Instance.CurrentState
 ```
 
-Watch rows can show scalar values or expandable trees. The panel can resolve expressions from normal compilation, the previous result, or the global object search fallback. The row tells you when a fallback result was used so you know where the value came from.
+Watch rows can show scalar values or expandable trees. The evaluator can resolve expressions through normal compilation, the previous result `_`, or a global object-search fallback. Rows show their source so you know where a value came from.
 
-Watch compiles are cached. Each row's wrapped source is compiled once on first sight and the resulting `MethodInfo` is reused on every subsequent refresh, so N watches × M user runs cost N compiles + N×M invokes rather than N×M compiles. The cache is per-row (different expression text or different effective usings ⇒ separate entry) and invalidates automatically on any package install or user-script recompile, so live edits aren't masked by stale assemblies. The interactive editor doesn't share this cache — every Run there stays a fresh compile against the latest editor state.
+Watch compiles are cached. Each row's wrapped source is compiled once on first sight and the resulting `MethodInfo` is reused on later refreshes. The cache invalidates automatically when assemblies load, so project edits are not masked by stale watch code. The interactive editor still compiles fresh on every Run.
 
 ### Runtime Method Patching
 
-Runtime Method Patch lets you temporarily replace a void instance method while the Editor is running.
+Runtime Method Patch lets you temporarily replace a `void` instance method while the Editor is running.
 
 Use it to:
 
@@ -253,7 +234,7 @@ Use it to:
 Open it from:
 
 ```text
-Tools / Roslyn REPL / Patch Method
+Tools / Roslyn REPL / Patch Method…
 ```
 
 Pick a target type and method, write the replacement body, then click **Apply Patch**.
@@ -275,116 +256,19 @@ The patch body can look like normal source code. Private fields, private methods
 
 You can also click **Pull Original** to load the current source body of the target method, edit it in place, and run the edited version temporarily. Picking a method through **Browse** or by double-clicking an Object Browser row in Patches mode auto-pulls the source so the editor lands on a body you can immediately edit.
 
-Once a body is pulled and edited, the Patches view shows a live diff between the original source and the current edit (`+` / `-` lines, `+N -M` summary). Two actions sit under the diff:
+Once a body is pulled and edited, the Patches view shows a live diff between the original source and the current edit. **Copy diff** copies a unified diff. **Apply to file** writes the current patch body back into the target method's `.cs` file and creates a `.bak` sibling before writing.
 
-- **Copy diff** writes a unified-diff text blob to the system clipboard, ready to paste into a code review or IDE diff tool.
-- **Apply to file** writes the current patch body back into the target method's `.cs` file. A `.bak` sibling is saved before the write, and the body written is the user-edited form — the auto-rewrite that routes inaccessible names through reflection helpers is wrapper-only and never touches `spec.PatchBody`, so the on-disk source stays clean (`hp -= 10`, never `__set("hp", __get<int>("hp") - 10)`).
-
-Patches can be reverted individually or all at once. Active patches are remembered per project and re-applied after domain reload when possible.
-
-When patches are active, the toolbar shows a small `🔧 N active` indicator so it's clear that the running behavior differs from the source files. Click it to open the Patches view.
-
-Automatic reapply on reload can be turned off from:
+Patches can be reverted individually or all at once. Active patches are remembered per project and re-applied after domain reload when possible. Disable automatic reapply from:
 
 ```text
 Tools / Roslyn REPL / Auto-reapply Patches on Reload
 ```
 
-When it is off, patches are still remembered, but they don't reinstall on reload. Open the Patches view and click Apply on the rows you want to re-enable, or turn the setting back on to install every dormant patch right away.
+When auto-reapply is off, patches are still remembered but stay dormant on reload. Re-enable the setting to install every dormant patch immediately, or click **Apply** per row.
 
-## Basic Usage
+Supported patch targets:
 
-1. Open `Tools / Roslyn REPL / Open`.
-2. Type a snippet.
-3. Press **Run**, `F5`, or `Ctrl+Enter`.
-4. Inspect logs and return values in Output.
-5. Save useful probes through **Snippets**.
-6. Add repeated checks through **Watch**.
-
-## Window Layout
-
-The main window has three working areas:
-
-- **Object Browser** on the left.
-- **Code editor** at the top.
-- **Output / Patches / Watch** tools at the bottom.
-
-The toolbar includes Run, Clear, Snippets, History, Usings, setup verification, execution duration, Play Mode state, and package version.
-
-## Snippet Examples
-
-### Current Selection
-
-```csharp
-var obj = UnityEditor.Selection.activeObject;
-
-return obj == null
-    ? "Nothing selected"
-    : new
-    {
-        obj.name,
-        type = obj.GetType().FullName
-    };
-```
-
-### Scene Root Summary
-
-```csharp
-var scene = UnityEngine.SceneManagement.SceneManager.GetActiveScene();
-
-return scene.GetRootGameObjects()
-    .Select(go => new
-    {
-        go.name,
-        active = go.activeInHierarchy,
-        children = go.transform.childCount
-    })
-    .ToArray();
-```
-
-### Find Loaded ScriptableObjects
-
-```csharp
-return UnityEngine.Resources.FindObjectsOfTypeAll<UnityEngine.ScriptableObject>()
-    .Where(x => !string.IsNullOrEmpty(x.name))
-    .Select(x => new
-    {
-        x.name,
-        type = x.GetType().FullName
-    })
-    .OrderBy(x => x.type)
-    .ToArray();
-```
-
-### Cooperative Long-Running Probe
-
-```csharp
-var count = 0;
-
-while (!ct.IsCancellationRequested)
-{
-    count++;
-
-    if (count >= 100000)
-        break;
-}
-
-return count;
-```
-
-## Runtime Patch Workflow
-
-1. Open `Tools / Roslyn REPL / Patch Method`.
-2. Enter a target type, method name, and parameter type list, or use **Browse**.
-3. Click **Pull Original** if you want to start from the existing source body.
-4. Edit the body.
-5. Click **Apply Patch**.
-6. Test the behavior in Edit Mode or Play Mode.
-7. Click **Revert** when finished.
-
-Supported target shape:
-
-- instance method,
+- instance methods,
 - `void` return type,
 - normal value parameters,
 - non-constructor,
@@ -407,7 +291,18 @@ Patch bodies can use the original method parameter names. The generated wrapper 
 
 Most patch bodies do not need these helpers because natural source-style access is rewritten automatically when needed.
 
-## Persistence
+## Editor-Only Build Footprint
+
+The package is designed not to affect Player build output:
+
+- all scripts live under `Editor/`,
+- the assembly definition is limited to the `Editor` platform,
+- Roslyn and Harmony plugin importers are enabled for `Editor` and disabled for `Any Platform`,
+- there are no runtime assemblies, `Resources`, `StreamingAssets`, build preprocessors, or postprocessors.
+
+Runtime Method Patch changes the current Editor process through Harmony. Those detours do not enter a Player build. The one exception is **Apply to file**: it intentionally edits your actual `.cs` source file, and that source change will be compiled into future builds just like any manual code edit.
+
+## Data and Cleanup
 
 The following data is stored locally per Unity project:
 
@@ -417,25 +312,25 @@ The following data is stored locally per Unity project:
 - watch expressions,
 - runtime method patch specs.
 
-Storage uses Unity `EditorPrefs` with a project discriminator based on the project path. Data is local to the current machine and is not committed to source control.
+Storage uses Unity `EditorPrefs` with a project discriminator based on the project path. Data is local to your machine and is not committed to source control.
 
-To clear REPL data for the current project:
+Clear REPL data for the current project from:
 
 ```text
 Tools / Roslyn REPL / Reset Project Data
 ```
 
-Reset clears snippets, history, watches, custom usings, previous result `_`, visible Output, stored runtime patch specs, and the in-memory compiled-watch cache. Active Harmony patches are reverted as part of the reset.
+Reset clears snippets, history, watches, custom usings, previous result `_`, visible Output, stored runtime patch specs, and the in-memory compiled-watch cache. Active Harmony patches are reverted as part of reset.
 
 ### Memory and Domain Reload
 
-Each Run, Watch refresh, and Apply Patch loads a small dynamic assembly that can't be unloaded until the script domain reloads. The toolbar shows a `💾 N asm` indicator when any are loaded. The pill turns yellow as the count climbs and red when it's high enough that you'd notice the memory in a profiler. Click it to open a confirm dialog, or use:
+Each Run, Watch refresh, and Apply Patch loads a small dynamic assembly that cannot be unloaded until the script domain reloads. The toolbar shows an assembly-count indicator when dynamic assemblies are loaded. Click it to open a confirm dialog, or use:
 
 ```text
 Tools / Roslyn REPL / Force Domain Reload
 ```
 
-The reload also runs every time you recompile a script or toggle Play Mode, so most of the time the count takes care of itself.
+Script recompiles and Play Mode transitions also reload the domain in typical Unity settings, so the count usually takes care of itself.
 
 ## Safety Notes
 
@@ -449,7 +344,7 @@ This tool executes editor code in your Unity project. Treat snippets and patches
 
 ### Cooperative Cancel Only
 
-Snippets run synchronously on the Unity Editor's main thread. The 5-second timeout and any external Cancel button only take effect when your snippet observes the cancellation token `ct` — for example:
+Snippets run synchronously on the Unity Editor main thread. The timeout only takes effect when your code observes the cancellation token `ct`.
 
 ```csharp
 while (some_condition)
@@ -459,23 +354,9 @@ while (some_condition)
 }
 ```
 
-Code that does not check `ct` — including `while (true) {}`, infinite loops without a bound, or any blocking call that never returns — will freeze the Unity Editor and may require force-quitting the process. There is no hard-kill mechanism for non-cooperative code; both `Thread.Abort` and isolated worker domains are unavailable on Unity's runtime.
-
-The first time you Run a snippet on a workstation the REPL surfaces this caveat as a confirm dialog. After you acknowledge, a persistent yellow banner under the Code header keeps the reminder visible.
+Code that does not check `ct`, including `while (true) {}` or any blocking call that never returns, can freeze the Unity Editor and may require force-quitting the process. The first Run on a workstation shows this warning as a confirm dialog, and the Code header keeps a persistent reminder visible afterward.
 
 Prefer small probes, use `ct` in long loops, and revert runtime patches when you are done testing.
-
-## Dependency Notes
-
-The package installs Roslyn compiler assemblies and Harmony under `Editor/Plugins/`.
-
-If your project already ships Roslyn through another package, Unity may report duplicate assemblies. Run:
-
-```text
-Tools / Roslyn REPL / Verify Setup
-```
-
-Keep one Editor-compatible Roslyn set active. Avoid disabling random DLLs without checking their importer settings and origin first.
 
 ## Troubleshooting
 
@@ -499,13 +380,6 @@ Also confirm the assembly that defines the namespace is compiled for the Editor.
 
 The snippet or patch may be doing blocking work on the main thread. Stop the Editor if needed, then add a cancellation check or a clear loop bound before running again.
 
-```csharp
-while (!ct.IsCancellationRequested)
-{
-    // work
-}
-```
-
 ### Watch Shows An Unexpected Source
 
 Watch rows can fall back to previous result `_` or global object search when normal compilation fails. Check the row's source label and qualify the expression with an owner name when needed.
@@ -516,21 +390,24 @@ Run `Verify Setup` and check that Harmony is present. Then confirm the target me
 
 ### Duplicate Microsoft.CodeAnalysis Assemblies
 
-Another package probably includes Roslyn. Use `Verify Setup` to identify every Roslyn assembly origin, then keep only one compatible set enabled for the Editor.
+Another package probably includes Roslyn. Use `Verify Setup` to identify every Roslyn assembly origin, then keep one compatible Editor-enabled set active.
 
 ## Menus
 
 | Menu | Action |
 |---|---|
 | `Tools / Roslyn REPL / Open` | Open the main REPL window. |
-| `Tools / Roslyn REPL / Patch Method` | Open the REPL window in patching mode. |
+| `Tools / Roslyn REPL / Patch Method…` | Open the REPL window in patching mode. |
 | `Tools / Roslyn REPL / Import Default Snippets` | Add built-in starter snippets. |
-| `Tools / Roslyn REPL / Install Roslyn DLLs` | Install Roslyn and Harmony dependencies. |
 | `Tools / Roslyn REPL / Verify Setup` | Check compiler and patch dependencies. |
+| `Tools / Roslyn REPL / Install Roslyn DLLs` | Install or repair Roslyn and Harmony dependencies. |
 | `Tools / Roslyn REPL / Reset Project Data` | Clear this project's REPL data and revert active patches. |
+| `Tools / Roslyn REPL / Auto-reapply Patches on Reload` | Toggle whether active patch specs reinstall after domain reload. |
+| `Tools / Roslyn REPL / Run on Player Frame` | Toggle one-frame Play Mode marshaling for Run. |
+| `Tools / Roslyn REPL / Force Domain Reload` | Reload the script domain to unload dynamic REPL assemblies. |
 
 ## License
 
 MIT for this package.
 
-Installed Roslyn DLLs are MIT-licensed by Microsoft. See `Editor/Plugins/Roslyn/THIRD_PARTY_NOTICES.md` after installation.
+Installed Roslyn and Harmony DLLs are MIT-licensed by their authors. See `Editor/Plugins/Roslyn/THIRD_PARTY_NOTICES.md` and `Editor/Plugins/Harmony/THIRD_PARTY_NOTICES.md`.
