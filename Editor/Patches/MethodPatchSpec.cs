@@ -99,9 +99,32 @@ namespace RoslynRepl.Editor.Patches
 
         public string Key => Keyed(TargetTypeName, MethodName, ParameterTypes);
 
+        /// <summary>Build the registry key for a (typeName, methodName,
+        /// parameterTypes) triple. The parameterTypes value is run
+        /// through <see cref="NormalizeParamTypes"/> first so a legacy
+        /// comma-joined spec persisted on 0.7.1 ends up at the same
+        /// key as a freshly Browse-picked semicolon-joined spec for
+        /// the same method — without it the two would map to
+        /// different registry slots and `Apply` would install a
+        /// second Harmony prefix instead of replacing the first.
+        /// </summary>
         public static string Keyed(string typeName, string methodName, string parameterTypes)
         {
-            return $"{typeName ?? string.Empty}::{methodName ?? string.Empty}::{parameterTypes ?? string.Empty}";
+            var canonical = NormalizeParamTypes(parameterTypes);
+            return $"{typeName ?? string.Empty}::{methodName ?? string.Empty}::{canonical}";
+        }
+
+        /// <summary>Canonicalize a ParameterTypes string into the
+        /// current <see cref="ParamSeparator"/> form. Idempotent —
+        /// already-canonical strings round-trip unchanged. Used by
+        /// <see cref="Keyed"/> and by the registry's load / mutate
+        /// surfaces so legacy comma-joined data and current
+        /// semicolon-joined data don't fork into separate entries
+        /// for the same physical method.</summary>
+        public static string NormalizeParamTypes(string raw)
+        {
+            if (string.IsNullOrEmpty(raw)) return string.Empty;
+            return JoinParamTypes(SplitParamTypes(raw));
         }
 
         /// <summary>Build the persisted ParameterTypes value from a
@@ -272,6 +295,13 @@ namespace RoslynRepl.Editor.Patches
             if (string.IsNullOrEmpty(spec.TargetTypeName)) throw new ArgumentException("TargetTypeName is required", nameof(spec));
             if (string.IsNullOrEmpty(spec.MethodName))     throw new ArgumentException("MethodName is required",     nameof(spec));
             spec.ParameterTypes ??= string.Empty;
+            // Issue #41 P2: rewrite to the canonical separator form so
+            // the in-memory ParameterTypes value matches what `Keyed`
+            // computes the lookup key from. Without this a Browse
+            // → Apply for a method whose legacy spec was loaded with
+            // commas would store `Type;Type` while the previous spec
+            // sat under `Type,Type`, leaving both entries live.
+            spec.ParameterTypes = MethodPatchSpec.NormalizeParamTypes(spec.ParameterTypes);
             _byKey[spec.Key] = spec;
             // Any explicit registry write — Apply, Revert, save a
             // draft from the form — is the user's intent for this
@@ -375,6 +405,13 @@ namespace RoslynRepl.Editor.Patches
                 if (s == null || string.IsNullOrEmpty(s.TargetTypeName) || string.IsNullOrEmpty(s.MethodName))
                     continue;
                 s.ParameterTypes ??= string.Empty;
+                // Issue #41 P2: legacy specs persisted with the historic
+                // comma separator land here verbatim from PatchPersistence.
+                // Canonicalise on load so the in-memory ParameterTypes
+                // value matches what Keyed / Find expect — otherwise a
+                // legacy entry and a freshly-Browsed entry for the same
+                // method end up in two different registry slots.
+                s.ParameterTypes = MethodPatchSpec.NormalizeParamTypes(s.ParameterTypes);
                 _byKey[s.Key] = s;
             }
             Changed?.Invoke();
