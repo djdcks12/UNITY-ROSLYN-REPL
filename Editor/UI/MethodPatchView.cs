@@ -938,9 +938,8 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             // failure (permissions / disk / atomic-replace
             // contention) bubbles out as an exception with the
             // registry still consistent with the on-disk file.
-            // Catch it here so the UI surfaces a "delete failed,
-            // nothing changed" status instead of an unhandled
-            // exception in the Console.
+            // Catch it here so the UI surfaces a clear status
+            // instead of an unhandled exception in the Console.
             bool removed;
             bool persistedOk;
             try
@@ -949,9 +948,29 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             }
             catch (Exception ex)
             {
-                SetStatus(
-                    $"Delete failed — patches.json could not be written. The patch list is unchanged. See the Console for details.",
-                    error: true);
+                // PR-review followup on #52: the message has to be
+                // honest about what *did* happen. For an Active
+                // row we already ran PatchEngine.Revert above —
+                // the Harmony detour is gone, spec.Status is
+                // Inactive, and the previous Revert call already
+                // wrote that change to patches.json. So "the
+                // patch list is unchanged" would mislead the user
+                // into thinking their Play Mode behaviour also
+                // hadn't changed, when in fact it has. Branch the
+                // message on isActive so the user sees the real
+                // post-state.
+                if (isActive)
+                {
+                    SetStatus(
+                        $"Delete failed — patches.json could not be written, so the row stayed in the list. The patch was already reverted earlier in this Delete (detour removed, row is now Inactive); re-Apply if you want it active again. See the Console for details.",
+                        error: true);
+                }
+                else
+                {
+                    SetStatus(
+                        $"Delete failed — patches.json could not be written. The patch list is unchanged. See the Console for details.",
+                        error: true);
+                }
                 UnityEngine.Debug.LogWarning(
                     $"[Roslyn REPL] PatchRegistry.Remove threw while persisting: {ex.GetType().Name}: {ex.Message}");
                 return;
