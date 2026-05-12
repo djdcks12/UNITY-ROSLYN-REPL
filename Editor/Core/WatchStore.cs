@@ -50,10 +50,18 @@ namespace RoslynRepl.Editor.Core
             if (removed > 0) Persist(list);
         }
 
-        public static void Clear()
+        /// <summary>Wipe persisted watches. Returns the success flag
+        /// from <see cref="UserSettingsStorage.Delete"/> (true =
+        /// post-call file does not exist) so callers like Reset
+        /// Project Data can aggregate "did everything actually go
+        /// away?" — a stuck file would otherwise be invisible behind
+        /// the Changed event we always fire. PR-review followup on
+        /// #27.</summary>
+        public static bool Clear()
         {
-            UserSettingsStorage.Delete(FileName);
+            bool ok = UserSettingsStorage.Delete(FileName);
             Changed?.Invoke();
+            return ok;
         }
 
         private static void Persist(List<string> list)

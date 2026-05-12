@@ -53,10 +53,16 @@ namespace RoslynRepl.Editor.Core
             Persist(current);
         }
 
-        public static void Clear()
+        /// <summary>Wipe persisted run history. Returns the success
+        /// flag from <see cref="UserSettingsStorage.Delete"/> so Reset
+        /// Project Data can aggregate file-deletion failures instead
+        /// of unconditionally claiming the wipe succeeded. PR-review
+        /// followup on #27.</summary>
+        public static bool Clear()
         {
-            UserSettingsStorage.Delete(FileName);
+            bool ok = UserSettingsStorage.Delete(FileName);
             Changed?.Invoke();
+            return ok;
         }
 
         private static void Persist(List<string> list)

@@ -68,11 +68,17 @@ namespace RoslynRepl.Editor.Core
             if (removed > 0) Persist(list);
         }
 
-        /// <summary>Wipe every saved snippet for the current project.</summary>
-        public static void Clear()
+        /// <summary>Wipe every saved snippet for the current project.
+        /// Returns the success flag from
+        /// <see cref="UserSettingsStorage.Delete"/> so Reset Project
+        /// Data can aggregate file-deletion failures instead of
+        /// unconditionally claiming the wipe succeeded. PR-review
+        /// followup on #27.</summary>
+        public static bool Clear()
         {
-            UserSettingsStorage.Delete(FileName);
+            bool ok = UserSettingsStorage.Delete(FileName);
             Changed?.Invoke();
+            return ok;
         }
 
         public static void Rename(string oldName, string newName)

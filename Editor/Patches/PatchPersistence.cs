@@ -89,10 +89,17 @@ namespace RoslynRepl.Editor.Patches
             Changed?.Invoke();
         }
 
-        public static void Clear()
+        /// <summary>Delete the on-disk patch file. Returns the success
+        /// flag from <see cref="UserSettingsStorage.Delete"/> so the
+        /// caller can aggregate "did the file actually go away?" with
+        /// the other store deletes — Reset Project Data uses this to
+        /// surface partial-failure dialogs instead of unconditional
+        /// success. PR-review followup on #27.</summary>
+        public static bool Clear()
         {
-            UserSettingsStorage.Delete(FileName);
+            bool ok = UserSettingsStorage.Delete(FileName);
             Changed?.Invoke();
+            return ok;
         }
 
         /// <summary>
