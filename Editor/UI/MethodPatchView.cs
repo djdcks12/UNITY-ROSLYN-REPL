@@ -721,15 +721,12 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
 
             // Don't silently overwrite a non-default body — the user may
             // already be mid-edit. The default starter snippet is
-            // recognizable; anything else gets a confirm dialog. (No
-            // Editor dialog support inside ShowUtility-style panels?
-            // EditorUtility.DisplayDialog works from the main editor
-            // window's context, which is where this view lives.)
+            // recognizable; anything else gets a confirm dialog. The
+            // StartsWith check catches whitespace / trailing-newline
+            // drift between DefaultBody and a body loaded back from
+            // disk so an unedited starter still skips the confirm.
             bool currentIsDefault = string.IsNullOrEmpty(_bodyField.value)
                                  || _bodyField.value == DefaultBody
-                                 // legacy starter text — still treat as default so
-                                 // historic projects don't get an unnecessary confirm
-                                 || _bodyField.value.TrimStart().StartsWith("// Supported scope: void instance methods.")
                                  || _bodyField.value.TrimStart().StartsWith("// Write the patch body the same way");
             if (!currentIsDefault)
             {
