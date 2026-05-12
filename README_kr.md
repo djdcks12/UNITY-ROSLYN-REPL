@@ -270,7 +270,7 @@ if (hp <= 0)
 
 원본 body를 가져온 뒤 수정하면 Patches view가 원본과 현재 수정본의 live diff를 보여줍니다. **Copy diff**는 unified diff를 복사하고, **Apply to file**은 현재 patch body를 실제 대상 메서드의 `.cs` 파일에 씁니다. 쓰기 직전 타임스탬프가 붙은 백업이 `<project>/Library/RoslynRepl/Backups/` 아래에 저장되므로 필요하면 손으로 복구할 수 있습니다. 이 폴더는 Unity가 무시하므로 Project 창에 노이즈가 생기거나 실수로 커밋되는 일이 없고, Library 리임포트 시 Unity가 비울 수 있으니 장기 보관이 필요하면 따로 옮겨 두세요.
 
-패치는 개별 Revert 또는 Revert All로 되돌릴 수 있습니다. Active patch는 프로젝트별로 기억되고 가능한 경우 domain reload 이후 다시 적용됩니다. 자동 재적용은 다음 메뉴에서 끌 수 있습니다.
+패치는 개별 Revert 또는 Revert All로 되돌릴 수 있습니다. **Revert**는 행을 Inactive draft로 남겨두므로 나중에 `Load`로 다시 불러올 수 있고, **Delete**는 draft 자체를 목록에서 제거합니다 (Active 상태이면 Harmony detour를 먼저 자동 revert). draft가 더 이상 의미 없을 때 한 행만 정리하는 용도이며, 전체 정리는 Reset Project Data가 그대로 담당합니다. Active patch는 프로젝트별로 기억되고 가능한 경우 domain reload 이후 다시 적용됩니다. 자동 재적용은 다음 메뉴에서 끌 수 있습니다.
 
 ```text
 Tools / Roslyn REPL / Auto-reapply Patches on Reload

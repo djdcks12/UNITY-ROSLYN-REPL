@@ -369,7 +369,11 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             });
             _host.Add(_autoReapplyToggle);
 
-            var listTitle = new Label("Active patches");
+            // Issue #52: relabel from "Active patches" to plain
+            // "Patches" — Revert leaves rows behind as drafts and
+            // the new per-row Delete affordance lets users prune
+            // them, so the section is no longer "active only".
+            var listTitle = new Label("Patches");
             listTitle.style.unityFontStyleAndWeight = FontStyle.Bold;
             listTitle.style.color = new StyleColor(new Color(0.8f, 0.8f, 0.8f));
             listTitle.style.fontSize = 10;
@@ -378,7 +382,7 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             listTitle.style.flexShrink = 0;
             _host.Add(listTitle);
 
-            // Active patches: own vertical ScrollView with a fixed
+            // Patches list: own vertical ScrollView with a fixed
             // max-height share so a long list doesn't push the body
             // editor offscreen. flex-shrink=0 so the column layout
             // doesn't squeeze it to zero when the body is large.
@@ -886,6 +890,124 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             SetStatus($"Reverted {n} patch{(n == 1 ? "" : "es")} (drafts kept).", error: false);
         }
 
+        // Issue #52: per-row Delete handler. Reset Project Data wipes
+        // *all* patch drafts (and snippets, history, watches…) which
+        // is too broad when the user just wants to prune one Inactive
+        // row. The flow:
+        //   1. Confirm the destructive action — drafts hold persisted
+        //      patch bodies the user may have spent time on, so a
+        //      misclick here would silently lose work.
+        //   2. If the spec is currently Active (Harmony detour
+        //      installed), revert it first so the detour doesn't
+        //      outlive the registry entry. PatchEngine.Revert flips
+        //      the spec to Inactive and re-persists.
+        //   3. Remove the spec from the registry; PatchRegistry.Remove
+        //      persists the removal so a domain reload doesn't
+        //      resurrect it.
+        // The dialog text mentions the auto-revert so the user isn't
+        // surprised when they delete an Active row and the patched
+        // method snaps back to its original behaviour mid-Play.
+        private void OnDeletePatchClicked(MethodPatchSpec spec)
+        {
+            if (spec == null) return;
+
+            bool isActive = PatchRegistry.GetDisplayState(spec) == PatchDisplayState.Active;
+            string activeNote = isActive
+                ? "\n\nThis patch is currently active — it will be reverted (the Harmony detour will be removed) before the draft is deleted."
+                : string.Empty;
+
+            bool ok = UnityEditor.EditorUtility.DisplayDialog(
+                "Delete this patch draft?",
+                $"Remove\n\n  {spec.TargetTypeName}.{spec.MethodName}\n\nfrom the patch list. The persisted body for this patch will be lost — there is no undo.{activeNote}",
+                "Delete",
+                "Cancel");
+            if (!ok) return;
+
+            if (isActive)
+            {
+                try { PatchEngine.Revert(spec); }
+                catch (Exception ex)
+                {
+                    SetStatus($"Could not revert before delete: {ex.Message}", error: true);
+                    return;
+                }
+            }
+
+            // PR-review followup on #52: PatchRegistry.Remove now
+            // calls Save *before* mutating _byKey, so a hard write
+            // failure (permissions / disk / atomic-replace
+            // contention) bubbles out as an exception with the
+            // registry still consistent with the on-disk file.
+            // Catch it here so the UI surfaces a clear status
+            // instead of an unhandled exception in the Console.
+            bool removed;
+            bool persistedOk;
+            try
+            {
+                removed = PatchRegistry.Remove(spec, out persistedOk);
+            }
+            catch (Exception ex)
+            {
+                // PR-review followup on #52: the message has to be
+                // honest about what *did* happen. For an Active
+                // row we already ran PatchEngine.Revert above —
+                // the Harmony detour is gone, spec.Status is
+                // Inactive, and the previous Revert call already
+                // wrote that change to patches.json. So "the
+                // patch list is unchanged" would mislead the user
+                // into thinking their Play Mode behaviour also
+                // hadn't changed, when in fact it has. Branch the
+                // message on isActive so the user sees the real
+                // post-state.
+                if (isActive)
+                {
+                    SetStatus(
+                        $"Delete failed — patches.json could not be written, so the row stayed in the list. The patch was already reverted earlier in this Delete (detour removed, row is now Inactive); re-Apply if you want it active again. See the Console for details.",
+                        error: true);
+                }
+                else
+                {
+                    SetStatus(
+                        $"Delete failed — patches.json could not be written. The patch list is unchanged. See the Console for details.",
+                        error: true);
+                }
+                UnityEngine.Debug.LogWarning(
+                    $"[Roslyn REPL] PatchRegistry.Remove threw while persisting: {ex.GetType().Name}: {ex.Message}");
+                return;
+            }
+
+            if (removed)
+            {
+                if (persistedOk)
+                {
+                    SetStatus($"Deleted: {spec.TargetTypeName}.{spec.MethodName}", error: false);
+                }
+                else
+                {
+                    // Soft failure: in-memory removal committed but
+                    // UserSettingsStorage.Delete couldn't drop the
+                    // (now-empty) patches.json — typically a sharing
+                    // violation from an external editor. Patches UI
+                    // shows the row gone, but a domain reload would
+                    // re-read the file and resurrect the spec.
+                    // UserSettingsStorage.Delete already logged the
+                    // exact path + exception to the Console.
+                    SetStatus(
+                        $"Removed in memory but patches.json could not be deleted — this draft will reappear after a domain reload. " +
+                        $"See the Console for the file path; close any external editor holding it open and re-run, or use Reset Project Data.",
+                        error: true);
+                }
+            }
+            else
+            {
+                // Edge case — the spec was already gone (race with
+                // another flow that called Remove between confirm
+                // and click). Treat as success since the user-facing
+                // postcondition holds.
+                SetStatus($"Already removed: {spec.TargetTypeName}.{spec.MethodName}", error: false);
+            }
+        }
+
         private void SetStatus(string message, bool error)
         {
             if (_statusLabel == null) return;
@@ -934,7 +1056,7 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             var specs = PatchRegistry.Specs.ToList();
             if (specs.Count == 0)
             {
-                var empty = new Label("(no active patches)");
+                var empty = new Label("(no patches)");
                 empty.style.color = new StyleColor(new Color(0.45f, 0.45f, 0.45f));
                 empty.style.paddingLeft = 6;
                 empty.style.paddingTop = 6;
@@ -1014,17 +1136,27 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
                 var revertBtn = new Button(() =>
                 {
                     // Per-row Revert keeps the spec in the registry as
-                    // a draft, matching OnRevertClicked. To delete the
-                    // draft entirely the user can hit Apply with an
-                    // empty body and then Revert (or use Reset Project
-                    // Data for a clean slate). A dedicated "Delete"
-                    // affordance can land in a later phase if drafts
-                    // become heavy.
+                    // a draft, matching OnRevertClicked. The Delete
+                    // button below removes the draft entirely.
                     PatchEngine.Revert(s);
                 })
                 { text = "Revert" };
                 revertBtn.style.minWidth = 60;
                 row.Add(revertBtn);
+
+                // Issue #52: per-row Delete. Reset Project Data is the
+                // only other way to drop a draft, but it's a global
+                // wipe — too broad for "I'm done with this one row".
+                // The handler reverts first if the spec is currently
+                // active so the Harmony detour doesn't outlive the
+                // registry entry; PatchRegistry.Remove(spec) then
+                // persists the removal so a domain reload doesn't
+                // resurrect it.
+                var deleteBtn = new Button(() => OnDeletePatchClicked(s)) { text = "Delete" };
+                deleteBtn.tooltip = "Remove this patch from the list. Active patches are reverted first.";
+                deleteBtn.style.minWidth = 60;
+                deleteBtn.style.marginLeft = 4;
+                row.Add(deleteBtn);
 
                 block.Add(row);
 
