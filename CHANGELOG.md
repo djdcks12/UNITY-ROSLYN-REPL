@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed (Korean README rewritten in natural prose)
+- `README_kr.md` rewritten to read as native Korean rather than as a literal translation of `README.md`. Removed translationese tics (over-use of "…할 수 있습니다", chained "…됩니다" passive endings, "권장합니다 / 구성되어 있습니다" stiff phrasings, comma-heavy English-style enumerations), broke up multi-clause English sentences into shorter Korean ones, and softened the section headings ("왜 쓰나요?" → "어떤 일을 도와주나요"). Code blocks, menu paths, the helper table, and the meaning of every section are unchanged so the EN / KR pair still describes the same package; only the prose register moved.
+
 ### Added (Per-row Delete in the Patches list)
 - The Patches list now has a per-row **Delete** button next to **Load** / **Revert**. Reset Project Data was previously the only way to drop a draft from the registry — too broad for "I'm done with this one row", since it also wipes snippets, history, watches, and every other Patch the user is mid-debugging. The list section header is renamed from "Active patches" to plain "Patches" (Revert leaves Inactive drafts behind, so the section is no longer "active only"); the empty-state placeholder reads `(no patches)` accordingly.
 - Delete shows a confirm dialog ("Delete this patch draft?") that calls out the destructive payload (the persisted body for that spec disappears) and adds an explicit auto-revert note when the row is currently Active. The handler reverts the Harmony detour first if installed, then calls `PatchRegistry.Remove(spec)` which persists the removal — so a domain reload won't resurrect a deleted draft. Reset Project Data remains the broad cleanup path. Closes #52.
