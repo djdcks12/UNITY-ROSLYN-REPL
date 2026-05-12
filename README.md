@@ -324,7 +324,9 @@ The following data is stored locally per Unity project:
 - watch expressions,
 - runtime method patch specs.
 
-Storage uses Unity `EditorPrefs` with a project discriminator based on the project path. Data is local to your machine and is not committed to source control.
+Storage location: `<project>/UserSettings/RoslynRepl/*.json` — patches, snippets, run history, and watch expressions live in plain JSON files inside your Unity project's `UserSettings/` folder. The package writes a `.gitignore` (containing `*`) into that folder on first save, so files never appear in `git status` even if your project's top-level `.gitignore` doesn't already cover `UserSettings/`. Custom usings and the smaller editor toggles still live in `EditorPrefs`.
+
+Treat the contents the same way you would treat a debug-time scratch buffer: patch bodies and run-history entries can carry whatever you typed in mid-debug — server URLs, auth tokens, account values. The auto-`.gitignore` is the safety net, but if your team mirrors `UserSettings/` to another tool (Plastic SCM workspace settings, a backup script, etc.), audit that path with the same lens you would use for an editor log.
 
 Clear REPL data for the current project from:
 

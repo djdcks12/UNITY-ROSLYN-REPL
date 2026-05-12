@@ -1,152 +1,167 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
-using UnityEditor;
+using UnityEngine;
 using RoslynRepl.Editor.Core;
 
 namespace RoslynRepl.Editor.Patches
 {
     /// <summary>
-    /// EditorPrefs-backed persistence for the runtime method patch list.
-    /// Project-scoped via <see cref="ProjectScopedPrefs"/>, same shape
-    /// the snippet / history / watch stores already use, so cross-project
-    /// leakage is impossible by construction.
+    /// File-backed persistence for the runtime method patch list.
+    /// Payload lives in
+    /// <c>&lt;project&gt;/UserSettings/RoslynRepl/patches.json</c> so
+    /// it stays tied to the project folder — deleting the project
+    /// reclaims every patch body in one go.
     ///
-    /// Format: each spec is seven base64-encoded fields joined by `|`,
-    /// specs joined by `\n`. Order:
-    ///   TargetTypeName | MethodName | ParameterTypes |
-    ///   OriginalBody | PatchBody | Status | HasOriginalBody
+    /// File format (current schema, <c>version = 1</c>):
+    /// <code>
+    /// {
+    ///   "version": 1,
+    ///   "items": [
+    ///     {
+    ///       "TargetTypeName": "...",
+    ///       "MethodName":     "...",
+    ///       "ParameterTypes": "...",
+    ///       "OriginalBody":   "...",
+    ///       "HasOriginalBody": true,
+    ///       "PatchBody":      "...",
+    ///       "Status":         1
+    ///     }
+    ///   ]
+    /// }
+    /// </code>
     ///
-    /// HasOriginalBody is the explicit "did Pull Original ever run
-    /// for this spec?" signal. It's a separate field because
-    /// `OriginalBody == ""` is a real valid snapshot (a method
-    /// declared as `void Foo() {}` pulls as an empty string body),
-    /// and we'd otherwise have no way to tell that apart from
-    /// "no snapshot taken — OriginalBody is empty by default".
-    ///
-    /// Six-field legacy data still loads: when HasOriginalBody is
-    /// missing, `IsNullOrEmpty(OriginalBody)` decides. Empty bodies
-    /// in legacy data are treated as "no snapshot" because that's
-    /// the overwhelmingly common case in pre-source-export drafts.
-    /// New writes always emit seven fields.
+    /// <c>HasOriginalBody</c> is the explicit "did Pull Original ever
+    /// run for this spec?" signal — a method declared as
+    /// <c>void Foo() {}</c> pulls as an empty-string body, which is a
+    /// real snapshot, so the flag is needed to keep <c>null</c> (no
+    /// snapshot taken) distinct from <c>""</c> (empty-body snapshot).
     ///
     /// Decode failure on a single line is swallowed — a malformed
     /// entry shouldn't take down the whole patch set.
     ///
-    /// LastError is intentionally not persisted: it's transient
+    /// <c>LastError</c> is intentionally not persisted: it's transient
     /// diagnostic state from the last apply attempt, valid only for
     /// the current session. The bootstrap path re-runs Apply on the
-    /// next boot for any spec stored as Active and refreshes
-    /// LastError from that attempt.
+    /// next boot for any spec stored as Active and refreshes LastError
+    /// from that attempt.
     /// </summary>
     public static class PatchPersistence
     {
         public static event Action Changed;
 
-        private static string PrefsKey => ProjectScopedPrefs.BuildKey("RoslynRepl.RuntimePatches");
+        private const string FileName = "patches.json";
+
+        [Serializable]
+        private sealed class SpecDto
+        {
+            public string TargetTypeName;
+            public string MethodName;
+            public string ParameterTypes;
+            public string OriginalBody;
+            public bool HasOriginalBody;
+            public string PatchBody;
+            public PatchStatus Status;
+        }
+
+        [Serializable]
+        private sealed class Envelope
+        {
+            public int version = 1;
+            public List<SpecDto> items = new List<SpecDto>();
+        }
 
         public static List<MethodPatchSpec> Load()
         {
-            var raw = EditorPrefs.GetString(PrefsKey, string.Empty);
-            if (string.IsNullOrEmpty(raw)) return new List<MethodPatchSpec>();
-            var list = new List<MethodPatchSpec>();
-            foreach (var line in raw.Split('\n'))
-            {
-                if (string.IsNullOrEmpty(line)) continue;
-                var spec = TryDecode(line);
-                if (spec != null) list.Add(spec);
-            }
-            return list;
+            if (!UserSettingsStorage.TryReadAllText(FileName, out var json))
+                return new List<MethodPatchSpec>();
+            return DecodeJson(json);
         }
 
         public static void Save(IEnumerable<MethodPatchSpec> specs)
         {
-            var encoded = (specs ?? Enumerable.Empty<MethodPatchSpec>())
+            var list = (specs ?? Enumerable.Empty<MethodPatchSpec>())
                 .Where(s => s != null
                          && !string.IsNullOrEmpty(s.TargetTypeName)
                          && !string.IsNullOrEmpty(s.MethodName))
-                .Select(EncodeOne);
-            EditorPrefs.SetString(PrefsKey, string.Join("\n", encoded));
+                .ToList();
+            PersistInternal(list);
             Changed?.Invoke();
         }
 
-        public static void Clear()
+        /// <summary>Delete the on-disk patch file. Returns the success
+        /// flag from <see cref="UserSettingsStorage.Delete"/> so the
+        /// caller can aggregate "did the file actually go away?" with
+        /// the other store deletes — Reset Project Data uses this to
+        /// surface partial-failure dialogs instead of unconditional
+        /// success. PR-review followup on #27.</summary>
+        public static bool Clear()
         {
-            EditorPrefs.DeleteKey(PrefsKey);
+            bool ok = UserSettingsStorage.Delete(FileName);
             Changed?.Invoke();
+            return ok;
         }
 
         /// <summary>
-        /// True iff the project has *any* persisted patch data — used by
-        /// <see cref="PatchRegistry.Clear"/> to detect stale-key cases
-        /// where the in-memory dictionary is empty but the EditorPrefs
-        /// entry still exists (e.g. an older package version wrote
-        /// SetString(key, "") instead of DeleteKey on Reset; the empty
-        /// blob deserializes back to zero specs but the key sticks).
+        /// True iff the project has *any* persisted patch data — used
+        /// by <see cref="PatchRegistry.Clear"/> to detect stale-file
+        /// cases where the in-memory dictionary is empty but a file
+        /// still exists on disk.
         /// </summary>
-        public static bool HasAny() => EditorPrefs.HasKey(PrefsKey);
-
-        private static string EncodeOne(MethodPatchSpec s)
+        public static bool HasAny()
         {
-            return string.Join("|",
-                B64(s.TargetTypeName),
-                B64(s.MethodName),
-                B64(s.ParameterTypes ?? string.Empty),
-                B64(s.OriginalBody   ?? string.Empty),
-                B64(s.PatchBody      ?? string.Empty),
-                B64(s.Status.ToString()),
-                B64(s.OriginalBody != null ? "1" : "0"));
+            return UserSettingsStorage.Exists(FileName);
         }
 
-        private static MethodPatchSpec TryDecode(string line)
+        private static void PersistInternal(IEnumerable<MethodPatchSpec> specs)
         {
+            var env = new Envelope { items = new List<SpecDto>() };
+            foreach (var s in specs)
+            {
+                if (s == null) continue;
+                if (string.IsNullOrEmpty(s.TargetTypeName) || string.IsNullOrEmpty(s.MethodName)) continue;
+                env.items.Add(new SpecDto
+                {
+                    TargetTypeName  = s.TargetTypeName,
+                    MethodName      = s.MethodName,
+                    ParameterTypes  = s.ParameterTypes ?? string.Empty,
+                    OriginalBody    = s.OriginalBody   ?? string.Empty,
+                    HasOriginalBody = s.OriginalBody   != null,
+                    PatchBody       = s.PatchBody      ?? string.Empty,
+                    Status          = s.Status,
+                });
+            }
+            UserSettingsStorage.WriteAllText(FileName, JsonUtility.ToJson(env, prettyPrint: true));
+        }
+
+        private static List<MethodPatchSpec> DecodeJson(string json)
+        {
+            var list = new List<MethodPatchSpec>();
             try
             {
-                var parts = line.Split('|');
-                if (parts.Length < 6) return null;
-                var origBody = D64(parts[3]);
-
-                // 7-field format carries an explicit HasOriginalBody
-                // flag so we can keep `null` (no Pull yet) and `""`
-                // (empty-body Pull) distinct across reload. Legacy
-                // 6-field reads collapse `""` to `null` because that's
-                // the overwhelmingly common pre-Phase-E meaning of
-                // "OriginalBody empty by default".
-                bool hasOriginal;
-                if (parts.Length >= 7)
+                var env = JsonUtility.FromJson<Envelope>(json);
+                if (env?.items == null) return list;
+                foreach (var dto in env.items)
                 {
-                    hasOriginal = D64(parts[6]) == "1";
+                    if (dto == null) continue;
+                    list.Add(new MethodPatchSpec
+                    {
+                        TargetTypeName = dto.TargetTypeName,
+                        MethodName     = dto.MethodName,
+                        ParameterTypes = dto.ParameterTypes,
+                        OriginalBody   = dto.HasOriginalBody ? (dto.OriginalBody ?? string.Empty) : null,
+                        PatchBody      = dto.PatchBody,
+                        Status         = dto.Status,
+                    });
                 }
-                else
-                {
-                    hasOriginal = !string.IsNullOrEmpty(origBody);
-                }
-
-                return new MethodPatchSpec
-                {
-                    TargetTypeName = D64(parts[0]),
-                    MethodName     = D64(parts[1]),
-                    ParameterTypes = D64(parts[2]),
-                    OriginalBody   = hasOriginal ? origBody : null,
-                    PatchBody      = D64(parts[4]),
-                    Status         = Enum.TryParse<PatchStatus>(D64(parts[5]), out var st)
-                                       ? st
-                                       : PatchStatus.Inactive,
-                };
             }
-            catch (FormatException)
+            catch
             {
-                // base64 broke — skip the line so the rest of the
-                // patch set still loads.
-                return null;
+                // Malformed file — surface as "no specs" rather than
+                // crashing the editor on load. The user can re-Apply
+                // via the form; the in-memory registry stays clean.
             }
+            return list;
         }
-
-        private static string B64(string s) =>
-            Convert.ToBase64String(Encoding.UTF8.GetBytes(s ?? string.Empty));
-
-        private static string D64(string b) =>
-            Encoding.UTF8.GetString(Convert.FromBase64String(b));
     }
 }

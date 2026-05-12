@@ -179,10 +179,12 @@ namespace RoslynRepl.Editor.Patches
 
     /// <summary>
     /// In-memory registry of every method patch the user has defined this
-    /// session. the engine is intentionally *not* persistent — the user
-    /// authoring a patch and the engine applying it are different
-    /// concerns from "survive a domain reload". the persistence layer adds
-    /// EditorPrefs (or asset) persistence on top of this same API.
+    /// session. The engine is intentionally *not* persistent on its own —
+    /// the user authoring a patch and the engine applying it are
+    /// different concerns from "survive a domain reload".
+    /// <see cref="PatchPersistence"/> layers a project-local JSON file
+    /// (<c>UserSettings/RoslynRepl/patches.json</c>) on top of this
+    /// same API.
     ///
     /// Looked-up by (typeName, methodName, parameterTypes); duplicates
     /// are handled as upsert so the editor UI can call AddOrUpdate
@@ -355,33 +357,32 @@ namespace RoslynRepl.Editor.Patches
             return Remove(spec.TargetTypeName, spec.MethodName, spec.ParameterTypes);
         }
 
-        public static void Clear()
+        /// <summary>Wipe both the in-memory registry and the on-disk
+        /// patch file. Returns the success flag from
+        /// <see cref="PatchPersistence.Clear"/> so Reset Project Data
+        /// can aggregate file-deletion failures across every store and
+        /// surface a partial-failure dialog. PR-review followup on
+        /// #27.</summary>
+        public static bool Clear()
         {
             // Two independent buckets to consider:
             //   • the live in-memory dictionary,
-            //   • the persisted EditorPrefs key.
-            // An older package version that wrote SetString(key, "")
-            // could leave the second bucket non-empty even when the
-            // first is empty after LoadFromPersistence. Bailing on
-            // _byKey.Count == 0 alone would skip the DeleteKey on
-            // those upgraded projects and break the README's
-            // "Reset removes every package-owned EditorPrefs key"
-            // promise.
+            //   • the persisted JSON file.
+            // The dictionary can be empty after LoadFromPersistence
+            // even when the file still exists on disk (e.g. a manual
+            // file edit made every entry undecodable, so Load returned
+            // an empty list). Routing through HasAny catches that case
+            // so the README's "Reset removes every package-owned
+            // persistence slot" promise survives.
             bool hadInMemory  = _byKey.Count > 0;
             bool hadPersisted = PatchPersistence.HasAny();
-            if (!hadInMemory && !hadPersisted) return;
+            if (!hadInMemory && !hadPersisted) return true;
 
             _byKey.Clear();
             _sessionDormantKeys.Clear();
-            // Use the dedicated DeleteKey path instead of Persist()'s
-            // SetString-with-empty-list. SetString("") leaves an empty
-            // EditorPrefs key on disk, which contradicts the README's
-            // "Reset removes every package-owned EditorPrefs key"
-            // promise. Match the behavior the other stores ship
-            // (UsingsStore.Clear, RunHistoryStore.Clear, etc. all call
-            // DeleteKey directly).
-            PatchPersistence.Clear();
+            bool ok = PatchPersistence.Clear();
             Changed?.Invoke();
+            return ok;
         }
 
         /// <summary>

@@ -1,36 +1,43 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using UnityEditor;
+using UnityEngine;
 
 namespace RoslynRepl.Editor.Core
 {
     /// <summary>
-    /// EditorPrefs-backed list of watch expressions, project-scoped via
-    /// <see cref="ProjectScopedPrefs"/>. Storage is base64-per-entry joined
-    /// with '\n' (the same format the snippet library uses), so any
-    /// character the user can type is safe.
+    /// Project-local file-backed list of watch expressions. Payload
+    /// lives in <c>&lt;project&gt;/UserSettings/RoslynRepl/watches.json</c>,
+    /// scoped to the project folder so deleting the project reclaims
+    /// the data in one go.
     /// </summary>
     public static class WatchStore
     {
         public static event Action Changed;
 
-        private static string PrefsKey => ProjectScopedPrefs.BuildKey("RoslynRepl.Watches");
+        private const string FileName = "watches.json";
+
+        [Serializable]
+        private sealed class Envelope
+        {
+            public int version = 1;
+            public List<string> items = new List<string>();
+        }
 
         public static List<string> Load()
         {
-            var raw = EditorPrefs.GetString(PrefsKey, string.Empty);
-            if (string.IsNullOrEmpty(raw)) return new List<string>();
-            var list = new List<string>();
-            foreach (var token in raw.Split('\n'))
-            {
-                if (string.IsNullOrEmpty(token)) continue;
-                try { list.Add(Encoding.UTF8.GetString(Convert.FromBase64String(token))); }
-                catch (FormatException) { /* skip */ }
-            }
-            return list;
+            if (!UserSettingsStorage.TryReadAllText(FileName, out var json))
+                return new List<string>();
+            return DecodeJson(json);
         }
+
+        /// <summary>True iff the on-disk file currently exists. Used
+        /// by Reset Project Data to detect "file is there but Load
+        /// returned an empty list" — a corrupt JSON, a locked file,
+        /// or any other read failure all collapse to an empty list,
+        /// and counting only `Load().Count` would skip the wipe in
+        /// exactly the cases the user most needs Reset to handle.
+        /// PR-review followup on #27.</summary>
+        public static bool HasAny() => UserSettingsStorage.Exists(FileName);
 
         public static void Add(string expression)
         {
@@ -52,19 +59,42 @@ namespace RoslynRepl.Editor.Core
             if (removed > 0) Persist(list);
         }
 
-        public static void Clear()
+        /// <summary>Wipe persisted watches. Returns the success flag
+        /// from <see cref="UserSettingsStorage.Delete"/> (true =
+        /// post-call file does not exist) so callers like Reset
+        /// Project Data can aggregate "did everything actually go
+        /// away?" — a stuck file would otherwise be invisible behind
+        /// the Changed event we always fire. PR-review followup on
+        /// #27.</summary>
+        public static bool Clear()
         {
-            EditorPrefs.DeleteKey(PrefsKey);
+            bool ok = UserSettingsStorage.Delete(FileName);
             Changed?.Invoke();
+            return ok;
         }
 
         private static void Persist(List<string> list)
         {
-            var encoded = list
-                .Where(s => !string.IsNullOrWhiteSpace(s))
-                .Select(s => Convert.ToBase64String(Encoding.UTF8.GetBytes(s)));
-            EditorPrefs.SetString(PrefsKey, string.Join("\n", encoded));
+            var env = new Envelope { items = new List<string>() };
+            foreach (var s in list)
+            {
+                if (!string.IsNullOrWhiteSpace(s)) env.items.Add(s);
+            }
+            UserSettingsStorage.WriteAllText(FileName, JsonUtility.ToJson(env, prettyPrint: true));
             Changed?.Invoke();
+        }
+
+        private static List<string> DecodeJson(string json)
+        {
+            try
+            {
+                var env = JsonUtility.FromJson<Envelope>(json);
+                return env?.items ?? new List<string>();
+            }
+            catch
+            {
+                return new List<string>();
+            }
         }
     }
 }
