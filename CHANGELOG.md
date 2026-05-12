@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed (Korean README rewritten in natural prose)
+- `README_kr.md` rewritten to read as native Korean rather than as a literal translation of `README.md`. Removed translationese tics (over-use of "…할 수 있습니다", chained "…됩니다" passive endings, "권장합니다 / 구성되어 있습니다" stiff phrasings, comma-heavy English-style enumerations), broke up multi-clause English sentences into shorter Korean ones, and softened the section headings ("왜 쓰나요?" → "어떤 일을 도와주나요"). Code blocks, menu paths, the helper table, and the meaning of every section are unchanged so the EN / KR pair still describes the same package; only the prose register moved.
+
 ### Removed (UsingsStore legacy key migration)
 - `UsingsStore.LegacyKey` (`RoslynRepl.CustomUsings`, the project-agnostic key the pre-Phase-4 builds wrote to) and the `MigrateLegacyKeyIfNeeded` step that ran on the first `LoadCustom` / `Save` after each domain reload are gone. The package shipped publicly at 0.7.2; before that the migration window covered users still upgrading from local 0.7.0 / 0.7.1 builds, but those paths no longer have a real consumer. Carrying the migration forward only added a stateful first-call branch on every load and a tiny `_legacyMigrationChecked` flag to remember whether we'd already swept the legacy key this session — both dead weight on every fresh install.
 - A 0.7.1 install upgraded to 0.7.3 will keep its custom usings (the per-project bucket lookup is unchanged); any value that still sat under the global `RoslynRepl.CustomUsings` key on first launch of an even older build is no longer rescued. Wipe by hand from EditorPrefs if you need to. `Reset Project Data` continues to clear the current per-project key.
