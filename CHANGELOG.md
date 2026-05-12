@@ -6,8 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Removed (Legacy package-id fallback)
-- `ReplPackagePaths` no longer probes the historical `com.roslyn-repl` folder when resolving the package root, and `IsBundledRoslynAssemblyPath` no longer matches it either. The OpenUPM id `com.youngchan.roslyn-repl` is now the only path the package looks under. Same pre-release / "no consumer install yet" reasoning as the #27 migration drop — keeping the fallback forever would only hide misconfigured installations or stale folders, and renaming a local checkout from `Packages/com.roslyn-repl/` to `Packages/com.youngchan.roslyn-repl/` is a one-time mv. Closes #45.
+### Changed (Legacy package-id fallback)
+- The literal `com.roslyn-repl` folder probe in `ReplPackagePaths.ResolvePackageRoot` is gone. Path resolution now relies entirely on `PackageInfo.FindForAssembly` — Unity resolves embedded packages by the `name` field in `package.json`, not the containing folder name, so forcing the folder to match the published id would have broken every legitimate embedded-dev case (variants / forks / checkouts under different folder names sharing the same id).
+- `IsBundledRoslynAssemblyPath` now matches against the *resolved* `PackageRoot` rather than the literal `PackageName`. Without this change, a legacy embedded checkout that path-resolved via `PackageInfo` (folder still named `com.roslyn-repl/`) would have had its bundled Roslyn DLLs misclassified as `OtherPackage` in setup diagnostics — the verifier's "duplicate copy?" branch would have lied about what's loaded. PR-review followup.
+- Soft nudge for embedded checkouts: when `PackageInfo.assetPath` ends in a folder name other than `com.youngchan.roslyn-repl`, the resolver emits a single `Debug.LogWarning` per editor session asking the developer to rename the folder before consuming via OpenUPM. Local development keeps working through PackageInfo in the meantime. Closes #45.
 
 ### Changed (User data moved from EditorPrefs to project-local files)
 - Patch bodies, snippets, run history, and watch expressions now live in `<project>/UserSettings/RoslynRepl/*.json` instead of `EditorPrefs`. On Windows EditorPrefs is registry-backed, so the historical store leaked beyond project deletion and bloated as patches and snippets grew. The new files tie the data to the project folder — deleting the project reclaims everything, and `UserSettings/` is the same place Unity ships its own per-user / per-project layout files.
