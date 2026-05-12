@@ -139,23 +139,37 @@ namespace RoslynRepl.Editor.Core
             }
         }
 
-        /// <summary>Delete the file if it exists. Quiet on missing —
-        /// the caller's intent ("after this returns, no such file
-        /// exists") is satisfied either way.</summary>
-        public static void Delete(string fileName)
+        /// <summary>Delete the file if it exists. Returns <c>true</c>
+        /// iff the post-call state is "file does not exist". A failed
+        /// delete (file locked by an external editor, missing
+        /// permission, etc.) returns <c>false</c> with the exception
+        /// path / message routed through <see cref="Debug.LogWarning"/>
+        /// — Reset Project Data is a security-flavoured operation, so
+        /// a silent partial failure would leave snippets / patches /
+        /// run history on disk that the user thinks they wiped, and
+        /// the next Load would resurrect them. Callers that need to
+        /// surface "some files survived" to the user can check the
+        /// return value and aggregate. PR-review followup on #27.</summary>
+        public static bool Delete(string fileName)
         {
+            string path = null;
             try
             {
-                var path = ResolvePath(fileName);
-                if (File.Exists(path)) File.Delete(path);
+                path = ResolvePath(fileName);
+                if (!File.Exists(path)) return true;
+                File.Delete(path);
+                // File.Delete can return without throwing on some
+                // filesystems where the entry actually survives (rare
+                // — usually a junction / network corner case). The
+                // post-condition check keeps the return value honest.
+                return !File.Exists(path);
             }
-            catch
+            catch (Exception ex)
             {
-                // The user-facing semantic of Clear is "stop persisting"; a
-                // failed file delete (e.g. the file is open in a hex
-                // viewer) doesn't change that the in-memory list is empty,
-                // and surfacing an exception mid-Clear breaks every UI
-                // callsite that assumes Clear can't throw.
+                Debug.LogWarning(
+                    $"[Roslyn REPL] Could not delete '{path ?? fileName}': {ex.GetType().Name}: {ex.Message}. " +
+                    "The file may still be on disk and a future Load will pick it up again — close any external editor holding the file open and retry Reset.");
+                return false;
             }
         }
 
