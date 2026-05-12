@@ -30,6 +30,15 @@ namespace RoslynRepl.Editor.Core
             return DecodeJson(json);
         }
 
+        /// <summary>True iff the on-disk file currently exists. Used
+        /// by Reset Project Data to detect "file is there but Load
+        /// returned an empty list" — a corrupt JSON, a locked file,
+        /// or any other read failure all collapse to an empty list,
+        /// and counting only `Load().Count` would skip the wipe in
+        /// exactly the cases the user most needs Reset to handle.
+        /// PR-review followup on #27.</summary>
+        public static bool HasAny() => UserSettingsStorage.Exists(FileName);
+
         public static void Add(string expression)
         {
             if (string.IsNullOrWhiteSpace(expression)) return;

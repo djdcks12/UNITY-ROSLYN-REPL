@@ -42,6 +42,14 @@ namespace RoslynRepl.Editor.Core
             return DecodeJson(json);
         }
 
+        /// <summary>True iff the on-disk file currently exists. See
+        /// <see cref="WatchStore.HasAny"/> for the same reasoning —
+        /// Reset Project Data's scope check needs file existence
+        /// separately from successful Load so corrupt / unreadable
+        /// files still route through Clear. PR-review followup on
+        /// #27.</summary>
+        public static bool HasAny() => UserSettingsStorage.Exists(FileName);
+
         /// <summary>
         /// Save (insert or update). If a snippet with the given name
         /// already exists, its code is overwritten and ordering is

@@ -158,6 +158,20 @@ return UnityEngine.Application.unityVersion;";
             int usingsCount  = UsingsStore.LoadCustom().Count;
             int storeTotal = snippetCount + historyCount + watchCount + usingsCount;
 
+            // PR-review followup on #27: Load() collapses both
+            // file-missing and file-corrupt / unreadable into an
+            // empty list, so a stuck snippets.json / runHistory.json /
+            // watches.json that we *can't* decode would otherwise
+            // make the early-return below claim "Nothing to clear" —
+            // and the user would think Reset succeeded while the
+            // sensitive payload sat untouched on disk. Pull a
+            // separate file-existence check (parallel to the patch
+            // store's HasAny path) into the scope decision so a
+            // corrupt file still routes through Clear.
+            bool hasStaleSnippetFile = snippetCount == 0 && SnippetStore.HasAny();
+            bool hasStaleHistoryFile = historyCount == 0 && RunHistoryStore.HasAny();
+            bool hasStaleWatchFile   = watchCount   == 0 && WatchStore.HasAny();
+
             // Phase 11 PR fix: the persistent stores aren't the only
             // surface that can hold sensitive data. A user who only ran
             // a single ad-hoc snippet and never saved it will have
@@ -205,6 +219,7 @@ return UnityEngine.Application.unityVersion;";
 
             if (storeTotal == 0 && !hasCarryOver && dirtyOutputs == 0
                 && patchCount == 0 && !hasStalePatchKey
+                && !hasStaleSnippetFile && !hasStaleHistoryFile && !hasStaleWatchFile
                 && compileCacheCount == 0)
             {
                 EditorUtility.DisplayDialog(
@@ -214,11 +229,27 @@ return UnityEngine.Application.unityVersion;";
                 return;
             }
 
+            // Helper for the stale-file rows below — keeps the
+            // "decoded N items" wording when there's content the
+            // user expects to see, and switches to the explicit
+            // "stale / unreadable file" framing when the file
+            // exists but Load returned nothing. Without this the
+            // confirm dialog would show "0 saved snippets" next to
+            // a row that's about to delete a real file from disk,
+            // and the user would have no idea why Reset is
+            // touching it at all.
+            string Describe(int decoded, bool stale, string singular, string plural)
+            {
+                if (stale && decoded == 0)
+                    return $"the on-disk {singular} file (currently unreadable / cannot be decoded — wiped to recover)";
+                return $"{decoded} {(decoded == 1 ? singular : plural)}";
+            }
+
             var detail = new System.Text.StringBuilder();
             detail.Append("This will permanently delete the REPL data for the *current project*:\n");
-            detail.Append($"  • {snippetCount} saved snippet{(snippetCount == 1 ? "" : "s")}\n");
-            detail.Append($"  • {historyCount} run history entr{(historyCount == 1 ? "y" : "ies")}\n");
-            detail.Append($"  • {watchCount} watch expression{(watchCount == 1 ? "" : "s")}\n");
+            detail.Append($"  • {Describe(snippetCount, hasStaleSnippetFile, "saved snippet",      "saved snippets")}\n");
+            detail.Append($"  • {Describe(historyCount, hasStaleHistoryFile, "run history entry",   "run history entries")}\n");
+            detail.Append($"  • {Describe(watchCount,   hasStaleWatchFile,   "watch expression",    "watch expressions")}\n");
             detail.Append($"  • {usingsCount} custom using{(usingsCount == 1 ? "" : "s")}\n");
             // Always list the in-memory targets — they're always reset,
             // even when their visible state is empty, so the dialog
