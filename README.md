@@ -270,7 +270,7 @@ You can also click **Pull Original** to load the current source body of the targ
 
 Once a body is pulled and edited, the Patches view shows a live diff between the original source and the current edit. **Copy diff** copies a unified diff. **Apply to file** writes the current patch body back into the target method's `.cs` file. A timestamped backup is saved under `<project>/Library/RoslynRepl/Backups/` before the write so you can restore by hand if the edit needs to go back; that folder is Unity-ignored (no Project window noise, no accidental commits), and Unity may delete it on a Library reimport — copy a backup out if you need it long-term.
 
-Patches can be reverted individually or all at once. Active patches are remembered per project and re-applied after domain reload when possible. Disable automatic reapply from:
+Patches can be reverted individually or all at once; **Revert** keeps the spec in the list as an Inactive draft you can `Load` back later. **Delete** removes the row entirely (auto-reverts the Harmony detour first if the patch is active) for cases where the draft itself isn't worth keeping — Reset Project Data is still the broad cleanup path. Active patches are remembered per project and re-applied after domain reload when possible. Disable automatic reapply from:
 
 ```text
 Tools / Roslyn REPL / Auto-reapply Patches on Reload

@@ -4,6 +4,12 @@ All notable changes to this package will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added (Per-row Delete in the Patches list)
+- The Patches list now has a per-row **Delete** button next to **Load** / **Revert**. Reset Project Data was previously the only way to drop a draft from the registry — too broad for "I'm done with this one row", since it also wipes snippets, history, watches, and every other Patch the user is mid-debugging. The list section header is renamed from "Active patches" to plain "Patches" (Revert leaves Inactive drafts behind, so the section is no longer "active only"); the empty-state placeholder reads `(no patches)` accordingly.
+- Delete shows a confirm dialog ("Delete this patch draft?") that calls out the destructive payload (the persisted body for that spec disappears) and adds an explicit auto-revert note when the row is currently Active. The handler reverts the Harmony detour first if installed, then calls `PatchRegistry.Remove(spec)` which persists the removal — so a domain reload won't resurrect a deleted draft. Reset Project Data remains the broad cleanup path. Closes #52.
+
 ## [0.7.2] - 2026-05-12
 
 ### Changed (Legacy package-id fallback)
