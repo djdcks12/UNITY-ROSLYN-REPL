@@ -75,14 +75,39 @@ namespace RoslynRepl.Editor.UI
 
             var clearBtn = new Button(() =>
             {
-                if (EditorUtility.DisplayDialog("Clear history?",
+                if (!EditorUtility.DisplayDialog("Clear history?",
                     "Discard all recorded snippets for this project? This cannot be undone.",
                     "Clear", "Cancel"))
                 {
-                    RunHistoryStore.Clear();
-                    _entries = new List<string>();
-                    RebuildListView();
+                    return;
                 }
+                // PR-review followup on #27: don't blank the visible
+                // list before we know the file actually went away. The
+                // previous shape called RunHistoryStore.Clear() and
+                // unconditionally reset _entries — so a locked /
+                // read-only runHistory.json left the UI looking empty
+                // while the file (and its sensitive contents) sat
+                // untouched on disk, ready to resurface the moment
+                // the popup reopened or the next Load fired.
+                bool ok = RunHistoryStore.Clear();
+                if (ok)
+                {
+                    _entries = new List<string>();
+                }
+                else
+                {
+                    // Refresh from disk so the visible list matches
+                    // the actual surviving state — Clear's failure
+                    // means the file is still there with whatever it
+                    // had before, and the user needs to see that
+                    // rather than think the wipe succeeded.
+                    _entries = RunHistoryStore.Load();
+                    EditorUtility.DisplayDialog(
+                        "Clear history failed",
+                        "Could not delete the run history file. The list above reflects what's still on disk — close any external editor holding the file open, then retry, or delete the file by hand. (See the Console for the exact path.)",
+                        "OK");
+                }
+                RebuildListView();
             })
             { text = "Clear" };
             header.Add(clearBtn);

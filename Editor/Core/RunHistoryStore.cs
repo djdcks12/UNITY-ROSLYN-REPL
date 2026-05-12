@@ -1,18 +1,15 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using UnityEditor;
+using UnityEngine;
 
 namespace RoslynRepl.Editor.Core
 {
     /// <summary>
-    /// EditorPrefs-backed history of recently-executed snippets, project-
-    /// scoped so each Unity project keeps its own ring. Entries are stored
-    /// most-recent-first; on every <see cref="Push"/> the new entry is
-    /// inserted at index 0, identical preceding entries are de-duplicated
-    /// (so re-running the same snippet doesn't churn the list), and the
-    /// tail past <see cref="Capacity"/> is dropped.
+    /// Project-local history of recently-executed snippets. Payload
+    /// lives in <c>&lt;project&gt;/UserSettings/RoslynRepl/runHistory.json</c>.
+    /// Entries are stored most-recent-first; on every <see cref="Push"/>
+    /// the new entry is inserted at index 0, identical preceding entries
+    /// are de-duplicated, and the tail past <see cref="Capacity"/> is dropped.
     /// </summary>
     public static class RunHistoryStore
     {
@@ -20,29 +17,29 @@ namespace RoslynRepl.Editor.Core
 
         public static event Action Changed;
 
-        private static string PrefsKey => ProjectScopedPrefs.BuildKey("RoslynRepl.RunHistory");
+        private const string FileName = "runHistory.json";
+
+        [Serializable]
+        private sealed class Envelope
+        {
+            public int version = 1;
+            public List<string> items = new List<string>();
+        }
 
         public static List<string> Load()
         {
-            var raw = EditorPrefs.GetString(PrefsKey, string.Empty);
-            if (string.IsNullOrEmpty(raw)) return new List<string>();
-            var list = new List<string>(Capacity);
-            foreach (var token in raw.Split('\n'))
-            {
-                if (string.IsNullOrEmpty(token)) continue;
-                try
-                {
-                    var bytes = Convert.FromBase64String(token);
-                    list.Add(Encoding.UTF8.GetString(bytes));
-                }
-                catch (FormatException)
-                {
-                    // Skip a malformed entry rather than nuking the whole
-                    // store — the rest of the ring is still usable.
-                }
-            }
-            return list;
+            if (!UserSettingsStorage.TryReadAllText(FileName, out var json))
+                return new List<string>();
+            return DecodeJson(json);
         }
+
+        /// <summary>True iff the on-disk file currently exists. See
+        /// <see cref="WatchStore.HasAny"/> for the same reasoning —
+        /// Reset Project Data's scope check counts file existence
+        /// separately from successful Load so a corrupt /
+        /// unreadable file still routes through Clear. PR-review
+        /// followup on #27.</summary>
+        public static bool HasAny() => UserSettingsStorage.Exists(FileName);
 
         public static void Push(string code)
         {
@@ -64,17 +61,37 @@ namespace RoslynRepl.Editor.Core
             Persist(current);
         }
 
-        public static void Clear()
+        /// <summary>Wipe persisted run history. Returns the success
+        /// flag from <see cref="UserSettingsStorage.Delete"/> so Reset
+        /// Project Data can aggregate file-deletion failures instead
+        /// of unconditionally claiming the wipe succeeded. PR-review
+        /// followup on #27.</summary>
+        public static bool Clear()
         {
-            EditorPrefs.DeleteKey(PrefsKey);
+            bool ok = UserSettingsStorage.Delete(FileName);
             Changed?.Invoke();
+            return ok;
         }
 
         private static void Persist(List<string> list)
         {
-            var encoded = list.Select(s => Convert.ToBase64String(Encoding.UTF8.GetBytes(s ?? string.Empty)));
-            EditorPrefs.SetString(PrefsKey, string.Join("\n", encoded));
+            var env = new Envelope { items = new List<string>() };
+            foreach (var s in list) env.items.Add(s ?? string.Empty);
+            UserSettingsStorage.WriteAllText(FileName, JsonUtility.ToJson(env, prettyPrint: true));
             Changed?.Invoke();
+        }
+
+        private static List<string> DecodeJson(string json)
+        {
+            try
+            {
+                var env = JsonUtility.FromJson<Envelope>(json);
+                return env?.items ?? new List<string>();
+            }
+            catch
+            {
+                return new List<string>();
+            }
         }
     }
 }

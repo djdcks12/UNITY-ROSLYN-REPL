@@ -158,6 +158,20 @@ return UnityEngine.Application.unityVersion;";
             int usingsCount  = UsingsStore.LoadCustom().Count;
             int storeTotal = snippetCount + historyCount + watchCount + usingsCount;
 
+            // PR-review followup on #27: Load() collapses both
+            // file-missing and file-corrupt / unreadable into an
+            // empty list, so a stuck snippets.json / runHistory.json /
+            // watches.json that we *can't* decode would otherwise
+            // make the early-return below claim "Nothing to clear" —
+            // and the user would think Reset succeeded while the
+            // sensitive payload sat untouched on disk. Pull a
+            // separate file-existence check (parallel to the patch
+            // store's HasAny path) into the scope decision so a
+            // corrupt file still routes through Clear.
+            bool hasStaleSnippetFile = snippetCount == 0 && SnippetStore.HasAny();
+            bool hasStaleHistoryFile = historyCount == 0 && RunHistoryStore.HasAny();
+            bool hasStaleWatchFile   = watchCount   == 0 && WatchStore.HasAny();
+
             // Phase 11 PR fix: the persistent stores aren't the only
             // surface that can hold sensitive data. A user who only ran
             // a single ad-hoc snippet and never saved it will have
@@ -205,6 +219,7 @@ return UnityEngine.Application.unityVersion;";
 
             if (storeTotal == 0 && !hasCarryOver && dirtyOutputs == 0
                 && patchCount == 0 && !hasStalePatchKey
+                && !hasStaleSnippetFile && !hasStaleHistoryFile && !hasStaleWatchFile
                 && compileCacheCount == 0)
             {
                 EditorUtility.DisplayDialog(
@@ -214,11 +229,27 @@ return UnityEngine.Application.unityVersion;";
                 return;
             }
 
+            // Helper for the stale-file rows below — keeps the
+            // "decoded N items" wording when there's content the
+            // user expects to see, and switches to the explicit
+            // "stale / unreadable file" framing when the file
+            // exists but Load returned nothing. Without this the
+            // confirm dialog would show "0 saved snippets" next to
+            // a row that's about to delete a real file from disk,
+            // and the user would have no idea why Reset is
+            // touching it at all.
+            string Describe(int decoded, bool stale, string singular, string plural)
+            {
+                if (stale && decoded == 0)
+                    return $"the on-disk {singular} file (currently unreadable / cannot be decoded — wiped to recover)";
+                return $"{decoded} {(decoded == 1 ? singular : plural)}";
+            }
+
             var detail = new System.Text.StringBuilder();
             detail.Append("This will permanently delete the REPL data for the *current project*:\n");
-            detail.Append($"  • {snippetCount} saved snippet{(snippetCount == 1 ? "" : "s")}\n");
-            detail.Append($"  • {historyCount} run history entr{(historyCount == 1 ? "y" : "ies")}\n");
-            detail.Append($"  • {watchCount} watch expression{(watchCount == 1 ? "" : "s")}\n");
+            detail.Append($"  • {Describe(snippetCount, hasStaleSnippetFile, "saved snippet",      "saved snippets")}\n");
+            detail.Append($"  • {Describe(historyCount, hasStaleHistoryFile, "run history entry",   "run history entries")}\n");
+            detail.Append($"  • {Describe(watchCount,   hasStaleWatchFile,   "watch expression",    "watch expressions")}\n");
             detail.Append($"  • {usingsCount} custom using{(usingsCount == 1 ? "" : "s")}\n");
             // Always list the in-memory targets — they're always reset,
             // even when their visible state is empty, so the dialog
@@ -250,9 +281,21 @@ return UnityEngine.Application.unityVersion;";
             // content. Skipping ResetLastResult / ClearOutputAfterReset
             // when storeTotal==0 is exactly the bug the Phase 11 PR
             // caught; same lesson here for runtime patches.
-            SnippetStore.Clear();
-            RunHistoryStore.Clear();
-            WatchStore.Clear();
+            //
+            // The four file-backed Clear() calls return bool now so
+            // we can tell when a stuck file (locked by an external
+            // editor, missing permission) survived the delete. Issue
+            // #27 PR-review followup: previously we fired Changed,
+            // wiped the visible UI, and showed "Cleared N items"
+            // even when snippets.json / patches.json was still on
+            // disk — the next Load would resurrect the supposedly
+            // cleared sensitive data and the user had no idea.
+            // Aggregate the four results here and route into a
+            // partial-failure dialog when any of them survived.
+            var failedFiles = new List<string>(4);
+            if (!SnippetStore.Clear())            failedFiles.Add("snippets.json");
+            if (!RunHistoryStore.Clear())         failedFiles.Add("runHistory.json");
+            if (!WatchStore.Clear())              failedFiles.Add("watches.json");
             UsingsStore.Clear();
             ReplEngine.ResetLastResult();
             // Order: clear the cache *after* WatchStore.Clear so a
@@ -268,7 +311,7 @@ return UnityEngine.Application.unityVersion;";
             // would render an "active patches" UI inconsistent for a
             // beat if we hadn't already torn down Harmony state.
             RoslynRepl.Editor.Patches.PatchEngine.RevertAll();
-            RoslynRepl.Editor.Patches.PatchRegistry.Clear();
+            if (!RoslynRepl.Editor.Patches.PatchRegistry.Clear()) failedFiles.Add("patches.json");
 
             // Phase 11b: snippet/history/usings/watch popups already
             // refresh themselves through their store Changed events.
@@ -281,10 +324,36 @@ return UnityEngine.Application.unityVersion;";
             }
 
             int reportedTotal = storeTotal + (hasCarryOver ? 1 : 0) + dirtyOutputs + patchCount + compileCacheCount;
-            EditorUtility.DisplayDialog(
-                "Roslyn REPL — Reset Project Data",
-                $"Cleared {reportedTotal} item{(reportedTotal == 1 ? "" : "s")} across snippet library, run history, watches, custom usings, the `_` carry-over, visible Output panels, runtime method patches, and the compiled-watch cache.",
-                "OK");
+            if (failedFiles.Count > 0)
+            {
+                // Some files survived. Be explicit about which ones
+                // and what the consequence is — those payloads are
+                // back in memory the moment the user reopens the
+                // panel because the next Load() reads them straight
+                // off disk. Steer the user toward the actionable
+                // remediation (close the holder, retry Reset, or
+                // delete by hand) rather than burying the partial
+                // failure in a console warning the dialog already
+                // claims everything succeeded.
+                var pathHint = RoslynRepl.Editor.Core.UserSettingsStorage
+                    .ResolvePath(failedFiles[0]);
+                pathHint = System.IO.Path.GetDirectoryName(pathHint);
+                EditorUtility.DisplayDialog(
+                    "Roslyn REPL — Reset Project Data (partial failure)",
+                    $"In-memory state was cleared, but {failedFiles.Count} file{(failedFiles.Count == 1 ? "" : "s")} could not be deleted:\n\n" +
+                    "  • " + string.Join("\n  • ", failedFiles) + "\n\n" +
+                    $"Folder: {pathHint}\n\n" +
+                    "These payloads will reload the next time the matching panel reads them. Close any external editor holding the file open (often the cause), then re-run Reset Project Data — or delete the listed files manually.\n\n" +
+                    "Other reset targets (`_` carry-over, Output panels, Harmony detours, the compiled-watch cache) succeeded.",
+                    "OK");
+            }
+            else
+            {
+                EditorUtility.DisplayDialog(
+                    "Roslyn REPL — Reset Project Data",
+                    $"Cleared {reportedTotal} item{(reportedTotal == 1 ? "" : "s")} across snippet library, run history, watches, custom usings, the `_` carry-over, visible Output panels, runtime method patches, and the compiled-watch cache.",
+                    "OK");
+            }
         }
 
         public void CreateGUI()

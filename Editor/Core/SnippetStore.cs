@@ -1,8 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
-using UnityEditor;
+using UnityEngine;
 
 namespace RoslynRepl.Editor.Core
 {
@@ -20,44 +19,36 @@ namespace RoslynRepl.Editor.Core
     }
 
     /// <summary>
-    /// EditorPrefs-backed library of named snippets, project-scoped via
-    /// <see cref="ProjectScopedPrefs"/>. Storage format mirrors
-    /// <see cref="RunHistoryStore"/>: each entry is "name_b64|code_b64",
-    /// entries joined with "\n". Base64 chars don't include '|' or '\n',
-    /// so the separators stay unambiguous regardless of what the user
-    /// typed for the name or the code.
+    /// Project-local library of named snippets. Payload lives in
+    /// <c>&lt;project&gt;/UserSettings/RoslynRepl/snippets.json</c>.
     /// </summary>
     public static class SnippetStore
     {
         public static event Action Changed;
 
-        private static string PrefsKey => ProjectScopedPrefs.BuildKey("RoslynRepl.Snippets");
+        private const string FileName = "snippets.json";
+
+        [Serializable]
+        private sealed class Envelope
+        {
+            public int version = 1;
+            public List<SnippetEntry> items = new List<SnippetEntry>();
+        }
 
         public static List<SnippetEntry> Load()
         {
-            var raw = EditorPrefs.GetString(PrefsKey, string.Empty);
-            if (string.IsNullOrEmpty(raw)) return new List<SnippetEntry>();
-            var list = new List<SnippetEntry>();
-            foreach (var line in raw.Split('\n'))
-            {
-                if (string.IsNullOrEmpty(line)) continue;
-                var pipe = line.IndexOf('|');
-                if (pipe <= 0) continue;
-                try
-                {
-                    var name = Decode(line.Substring(0, pipe));
-                    var code = Decode(line.Substring(pipe + 1));
-                    if (string.IsNullOrEmpty(name)) continue;
-                    list.Add(new SnippetEntry(name, code));
-                }
-                catch (FormatException)
-                {
-                    // Skip a corrupt entry; the rest of the library is
-                    // still usable.
-                }
-            }
-            return list;
+            if (!UserSettingsStorage.TryReadAllText(FileName, out var json))
+                return new List<SnippetEntry>();
+            return DecodeJson(json);
         }
+
+        /// <summary>True iff the on-disk file currently exists. See
+        /// <see cref="WatchStore.HasAny"/> for the same reasoning —
+        /// Reset Project Data's scope check needs file existence
+        /// separately from successful Load so corrupt / unreadable
+        /// files still route through Clear. PR-review followup on
+        /// #27.</summary>
+        public static bool HasAny() => UserSettingsStorage.Exists(FileName);
 
         /// <summary>
         /// Save (insert or update). If a snippet with the given name
@@ -85,11 +76,17 @@ namespace RoslynRepl.Editor.Core
             if (removed > 0) Persist(list);
         }
 
-        /// <summary>Wipe every saved snippet for the current project.</summary>
-        public static void Clear()
+        /// <summary>Wipe every saved snippet for the current project.
+        /// Returns the success flag from
+        /// <see cref="UserSettingsStorage.Delete"/> so Reset Project
+        /// Data can aggregate file-deletion failures instead of
+        /// unconditionally claiming the wipe succeeded. PR-review
+        /// followup on #27.</summary>
+        public static bool Clear()
         {
-            EditorPrefs.DeleteKey(PrefsKey);
+            bool ok = UserSettingsStorage.Delete(FileName);
             Changed?.Invoke();
+            return ok;
         }
 
         public static void Rename(string oldName, string newName)
@@ -117,21 +114,27 @@ namespace RoslynRepl.Editor.Core
 
         private static void Persist(List<SnippetEntry> list)
         {
-            var encoded = list
-                .Where(s => s != null && !string.IsNullOrEmpty(s.Name))
-                .Select(s => Encode(s.Name) + "|" + Encode(s.Code ?? string.Empty));
-            EditorPrefs.SetString(PrefsKey, string.Join("\n", encoded));
+            var env = new Envelope { items = new List<SnippetEntry>() };
+            foreach (var s in list)
+            {
+                if (s == null || string.IsNullOrEmpty(s.Name)) continue;
+                env.items.Add(new SnippetEntry(s.Name, s.Code ?? string.Empty));
+            }
+            UserSettingsStorage.WriteAllText(FileName, JsonUtility.ToJson(env, prettyPrint: true));
             Changed?.Invoke();
         }
 
-        private static string Encode(string s)
+        private static List<SnippetEntry> DecodeJson(string json)
         {
-            return Convert.ToBase64String(Encoding.UTF8.GetBytes(s ?? string.Empty));
-        }
-
-        private static string Decode(string b64)
-        {
-            return Encoding.UTF8.GetString(Convert.FromBase64String(b64));
+            try
+            {
+                var env = JsonUtility.FromJson<Envelope>(json);
+                return env?.items ?? new List<SnippetEntry>();
+            }
+            catch
+            {
+                return new List<SnippetEntry>();
+            }
         }
     }
 }
