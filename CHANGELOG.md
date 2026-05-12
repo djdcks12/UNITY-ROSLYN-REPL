@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Removed (Legacy package-id fallback)
+- `ReplPackagePaths` no longer probes the historical `com.roslyn-repl` folder when resolving the package root, and `IsBundledRoslynAssemblyPath` no longer matches it either. The OpenUPM id `com.youngchan.roslyn-repl` is now the only path the package looks under. Same pre-release / "no consumer install yet" reasoning as the #27 migration drop — keeping the fallback forever would only hide misconfigured installations or stale folders, and renaming a local checkout from `Packages/com.roslyn-repl/` to `Packages/com.youngchan.roslyn-repl/` is a one-time mv. Closes #45.
+
 ### Changed (User data moved from EditorPrefs to project-local files)
 - Patch bodies, snippets, run history, and watch expressions now live in `<project>/UserSettings/RoslynRepl/*.json` instead of `EditorPrefs`. On Windows EditorPrefs is registry-backed, so the historical store leaked beyond project deletion and bloated as patches and snippets grew. The new files tie the data to the project folder — deleting the project reclaims everything, and `UserSettings/` is the same place Unity ships its own per-user / per-project layout files.
 - **Breaking** for any pre-release 0.7.1 install: there is no migration from the old EditorPrefs keys. The package has not had a public consumer release yet, so preserving the historical blob would only carry forward dead code on every Load. Any 0.7.1 EditorPrefs entry stays orphaned in the registry; remove it by hand if you need to (the keys started with `RoslynRepl.`).

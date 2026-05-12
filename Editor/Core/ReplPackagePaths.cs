@@ -5,11 +5,20 @@ using UnityEditor.PackageManager;
 
 namespace RoslynRepl.Editor.Core
 {
+    /// <summary>
+    /// Path resolver for the package's own files (bundled DLLs, UXML,
+    /// USS, default snippet JSON). The OpenUPM package id is the
+    /// single source of truth — the historical <c>com.roslyn-repl</c>
+    /// fallback was removed in 0.7.2 (issue #45) along with the
+    /// EditorPrefs migration, on the same "no consumer install yet"
+    /// reasoning. A project that still keeps the package folder at
+    /// <c>Packages/com.roslyn-repl</c> should rename it to
+    /// <c>Packages/com.youngchan.roslyn-repl</c> — the resolver no
+    /// longer probes the old name.
+    /// </summary>
     internal static class ReplPackagePaths
     {
         public const string PackageName = "com.youngchan.roslyn-repl";
-
-        private const string LegacyPackageName = "com.roslyn-repl";
 
         public static string PackageRoot => ResolvePackageRoot();
 
@@ -26,8 +35,7 @@ namespace RoslynRepl.Editor.Core
 
             var normalized = NormalizePath(path);
             return ContainsOrdinalIgnoreCase(normalized, "/Editor/Plugins/Roslyn/")
-                   && (ContainsOrdinalIgnoreCase(normalized, $"/{PackageName}")
-                       || ContainsOrdinalIgnoreCase(normalized, $"/{LegacyPackageName}"));
+                   && ContainsOrdinalIgnoreCase(normalized, $"/{PackageName}");
         }
 
         private static string ResolvePackageRoot()
@@ -40,16 +48,21 @@ namespace RoslynRepl.Editor.Core
             }
             catch
             {
-                // Fall through to filesystem probes. PackageInfo can be
-                // unavailable while Unity is recovering from a domain reload.
+                // Fall through to filesystem probe. PackageInfo can be
+                // unavailable while Unity is recovering from a domain
+                // reload — the fallback below just looks for the
+                // package.json directly.
             }
 
             if (File.Exists($"Packages/{PackageName}/package.json"))
                 return $"Packages/{PackageName}";
 
-            if (File.Exists($"Packages/{LegacyPackageName}/package.json"))
-                return $"Packages/{LegacyPackageName}";
-
+            // Last-resort default. If the folder really isn't at
+            // Packages/com.youngchan.roslyn-repl every AssetPath
+            // call further up the stack will fail to find UXML / USS
+            // / DLLs and the user will get a clear "asset not found"
+            // path in the Verify Setup dialog — better than silently
+            // resolving to a stale legacy folder.
             return $"Packages/{PackageName}";
         }
 
