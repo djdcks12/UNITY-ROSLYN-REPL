@@ -268,7 +268,7 @@ The patch body can look like normal source code. Private fields, private methods
 
 You can also click **Pull Original** to load the current source body of the target method, edit it in place, and run the edited version temporarily. Picking a method through **Browse** or by double-clicking an Object Browser row in Patches mode auto-pulls the source so the editor lands on a body you can immediately edit.
 
-Once a body is pulled and edited, the Patches view shows a live diff between the original source and the current edit. **Copy diff** copies a unified diff. **Apply to file** writes the current patch body back into the target method's `.cs` file and creates a `.bak` sibling before writing.
+Once a body is pulled and edited, the Patches view shows a live diff between the original source and the current edit. **Copy diff** copies a unified diff. **Apply to file** writes the current patch body back into the target method's `.cs` file. A timestamped backup is saved under `<project>/Library/RoslynRepl/Backups/` before the write so you can restore by hand if the edit needs to go back; that folder is Unity-ignored (no Project window noise, no accidental commits), and Unity may delete it on a Library reimport — copy a backup out if you need it long-term.
 
 Patches can be reverted individually or all at once. Active patches are remembered per project and re-applied after domain reload when possible. Disable automatic reapply from:
 

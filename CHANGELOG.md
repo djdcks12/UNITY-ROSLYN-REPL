@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed (Output result tree defaults to fields-only)
+- The Output result tree no longer invokes user-defined property getters by default. A property getter can run lazy init, IO, log emission, or state mutation — inspecting a value in Output shouldn't trip any of that for the user. Watch already opted out for the same reason (refreshing every Run multiplies the side effects); Output now matches.
+- New `Tools / Roslyn REPL / Output: Include Property Getters` toggle flips the behaviour per project. Off (default) walks fields only — instance, private, and inherited. On walks readable instance properties on top of that. The toggle lives in `RoslynRepl.Editor.Core.OutputSettings.IncludeProperties` so other surfaces can read or flip it programmatically.
+- Existing `SimpleObjectSerializer.Options.IncludeProperties` default stays at `true` so direct callers don't quietly change behaviour; the Output panel routes through a new `BuildOutputTreeOptions()` helper that consults the setting. README updated. Closes #28.
+
+### Changed (Apply-to-file backups moved out of Assets/Packages)
+- `Apply to file` no longer drops `Foo.cs.bak` next to the edited `Foo.cs`. Unity used to import the backup as a regular asset (`.meta` generated, Project window pollution, easy to accidentally commit inside `Assets/` or `Packages/`). Backups now land under `<project>/Library/RoslynRepl/Backups/<yyyyMMdd_HHmmss_fff>_<name>.cs.bak` — `Library/` is the Unity-reserved derived-data folder that the asset importer skips and the stock `.gitignore` template excludes.
+- The atomic-write pipeline is unchanged in spirit (same `File.Replace` swap with a same-directory dot-prefixed temp), only the destination of the pre-write backup moved. `File.Replace`'s `destinationBackupFileName` parameter is now `null` because the `Library/` copy already serves the recovery role, so the writer never produces an in-source `.bak`. Apply confirm dialog and the status bar message updated to point at the new path; README + README_kr Patches sections updated to call out the trade-off (Unity may delete `Library/` on a reimport — copy a backup out if you need long-term recovery). Closes #44.
+
 ### Fixed (Generic parameter types in patch specs)
 - `MethodPatchSpec.ParameterTypes` now uses `;` as the per-parameter separator instead of `,`. Closed-generic CLR `Type.FullName` output embeds commas inside the assembly-qualified inner type list:
 
