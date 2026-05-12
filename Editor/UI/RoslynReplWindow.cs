@@ -818,7 +818,7 @@ return UnityEngine.Application.unityVersion;";
         // depending on the lower pane's mode. Pull UI: in Patches
         // mode the click means "I want to patch a method on this
         // type's class" — open the method picker instead of the usual
-        // Output inspect. Output mode keeps the legacy
+        // Output inspect. Output mode keeps the default
         // render-as-`return X;` behavior.
         private void OnBrowserInstanceChosen(InstanceEntry entry)
         {
