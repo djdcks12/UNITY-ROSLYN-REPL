@@ -85,7 +85,27 @@ namespace RoslynRepl.Editor.Patches
                          && !string.IsNullOrEmpty(s.TargetTypeName)
                          && !string.IsNullOrEmpty(s.MethodName))
                 .ToList();
-            PersistInternal(list);
+            if (list.Count == 0)
+            {
+                // PR-review followup on #52: deleting the last patch
+                // row went through Save(empty), which used to write
+                // `{"version":1,"items":[]}` to disk. The Patches UI
+                // looked empty (Changed fires, RebuildActiveList
+                // renders the placeholder), but HasAny() still
+                // returned true and Reset Project Data would skip
+                // "Nothing to clear" in favour of the stale-file
+                // cleanup branch — confusing UX for what's logically
+                // a clean slate. Centralising the empty-list case
+                // here means every Save path — Remove, Clear via the
+                // registry, AddOrUpdate of a filtered-out spec —
+                // ends up with no file on disk when there's no data
+                // to persist, without each caller having to remember.
+                UserSettingsStorage.Delete(FileName);
+            }
+            else
+            {
+                PersistInternal(list);
+            }
             Changed?.Invoke();
         }
 
