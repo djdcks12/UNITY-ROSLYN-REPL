@@ -200,18 +200,30 @@ namespace RoslynRepl.Editor.Patches
             // importer to skip it (same convention as `.DS_Store`,
             // `.git`, etc.) so we don't trigger a stray .meta during
             // the brief window the file exists.
+            // PR-review followup on #44: File.Replace fails with
+            // DirectoryNotFoundException when source/destination are
+            // Unity asset-relative ("Assets/Foo.cs", "Packages/...")
+            // and the backup path is absolute (Library/...). Resolve
+            // the source to an absolute filesystem path once and
+            // route every File API through that — File.Copy /
+            // File.WriteAllText / File.Replace all want the same
+            // absolute form. AssetDatabase.ImportAsset further down
+            // still takes the project-relative path (that's the
+            // form Unity's asset API actually accepts).
+            string sourceFsPath = Path.GetFullPath(found.SourcePath);
+
             string backupPath;
             try
             {
                 backupPath = AllocateBackupPath(found.SourcePath);
-                File.Copy(found.SourcePath, backupPath, overwrite: true);
+                File.Copy(sourceFsPath, backupPath, overwrite: true);
             }
             catch (Exception ex) { return Fail($"Could not write backup: {ex.Message}"); }
 
             string tempPath;
             {
-                string dir = Path.GetDirectoryName(found.SourcePath) ?? string.Empty;
-                string baseName = Path.GetFileName(found.SourcePath);
+                string dir = Path.GetDirectoryName(sourceFsPath) ?? string.Empty;
+                string baseName = Path.GetFileName(sourceFsPath);
                 tempPath = Path.Combine(dir,
                     "." + baseName + "." + Guid.NewGuid().ToString("N").Substring(0, 8) + ".tmp");
             }
@@ -228,27 +240,20 @@ namespace RoslynRepl.Editor.Patches
 
             try
             {
-                // PR-review followup on #44: File.Replace rejects a
-                // null destinationBackupFileName with
-                // ArgumentException ("The path is not of a legal
-                // form."), so the earlier shape failed on every
-                // Apply-to-file. Pass the Library/ backup path here
-                // instead. Replace then *overwrites* that file with
-                // the pre-swap source content; the step-1 Copy wrote
-                // identical bytes a moment earlier, so the
-                // overwrite is content-equivalent and the user's
-                // recovery copy stays valid the whole time.
-                //
-                // Same-volume invariant: Library/ lives under
-                // <project>/ alongside Assets/, so the backup path
-                // is always on the same volume as the source file,
-                // which is the File.Replace atomicity precondition.
-                // The step-1 Copy stays — if Replace itself trips
-                // on a sharing violation / antivirus hold, the
-                // user still has the pre-Replace copy on disk.
+                // File.Replace requires a non-null backup path, and
+                // (per the same review) needs absolute paths
+                // throughout when the backup lives outside the
+                // source's directory. Library/ lives under the
+                // project root alongside Assets/, so the same-volume
+                // atomicity invariant holds. The step-1 Copy wrote
+                // identical bytes to backupPath a moment earlier,
+                // so Replace's overwrite of that file with the
+                // pre-swap source content is content-equivalent and
+                // the user's recovery copy stays valid before /
+                // during / after the swap.
                 File.Replace(
                     sourceFileName: tempPath,
-                    destinationFileName: found.SourcePath,
+                    destinationFileName: sourceFsPath,
                     destinationBackupFileName: backupPath,
                     ignoreMetadataErrors: true);
             }
@@ -266,7 +271,9 @@ namespace RoslynRepl.Editor.Patches
 
             // Tell Unity to re-import the asset so the editor picks
             // up the change without a manual focus + alt-tab. Best-
-            // effort — failures are non-fatal.
+            // effort — failures are non-fatal. AssetDatabase wants
+            // the project-relative path, not the absolute one we
+            // used for the File APIs above.
             try { AssetDatabase.ImportAsset(found.SourcePath, ImportAssetOptions.ForceUpdate); }
             catch { /* best-effort */ }
 
