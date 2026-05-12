@@ -339,12 +339,26 @@ namespace RoslynRepl.Editor.Patches
         public static void NotifyInMemoryMutation() => Changed?.Invoke();
 
         public static bool Remove(string typeName, string methodName, string parameterTypes)
+            => Remove(typeName, methodName, parameterTypes, out _);
+
+        /// <summary>Remove the spec with the given key. Returns
+        /// <c>true</c> iff the spec was present in the in-memory
+        /// registry. <paramref name="persistedOk"/> reports whether
+        /// the on-disk file now matches the post-removal state —
+        /// <c>false</c> means the in-memory entry is gone but
+        /// <c>patches.json</c> couldn't be deleted (locked /
+        /// read-only) and a domain reload would resurrect the
+        /// draft. UI callers (the per-row Delete button) can
+        /// surface this as a partial-failure status. PR-review
+        /// followup on #52.</summary>
+        public static bool Remove(string typeName, string methodName, string parameterTypes, out bool persistedOk)
         {
+            persistedOk = true;
             var key = MethodPatchSpec.Keyed(typeName, methodName, parameterTypes);
             if (_byKey.Remove(key))
             {
                 _sessionDormantKeys.Remove(key);
-                Persist();
+                persistedOk = Persist();
                 Changed?.Invoke();
                 return true;
             }
@@ -352,9 +366,13 @@ namespace RoslynRepl.Editor.Patches
         }
 
         public static bool Remove(MethodPatchSpec spec)
+            => Remove(spec, out _);
+
+        public static bool Remove(MethodPatchSpec spec, out bool persistedOk)
         {
+            persistedOk = true;
             if (spec == null) return false;
-            return Remove(spec.TargetTypeName, spec.MethodName, spec.ParameterTypes);
+            return Remove(spec.TargetTypeName, spec.MethodName, spec.ParameterTypes, out persistedOk);
         }
 
         /// <summary>Wipe both the in-memory registry and the on-disk
@@ -418,9 +436,16 @@ namespace RoslynRepl.Editor.Patches
             Changed?.Invoke();
         }
 
-        private static void Persist()
+        // Returns the success flag from PatchPersistence.Save so
+        // callers that care about the soft "could not delete the
+        // (now-empty) file" branch can surface it. AddOrUpdate
+        // ignores the bool — its non-empty list path can't return
+        // false (only throw on a hard write failure). Remove uses
+        // the bool to populate its `out persistedOk` overload.
+        // PR-review followup on #52.
+        private static bool Persist()
         {
-            PatchPersistence.Save(_byKey.Values);
+            return PatchPersistence.Save(_byKey.Values);
         }
     }
 }

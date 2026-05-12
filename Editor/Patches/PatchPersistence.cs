@@ -78,35 +78,55 @@ namespace RoslynRepl.Editor.Patches
             return DecodeJson(json);
         }
 
-        public static void Save(IEnumerable<MethodPatchSpec> specs)
+        /// <summary>Persist the supplied spec list. Returns
+        /// <c>true</c> iff the on-disk state now reflects the
+        /// caller's intent — file written for the non-empty case,
+        /// file absent for the empty case. Throws on a hard write
+        /// failure (out-of-disk, permissions on the file write
+        /// itself); returns <c>false</c> only for the soft case
+        /// where the write succeeded as a no-op but the
+        /// follow-up <see cref="UserSettingsStorage.Delete"/>
+        /// (empty-list branch) couldn't drop the file — typically
+        /// a sharing violation from an external editor holding
+        /// the JSON open. Callers that just want fire-and-forget
+        /// behaviour can keep ignoring the return; UI surfaces
+        /// like the per-row Delete button check it to show
+        /// "in-memory gone but file survived — will reappear on
+        /// next reload" partial-failure status (PR-review
+        /// followup on #52).</summary>
+        public static bool Save(IEnumerable<MethodPatchSpec> specs)
         {
             var list = (specs ?? Enumerable.Empty<MethodPatchSpec>())
                 .Where(s => s != null
                          && !string.IsNullOrEmpty(s.TargetTypeName)
                          && !string.IsNullOrEmpty(s.MethodName))
                 .ToList();
+            bool persistedOk;
             if (list.Count == 0)
             {
                 // PR-review followup on #52: deleting the last patch
-                // row went through Save(empty), which used to write
-                // `{"version":1,"items":[]}` to disk. The Patches UI
-                // looked empty (Changed fires, RebuildActiveList
-                // renders the placeholder), but HasAny() still
-                // returned true and Reset Project Data would skip
-                // "Nothing to clear" in favour of the stale-file
-                // cleanup branch — confusing UX for what's logically
-                // a clean slate. Centralising the empty-list case
-                // here means every Save path — Remove, Clear via the
-                // registry, AddOrUpdate of a filtered-out spec —
-                // ends up with no file on disk when there's no data
-                // to persist, without each caller having to remember.
-                UserSettingsStorage.Delete(FileName);
+                // row used to write `{"version":1,"items":[]}` to
+                // disk — Patches UI looked empty but HasAny()
+                // returned true and Reset Project Data fell through
+                // to the stale-file cleanup branch.
+                //
+                // Now we delete the file and propagate the bool
+                // up so a stuck file (locked / read-only) surfaces
+                // to the caller instead of a silent partial
+                // failure. UserSettingsStorage.Delete also routes
+                // the underlying exception through Debug.LogWarning
+                // with the path, so the Console always carries the
+                // diagnostic regardless of how the caller handles
+                // the bool.
+                persistedOk = UserSettingsStorage.Delete(FileName);
             }
             else
             {
                 PersistInternal(list);
+                persistedOk = true;
             }
             Changed?.Invoke();
+            return persistedOk;
         }
 
         /// <summary>Delete the on-disk patch file. Returns the success

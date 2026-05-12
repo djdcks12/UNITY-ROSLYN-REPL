@@ -933,9 +933,28 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
                 }
             }
 
-            if (PatchRegistry.Remove(spec))
+            if (PatchRegistry.Remove(spec, out var persistedOk))
             {
-                SetStatus($"Deleted: {spec.TargetTypeName}.{spec.MethodName}", error: false);
+                if (persistedOk)
+                {
+                    SetStatus($"Deleted: {spec.TargetTypeName}.{spec.MethodName}", error: false);
+                }
+                else
+                {
+                    // PR-review followup on #52: in-memory removal
+                    // succeeded but PatchPersistence.Save couldn't
+                    // delete patches.json (locked / read-only / etc.).
+                    // The Patches list shows the row gone, but a
+                    // domain reload would re-read the file and
+                    // resurrect the spec. Surface this as an error
+                    // so the user knows to act before reload.
+                    // UserSettingsStorage.Delete already logged the
+                    // exact path + exception to the Console.
+                    SetStatus(
+                        $"Removed in memory but patches.json could not be deleted — this draft will reappear after a domain reload. " +
+                        $"See the Console for the file path; close any external editor holding it open and re-run, or use Reset Project Data.",
+                        error: true);
+                }
             }
             else
             {
