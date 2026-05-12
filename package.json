@@ -1,6 +1,6 @@
 {
   "name": "com.youngchan.roslyn-repl",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "displayName": "Unity Roslyn REPL",
   "description": "Editor-only C# REPL for Unity, powered by Roslyn. Compile and execute arbitrary C# at runtime, inspect any MonoBehaviour / ScriptableObject / singleton in memory, watch expressions live, save named snippets, and review run history - all from a UI Toolkit window inside the Editor. Zero project dependencies.",
   "unity": "2022.3",

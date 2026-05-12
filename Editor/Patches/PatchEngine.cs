@@ -267,6 +267,20 @@ namespace RoslynRepl.Editor.Patches
                     "Runtime patch does not support constructors yet.");
             }
 
+            // Issue #42: open generic declaring types (`Foo<>`) cannot
+            // be instantiated as a Harmony detour target — there is no
+            // single MethodInfo to install for. Reject up front with a
+            // friendly hint instead of letting the wrapper renderer
+            // surface a `NotSupportedException` later.
+            if (type.IsGenericTypeDefinition)
+            {
+                var hint = type.Name.Contains("`")
+                    ? type.Name.Substring(0, type.Name.IndexOf('`')) + "<...>"
+                    : type.Name;
+                throw new InvalidOperationException(
+                    $"Runtime patch does not support open generic declaring types yet; specify a closed type, e.g. {hint}.");
+            }
+
             var paramTypes = ResolveParamTypes(spec.ParameterTypes);
 
             // Look up across instance + static so a static-method
@@ -335,10 +349,18 @@ namespace RoslynRepl.Editor.Patches
             return method;
         }
 
-        private static Type[] ResolveParamTypes(string commaJoined)
+        // Issue #41: parameter type names are split by
+        // MethodPatchSpec.SplitParamTypes, which uses a delimiter
+        // that cannot collide with closed-generic FullName output
+        // (semicolon — illegal in CLR full type names) and falls
+        // back to the legacy comma form only for non-generic data.
+        // The historic Split(',') here silently shredded
+        // List<int> / Dictionary<string,int> entries because their
+        // FullName carries embedded commas.
+        private static Type[] ResolveParamTypes(string parameterTypes)
         {
-            if (string.IsNullOrEmpty(commaJoined)) return Type.EmptyTypes;
-            var parts = commaJoined.Split(',').Select(s => s.Trim()).Where(s => s.Length > 0).ToArray();
+            var parts = MethodPatchSpec.SplitParamTypes(parameterTypes);
+            if (parts.Length == 0) return Type.EmptyTypes;
             var types = new Type[parts.Length];
             for (int i = 0; i < parts.Length; i++)
             {
@@ -692,11 +714,25 @@ namespace RoslynRepl.Editor.Patches
             // Harmony convention for instance method targets — typed as
             // the declaring type so the user's body can write
             // `__instance.PublicField` without casting.
-            var declType = target.DeclaringType.FullName.Replace('+', '.');
+            //
+            // Issue #42: declaring type + every parameter type goes
+            // through the shared CSharpTypeName.Render so closed
+            // generics, nested types, arrays, and nullables emit as
+            // valid C# source. The historic FullName.Replace('+','.')
+            // path produced CLR-internal arity markers + assembly-
+            // qualified inner type lists ('List`1[[System.Int32, …]]')
+            // that the wrapper compiler refused to parse. ResolveTargetMethod
+            // already rejected open generic declaring types ahead of
+            // this code path with a friendly message, so reaching the
+            // renderer with a constructable closed type is the contract
+            // here; if a user somehow slips an open generic past, the
+            // renderer's NotSupportedException surfaces as the apply
+            // failure instead of as a cryptic Roslyn parse error.
+            var declType = CSharpTypeName.Render(target.DeclaringType);
             sb.Append($"    public static bool Prefix({declType} __instance");
             foreach (var p in target.GetParameters())
             {
-                var pType = p.ParameterType.FullName?.Replace('+', '.') ?? p.ParameterType.Name;
+                var pType = CSharpTypeName.Render(p.ParameterType);
                 sb.Append($", {pType} {p.Name}");
             }
             sb.AppendLine(")");

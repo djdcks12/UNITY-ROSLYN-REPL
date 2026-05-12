@@ -34,7 +34,7 @@ Then add the package by name:
 ```json
 {
   "dependencies": {
-    "com.youngchan.roslyn-repl": "0.7.1"
+    "com.youngchan.roslyn-repl": "0.7.2"
   }
 }
 ```
@@ -50,7 +50,7 @@ https://openupm.com/packages/com.youngchan.roslyn-repl/
 Use the Git URL if you prefer not to add a scoped registry:
 
 ```json
-"com.youngchan.roslyn-repl": "https://github.com/djdcks12/UNITY-ROSLYN-REPL.git#v0.7.1"
+"com.youngchan.roslyn-repl": "https://github.com/djdcks12/UNITY-ROSLYN-REPL.git#v0.7.2"
 ```
 
 ### From Disk
@@ -155,13 +155,15 @@ The renderer handles:
 - strings and enums,
 - Unity objects,
 - plain C# objects,
-- fields and safe user-defined properties,
+- fields (instance + private + inherited),
 - arrays and lists,
 - dictionaries,
 - nested object graphs,
 - destroyed Unity objects.
 
 Each row shows name, type, and preview value, so large results stay readable.
+
+The tree walks fields only by default. Property getters can run user-defined code (lazy init, IO, logging, state mutation) and inspecting a value shouldn't change project state behind your back. If you want property values in the tree, turn on `Tools / Roslyn REPL / Output: Include Property Getters` and re-Run — Watch follows the same fields-only default and is not affected by the toggle.
 
 ### Object Browser
 
@@ -266,7 +268,7 @@ The patch body can look like normal source code. Private fields, private methods
 
 You can also click **Pull Original** to load the current source body of the target method, edit it in place, and run the edited version temporarily. Picking a method through **Browse** or by double-clicking an Object Browser row in Patches mode auto-pulls the source so the editor lands on a body you can immediately edit.
 
-Once a body is pulled and edited, the Patches view shows a live diff between the original source and the current edit. **Copy diff** copies a unified diff. **Apply to file** writes the current patch body back into the target method's `.cs` file and creates a `.bak` sibling before writing.
+Once a body is pulled and edited, the Patches view shows a live diff between the original source and the current edit. **Copy diff** copies a unified diff. **Apply to file** writes the current patch body back into the target method's `.cs` file. A timestamped backup is saved under `<project>/Library/RoslynRepl/Backups/` before the write so you can restore by hand if the edit needs to go back; that folder is Unity-ignored (no Project window noise, no accidental commits), and Unity may delete it on a Library reimport — copy a backup out if you need it long-term.
 
 Patches can be reverted individually or all at once. Active patches are remembered per project and re-applied after domain reload when possible. Disable automatic reapply from:
 
@@ -322,7 +324,9 @@ The following data is stored locally per Unity project:
 - watch expressions,
 - runtime method patch specs.
 
-Storage uses Unity `EditorPrefs` with a project discriminator based on the project path. Data is local to your machine and is not committed to source control.
+Storage location: `<project>/UserSettings/RoslynRepl/*.json` — patches, snippets, run history, and watch expressions live in plain JSON files inside your Unity project's `UserSettings/` folder. The package writes a `.gitignore` (containing `*`) into that folder on first save, so files never appear in `git status` even if your project's top-level `.gitignore` doesn't already cover `UserSettings/`. Custom usings and the smaller editor toggles still live in `EditorPrefs`.
+
+Treat the contents the same way you would treat a debug-time scratch buffer: patch bodies and run-history entries can carry whatever you typed in mid-debug — server URLs, auth tokens, account values. The auto-`.gitignore` is the safety net, but if your team mirrors `UserSettings/` to another tool (Plastic SCM workspace settings, a backup script, etc.), audit that path with the same lens you would use for an editor log.
 
 Clear REPL data for the current project from:
 

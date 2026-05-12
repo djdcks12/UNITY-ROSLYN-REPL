@@ -165,7 +165,7 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             _methodField.style.marginRight = 4;
             formRow.Add(_methodField);
 
-            _paramsField = new TextField("Params") { tooltip = "Comma-joined full type names. Empty = no parameters. Example: System.Int32,System.String" };
+            _paramsField = new TextField("Params") { tooltip = "Semicolon-joined full type names. Empty = no parameters.\nExample: System.Int32;System.String\n(Semicolon — not comma — because closed generic type names embed commas, e.g. List`1[[System.Int32, mscorlib, …]].)" };
             _paramsField.style.flexGrow = 1;
             _paramsField.style.marginRight = 4;
             formRow.Add(_paramsField);
@@ -585,7 +585,9 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             var ok = UnityEditor.EditorUtility.DisplayDialog(
                 "Apply patch to source file?",
                 $"Write the current patch body into\n\n  {declName}.{target.Name}\n\n" +
-                $"A backup will be saved to <source>.bak.\n\n" +
+                "A timestamped backup will be saved under Library/RoslynRepl/Backups/\n" +
+                "(Unity-ignored; not committed; cleared on a Library reimport — copy it out\n" +
+                "if you need long-term recovery).\n\n" +
                 "The body is the user-edited form — the auto-rewrite that routes\n" +
                 "inaccessible names through reflection helpers is wrapper-only.",
                 "Apply",
@@ -647,9 +649,13 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             if (declType != null) _targetField.SetValueWithoutNotify(declType.FullName ?? declType.Name);
             _methodField.SetValueWithoutNotify(method.Name);
             var ps = method.GetParameters();
+            // Issue #41: emit using MethodPatchSpec.JoinParamTypes so
+            // generic parameter types — whose FullName carries embedded
+            // commas — survive the round-trip to ParameterTypes / Apply
+            // / Pull / source export. Comma-joining shredded them.
             _paramsField.SetValueWithoutNotify(ps.Length == 0
                 ? string.Empty
-                : string.Join(",", ps.Select(p => p.ParameterType.FullName ?? p.ParameterType.Name)));
+                : MethodPatchSpec.JoinParamTypes(ps.Select(p => p.ParameterType.FullName ?? p.ParameterType.Name)));
 
             // Form just got rewritten to a different method — any
             // previous Pull's snapshot belongs to the *old* form
@@ -981,9 +987,14 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
                 row.Add(dot);
 
                 bool dormantAutoOff = displayState == PatchDisplayState.DormantAutoOff;
+                // Issue #41: ParameterTypes uses ';' as separator so a
+                // generic type's embedded commas can't collide with it.
+                // Render with ", " for human readability — the raw
+                // semicolon form is still in spec.ParameterTypes.
+                var paramsDisplay = string.Join(", ", MethodPatchSpec.SplitParamTypes(s.ParameterTypes));
                 var infoText = dormantAutoOff
-                    ? $"{s.TargetTypeName}.{s.MethodName}({s.ParameterTypes})  (auto-off)"
-                    : $"{s.TargetTypeName}.{s.MethodName}({s.ParameterTypes})";
+                    ? $"{s.TargetTypeName}.{s.MethodName}({paramsDisplay})  (auto-off)"
+                    : $"{s.TargetTypeName}.{s.MethodName}({paramsDisplay})";
                 var info = new Label(infoText);
                 info.style.flexGrow = 1;
                 info.style.color = new StyleColor(dormantAutoOff
