@@ -171,23 +171,32 @@ namespace RoslynRepl.Editor.Patches
             // skips entirely and the standard .gitignore template
             // excludes. Steps:
             //
-            //   1. File.Copy(source → Library/RoslynRepl/Backups/<ts>_<name>.bak)
+            //   1. File.Copy(sourceFsPath → Library/RoslynRepl/Backups/<ts>_<name>.bak)
             //         pre-create the backup so a Replace failure
             //         that leaves no destination-side backup still
             //         gives the user a known-good copy.
-            //   2. File.WriteAllText(source → tempPath)
+            //   2. File.WriteAllText(tempPath)
             //         write the new contents into a dot-prefixed
             //         sibling temp in the source's directory —
             //         same directory means same volume, which is
             //         what makes File.Replace atomic on the OS
             //         layer.
-            //   3. File.Replace(temp → source, null)
+            //   3. File.Replace(tempPath, sourceFsPath, backupPath, ignoreMetadataErrors: true)
             //         OS-atomic swap. The original .cs either
             //         fully becomes tempPath's content or stays
-            //         exactly as it was. We pass null for
-            //         destinationBackupFileName because the
-            //         step-1 Library/ copy already serves the
-            //         recovery role.
+            //         exactly as it was. The backup parameter
+            //         must be non-null (File.Replace throws
+            //         ArgumentException otherwise), and all three
+            //         path arguments must be absolute filesystem
+            //         paths — mixing Unity asset-relative source/
+            //         destination with the absolute Library/
+            //         backup throws DirectoryNotFoundException.
+            //         Reusing backupPath here is safe: Replace
+            //         *overwrites* that file with the pre-swap
+            //         source content, but step-1 wrote identical
+            //         bytes a moment earlier, so the overwrite
+            //         is content-equivalent and the user's
+            //         recovery copy stays valid throughout.
             //
             // Failure handling: if step 2 throws, the original is
             // untouched and we delete the partial temp. If step 3
