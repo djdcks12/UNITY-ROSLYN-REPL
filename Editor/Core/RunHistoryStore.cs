@@ -5,8 +5,8 @@ using UnityEngine;
 namespace RoslynRepl.Editor.Core
 {
     /// <summary>
-    /// Project-local history of recently-executed snippets. Issue #27:
-    /// payload lives in <c>&lt;project&gt;/UserSettings/RoslynRepl/runHistory.json</c>.
+    /// Project-local history of recently-executed snippets. Payload
+    /// lives in <c>&lt;project&gt;/UserSettings/RoslynRepl/runHistory.json</c>.
     /// Entries are stored most-recent-first; on every <see cref="Push"/>
     /// the new entry is inserted at index 0, identical preceding entries
     /// are de-duplicated, and the tail past <see cref="Capacity"/> is dropped.

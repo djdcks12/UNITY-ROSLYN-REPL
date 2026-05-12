@@ -5,10 +5,10 @@ using UnityEngine;
 namespace RoslynRepl.Editor.Core
 {
     /// <summary>
-    /// Project-local file-backed list of watch expressions. Issue #27:
-    /// payload lives in <c>&lt;project&gt;/UserSettings/RoslynRepl/watches.json</c>,
-    /// scoped to the project folder (deletes with it) and out of the
-    /// project-agnostic EditorPrefs blob.
+    /// Project-local file-backed list of watch expressions. Payload
+    /// lives in <c>&lt;project&gt;/UserSettings/RoslynRepl/watches.json</c>,
+    /// scoped to the project folder so deleting the project reclaims
+    /// the data in one go.
     /// </summary>
     public static class WatchStore
     {

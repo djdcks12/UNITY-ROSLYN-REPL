@@ -7,11 +7,11 @@ using RoslynRepl.Editor.Core;
 namespace RoslynRepl.Editor.Patches
 {
     /// <summary>
-    /// File-backed persistence for the runtime method patch list. Issue
-    /// #27 (v0.7.2): payload lives in
+    /// File-backed persistence for the runtime method patch list.
+    /// Payload lives in
     /// <c>&lt;project&gt;/UserSettings/RoslynRepl/patches.json</c> so
-    /// it stays tied to the project folder (no registry leftovers, no
-    /// per-user EditorPrefs bloat for large patch bodies).
+    /// it stays tied to the project folder — deleting the project
+    /// reclaims every patch body in one go.
     ///
     /// File format (current schema, <c>version = 1</c>):
     /// <code>

@@ -8,19 +8,19 @@ namespace RoslynRepl.Editor.Core
     /// <summary>
     /// Project-local JSON file storage for the larger user-authored
     /// payloads the package keeps between sessions — patch bodies,
-    /// snippet library, run history, watch expressions.
+    /// snippet library, run history, watch expressions. The canonical
+    /// Unity location for per-user, per-project data is the project's
+    /// <c>UserSettings/</c> folder (Unity's own layout files /
+    /// EditorBuildSettings overrides live there), so files end up at
+    /// <c>UserSettings/RoslynRepl/&lt;store&gt;.json</c>. Deleting
+    /// the project folder reclaims everything in one go.
     ///
-    /// Issue #27 (v0.7.2): those payloads used to live in
-    /// <see cref="UnityEditor.EditorPrefs"/>, which on Windows is
-    /// backed by the registry and remains after the project folder
-    /// is deleted unless the user explicitly hits Clear. Large
-    /// patches / snippets also bloat the EditorPrefs blob, and the
-    /// cleanup never tied naturally to the project lifecycle. The
-    /// canonical Unity location for per-user, per-project data is
-    /// the project's <c>UserSettings/</c> folder (Unity's own layout
-    /// files / EditorBuildSettings overrides live there). Deleting
-    /// the project folder reclaims everything; gitignoring
-    /// <c>UserSettings/</c> keeps the data out of source control.
+    /// On first write the helper also drops a sibling
+    /// <c>.gitignore</c> with a single <c>*</c> rule so the JSON
+    /// files (and the .gitignore itself) never appear in
+    /// <c>git status</c> — defense-in-depth in case the consumer
+    /// project's top-level ignore set doesn't already cover
+    /// <c>UserSettings/</c>.
     ///
     /// The atomic-write pipeline mirrors <c>PatchSourceWriter</c> —
     /// write the new content to a dot-prefixed temp file in the same
@@ -51,8 +51,8 @@ namespace RoslynRepl.Editor.Core
 
         /// <summary>Try to read the full content of <paramref name="fileName"/>.
         /// Returns <c>false</c> when the file does not exist or cannot be
-        /// read — both are non-fatal: callers fall back to legacy
-        /// EditorPrefs (migration path) or treat it as "empty store".</summary>
+        /// read — both are non-fatal: callers treat that as "empty
+        /// store" and return an empty list to the UI.</summary>
         public static bool TryReadAllText(string fileName, out string content)
         {
             content = null;
@@ -173,9 +173,12 @@ namespace RoslynRepl.Editor.Core
             }
         }
 
-        /// <summary>True iff the file currently exists. Used by stores
-        /// to decide between "read from file" and "fall back to
-        /// legacy EditorPrefs migration".</summary>
+        /// <summary>True iff the file currently exists. Reset Project
+        /// Data uses this (via each store's <c>HasAny()</c>) to keep
+        /// a corrupt / unreadable file inside the wipe scope — a
+        /// `Load().Count == 0` check alone would short-circuit Reset
+        /// in exactly the case where the user most needs the file
+        /// gone.</summary>
         public static bool Exists(string fileName)
         {
             try { return File.Exists(ResolvePath(fileName)); }

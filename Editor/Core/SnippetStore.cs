@@ -19,8 +19,8 @@ namespace RoslynRepl.Editor.Core
     }
 
     /// <summary>
-    /// Project-local library of named snippets. Issue #27: payload lives
-    /// in <c>&lt;project&gt;/UserSettings/RoslynRepl/snippets.json</c>.
+    /// Project-local library of named snippets. Payload lives in
+    /// <c>&lt;project&gt;/UserSettings/RoslynRepl/snippets.json</c>.
     /// </summary>
     public static class SnippetStore
     {
