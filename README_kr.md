@@ -155,13 +155,15 @@ Debug.Log("No return value needed");
 - 문자열과 enum,
 - Unity 오브젝트,
 - 일반 C# 객체,
-- 필드와 안전한 사용자 정의 property,
+- 필드 (instance + private + inherited),
 - 배열과 리스트,
 - 딕셔너리,
 - 중첩된 객체 그래프,
 - 파괴된 Unity 오브젝트.
 
 각 행은 이름, 타입, 미리보기 값을 함께 보여주므로 큰 결과도 읽기 쉽습니다.
+
+기본적으로 트리는 필드만 순회합니다. property getter는 lazy init, IO, 로그 출력, 상태 변경 같은 사용자 코드를 실행할 수 있고, 값을 들여다보는 행위가 프로젝트 상태를 몰래 바꾸는 일은 막아야 하기 때문입니다. property 값까지 트리에 표시하고 싶다면 `Tools / Roslyn REPL / Output: Include Property Getters`를 켜고 다시 Run 하세요 — Watch는 항상 필드만 보고 이 토글의 영향을 받지 않습니다.
 
 ### Object Browser
 

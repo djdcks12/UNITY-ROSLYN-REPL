@@ -155,13 +155,15 @@ The renderer handles:
 - strings and enums,
 - Unity objects,
 - plain C# objects,
-- fields and safe user-defined properties,
+- fields (instance + private + inherited),
 - arrays and lists,
 - dictionaries,
 - nested object graphs,
 - destroyed Unity objects.
 
 Each row shows name, type, and preview value, so large results stay readable.
+
+The tree walks fields only by default. Property getters can run user-defined code (lazy init, IO, logging, state mutation) and inspecting a value shouldn't change project state behind your back. If you want property values in the tree, turn on `Tools / Roslyn REPL / Output: Include Property Getters` and re-Run — Watch follows the same fields-only default and is not affected by the toggle.
 
 ### Object Browser
 

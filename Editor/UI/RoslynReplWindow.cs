@@ -50,6 +50,38 @@ namespace RoslynRepl.Editor.UI
             return true;
         }
 
+        // Issue #28: opt-in switch for property getter traversal
+        // in the Output result tree. Defaults to off (fields-only)
+        // because property getters routinely run lazy init, IO,
+        // logging, or state mutation — and Output is supposed to be
+        // a passive "inspect this value" pass that doesn't change
+        // project state behind the user's back. Watch already opted
+        // out for the same reason; this brings the Output side of
+        // the panel to the same baseline.
+        private const string IncludeOutputPropertiesMenuPath =
+            "Tools/Roslyn REPL/Output: Include Property Getters";
+
+        [MenuItem(IncludeOutputPropertiesMenuPath, priority = 218)]
+        private static void ToggleIncludeOutputProperties()
+            => OutputSettings.IncludeProperties = !OutputSettings.IncludeProperties;
+
+        [MenuItem(IncludeOutputPropertiesMenuPath, validate = true)]
+        private static bool ToggleIncludeOutputPropertiesValidate()
+        {
+            Menu.SetChecked(IncludeOutputPropertiesMenuPath, OutputSettings.IncludeProperties);
+            return true;
+        }
+
+        // Build the Options instance handed to SimpleObjectSerializer.ToTree
+        // at the Output call sites. Centralised so any future Output-tree
+        // setting (depth cap override, collection-head bump) lands here
+        // automatically instead of having to remember every call site.
+        private static SimpleObjectSerializer.Options BuildOutputTreeOptions()
+            => new SimpleObjectSerializer.Options
+            {
+                IncludeProperties = OutputSettings.IncludeProperties,
+            };
+
         // Issue #20: ack flag for the cooperative-cancel safety dialog.
         // Stored in machine-wide EditorPrefs (not project-scoped) — the
         // user only needs to learn the threading model once per
@@ -764,7 +796,7 @@ return UnityEngine.Application.unityVersion;";
             }
 
             ReplEngine.SetLastResult(value);
-            AppendResult(SimpleObjectSerializer.ToTree(value));
+            AppendResult(SimpleObjectSerializer.ToTree(value, BuildOutputTreeOptions()));
             if (_durationLabel != null) _durationLabel.text = string.Empty;
             if (_outputSummary != null) _outputSummary.text = "Browsed";
             _watch?.Refresh();
@@ -815,7 +847,7 @@ return UnityEngine.Application.unityVersion;";
                     // a small acceptable false-negative; users wanting to surface
                     // a null indicator can `return "null"` (a non-null string).
                     if (result.HasReturnValue)
-                        AppendResult(SimpleObjectSerializer.ToTree(result.Value));
+                        AppendResult(SimpleObjectSerializer.ToTree(result.Value, BuildOutputTreeOptions()));
                     break;
 
                 case ReplResultKind.CompileError:
