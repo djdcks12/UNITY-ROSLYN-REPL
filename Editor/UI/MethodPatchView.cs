@@ -585,7 +585,9 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             var ok = UnityEditor.EditorUtility.DisplayDialog(
                 "Apply patch to source file?",
                 $"Write the current patch body into\n\n  {declName}.{target.Name}\n\n" +
-                $"A backup will be saved to <source>.bak.\n\n" +
+                "A timestamped backup will be saved under Library/RoslynRepl/Backups/\n" +
+                "(Unity-ignored; not committed; cleared on a Library reimport — copy it out\n" +
+                "if you need long-term recovery).\n\n" +
                 "The body is the user-edited form — the auto-rewrite that routes\n" +
                 "inaccessible names through reflection helpers is wrapper-only.",
                 "Apply",
