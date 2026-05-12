@@ -933,7 +933,31 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
                 }
             }
 
-            if (PatchRegistry.Remove(spec, out var persistedOk))
+            // PR-review followup on #52: PatchRegistry.Remove now
+            // calls Save *before* mutating _byKey, so a hard write
+            // failure (permissions / disk / atomic-replace
+            // contention) bubbles out as an exception with the
+            // registry still consistent with the on-disk file.
+            // Catch it here so the UI surfaces a "delete failed,
+            // nothing changed" status instead of an unhandled
+            // exception in the Console.
+            bool removed;
+            bool persistedOk;
+            try
+            {
+                removed = PatchRegistry.Remove(spec, out persistedOk);
+            }
+            catch (Exception ex)
+            {
+                SetStatus(
+                    $"Delete failed — patches.json could not be written. The patch list is unchanged. See the Console for details.",
+                    error: true);
+                UnityEngine.Debug.LogWarning(
+                    $"[Roslyn REPL] PatchRegistry.Remove threw while persisting: {ex.GetType().Name}: {ex.Message}");
+                return;
+            }
+
+            if (removed)
             {
                 if (persistedOk)
                 {
@@ -941,13 +965,12 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
                 }
                 else
                 {
-                    // PR-review followup on #52: in-memory removal
-                    // succeeded but PatchPersistence.Save couldn't
-                    // delete patches.json (locked / read-only / etc.).
-                    // The Patches list shows the row gone, but a
-                    // domain reload would re-read the file and
-                    // resurrect the spec. Surface this as an error
-                    // so the user knows to act before reload.
+                    // Soft failure: in-memory removal committed but
+                    // UserSettingsStorage.Delete couldn't drop the
+                    // (now-empty) patches.json — typically a sharing
+                    // violation from an external editor. Patches UI
+                    // shows the row gone, but a domain reload would
+                    // re-read the file and resurrect the spec.
                     // UserSettingsStorage.Delete already logged the
                     // exact path + exception to the Console.
                     SetStatus(

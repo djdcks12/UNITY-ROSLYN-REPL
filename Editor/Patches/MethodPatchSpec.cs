@@ -355,14 +355,36 @@ namespace RoslynRepl.Editor.Patches
         {
             persistedOk = true;
             var key = MethodPatchSpec.Keyed(typeName, methodName, parameterTypes);
-            if (_byKey.Remove(key))
-            {
-                _sessionDormantKeys.Remove(key);
-                persistedOk = Persist();
-                Changed?.Invoke();
-                return true;
-            }
-            return false;
+            if (!_byKey.ContainsKey(key)) return false;
+
+            // PR-review followup on #52: build the post-removal
+            // snapshot first, then call Save. If Save throws on a
+            // hard write failure (permissions, disk full,
+            // atomic-replace contention) the exception bubbles out
+            // before we mutate _byKey, so the registry stays
+            // consistent with the on-disk file. The earlier shape
+            // (Remove → Persist) mutated first and only then
+            // wrote the file; on a multi-row delete + write
+            // failure the registry was missing a key the file
+            // still had, and a domain reload would resurrect the
+            // supposedly-deleted spec.
+            var snapshot = _byKey.Values
+                .Where(s => !string.Equals(s.Key, key, System.StringComparison.Ordinal))
+                .ToList();
+            persistedOk = PatchPersistence.Save(snapshot);
+
+            // Save returned cleanly (either OK or with persistedOk
+            // = false for the soft last-row Delete-failed case
+            // where the empty-list write succeeded as a no-op but
+            // UserSettingsStorage.Delete couldn't drop the file).
+            // Commit the in-memory removal — the user's intent was
+            // "this row goes away now", and the persistedOk = false
+            // signal carries the "file still on disk, will
+            // resurrect on reload — act now" warning up to the UI.
+            _byKey.Remove(key);
+            _sessionDormantKeys.Remove(key);
+            Changed?.Invoke();
+            return true;
         }
 
         public static bool Remove(MethodPatchSpec spec)
