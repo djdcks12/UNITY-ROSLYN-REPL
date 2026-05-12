@@ -48,10 +48,16 @@ namespace RoslynRepl.Editor.Patches
     /// The substitution itself runs as an OS-atomic two-step (write
     /// the new content to a dot-prefixed temp in the source's
     /// directory → <see cref="System.IO.File.Replace(string,string,string,bool)"/>
-    /// with no in-place backup name). A failure during write leaves
-    /// the original untouched and the <c>Library/</c> backup intact;
-    /// callers can re-run after fixing whatever blocked the write,
-    /// or restore by hand from the <c>Library/</c> copy.
+    /// with the <c>Library/</c> path passed as the backup name).
+    /// <c>File.Replace</c> requires a non-null backup path, so the
+    /// final-position copy lives at the same <c>Library/</c> location
+    /// the step-1 <c>Copy</c> already wrote — Replace overwrites the
+    /// step-1 backup with the pre-swap source, which is the same
+    /// bytes again so the user's recovery copy stays valid the whole
+    /// time. A failure during write leaves the original untouched
+    /// and the <c>Library/</c> backup intact; callers can re-run
+    /// after fixing whatever blocked the write, or restore by hand
+    /// from the <c>Library/</c> copy.
     /// </summary>
     public static class PatchSourceWriter
     {
@@ -222,10 +228,28 @@ namespace RoslynRepl.Editor.Patches
 
             try
             {
+                // PR-review followup on #44: File.Replace rejects a
+                // null destinationBackupFileName with
+                // ArgumentException ("The path is not of a legal
+                // form."), so the earlier shape failed on every
+                // Apply-to-file. Pass the Library/ backup path here
+                // instead. Replace then *overwrites* that file with
+                // the pre-swap source content; the step-1 Copy wrote
+                // identical bytes a moment earlier, so the
+                // overwrite is content-equivalent and the user's
+                // recovery copy stays valid the whole time.
+                //
+                // Same-volume invariant: Library/ lives under
+                // <project>/ alongside Assets/, so the backup path
+                // is always on the same volume as the source file,
+                // which is the File.Replace atomicity precondition.
+                // The step-1 Copy stays — if Replace itself trips
+                // on a sharing violation / antivirus hold, the
+                // user still has the pre-Replace copy on disk.
                 File.Replace(
                     sourceFileName: tempPath,
                     destinationFileName: found.SourcePath,
-                    destinationBackupFileName: null,
+                    destinationBackupFileName: backupPath,
                     ignoreMetadataErrors: true);
             }
             catch (Exception ex)
