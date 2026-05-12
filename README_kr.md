@@ -34,7 +34,7 @@ Scope:  com.youngchan
 ```json
 {
   "dependencies": {
-    "com.youngchan.roslyn-repl": "0.7.2"
+    "com.youngchan.roslyn-repl": "0.7.3"
   }
 }
 ```
@@ -50,7 +50,7 @@ https://openupm.com/packages/com.youngchan.roslyn-repl/
 scoped registry가 부담스럽다면 Git URL로 바로 가져올 수도 있습니다.
 
 ```json
-"com.youngchan.roslyn-repl": "https://github.com/djdcks12/UNITY-ROSLYN-REPL.git#v0.7.2"
+"com.youngchan.roslyn-repl": "https://github.com/djdcks12/UNITY-ROSLYN-REPL.git#v0.7.3"
 ```
 
 ### 로컬 디스크에서 설치
