@@ -38,16 +38,26 @@ namespace RoslynRepl.Editor.Patches
     /// source file changed after Pull and the user's diff is no
     /// longer a clean overlay.
     ///
-    /// Safety: the writer creates a `.bak` sibling of the target
-    /// file before writing, then performs the substitution as an
-    /// OS-atomic three-step (write to dot-prefixed temp file in the
-    /// same directory → <see cref="System.IO.File.Replace(string,string,string,bool)"/>
-    /// to swap temp → original while saving the previous original
-    /// into the backup). A failure during write leaves the original
-    /// untouched and the pre-write backup in place; callers can
-    /// re-run after fixing whatever blocked the write. Same-volume
-    /// constraint is satisfied by construction because the temp
-    /// always lives in the source's directory.
+    /// Safety: the writer pre-copies the target file to
+    /// <c>Library/RoslynRepl/Backups/&lt;timestamp&gt;_&lt;name&gt;.cs.bak</c>
+    /// (issue #44 — <c>Library/</c> is the Unity-reserved derived-data
+    /// folder that the asset importer skips and the standard Unity
+    /// gitignore template excludes; the old shape dropped a sibling
+    /// <c>Foo.cs.bak</c> inside <c>Assets/</c> or <c>Packages/</c>,
+    /// which Unity then imported and surfaced in the Project window).
+    /// The substitution itself runs as an OS-atomic two-step (write
+    /// the new content to a dot-prefixed temp in the source's
+    /// directory → <see cref="System.IO.File.Replace(string,string,string,bool)"/>
+    /// with the <c>Library/</c> path passed as the backup name).
+    /// <c>File.Replace</c> requires a non-null backup path, so the
+    /// final-position copy lives at the same <c>Library/</c> location
+    /// the step-1 <c>Copy</c> already wrote — Replace overwrites the
+    /// step-1 backup with the pre-swap source, which is the same
+    /// bytes again so the user's recovery copy stays valid the whole
+    /// time. A failure during write leaves the original untouched
+    /// and the <c>Library/</c> backup intact; callers can re-run
+    /// after fixing whatever blocked the write, or restore by hand
+    /// from the <c>Library/</c> copy.
     /// </summary>
     public static class PatchSourceWriter
     {
@@ -150,35 +160,48 @@ namespace RoslynRepl.Editor.Patches
             var normalized = NormalizeBlockBody(newBody);
             var newSource = source.Substring(0, openEnd) + normalized + closeIndent + source.Substring(closeStart);
 
-            // Atomic write (issue #21). The previous shape was
-            //   File.Copy(...bak)              ← backup
-            //   File.WriteAllText(...source)   ← direct overwrite
-            // which left a window where a half-written .cs could land
-            // on disk if WriteAllText failed mid-write (out-of-disk,
-            // permissions flip, host crash). New shape:
+            // Atomic write (issue #21) + Library-scoped backup
+            // (issue #44). The previous shape dropped the .bak
+            // sibling next to the source — fine on Replace's atomic
+            // guarantees, but Unity imports the .bak as a stray
+            // asset (.meta generated, Project window pollution,
+            // accidental commit risk inside Assets/ or Packages/).
+            // New shape moves the backup under
+            // <project>/Library/RoslynRepl/Backups/, which Unity
+            // skips entirely and the standard .gitignore template
+            // excludes. Steps:
             //
-            //   1. File.Copy(source → .bak)
-            //         pre-create the backup so a Replace failure that
-            //         leaves no destination-side backup still gives
-            //         the user a known-good copy.
-            //   2. File.WriteAllText(source → tempPath)
-            //         write the new contents into a sibling temp file
-            //         in the *same* directory — same directory means
-            //         same volume, which is what makes File.Replace
-            //         atomic on the OS layer.
-            //   3. File.Replace(temp → source, backup ← prev source)
-            //         OS-atomic swap. The original .cs either fully
-            //         becomes tempPath's content or stays exactly as
-            //         it was. The Replace also overwrites the .bak
-            //         we made in step 1 with the previous source-
-            //         file contents, which is identical content
-            //         (we just copied it), so the user's recovery
-            //         path is unchanged.
+            //   1. File.Copy(sourceFsPath → Library/RoslynRepl/Backups/<ts>_<name>.bak)
+            //         pre-create the backup so a Replace failure
+            //         that leaves no destination-side backup still
+            //         gives the user a known-good copy.
+            //   2. File.WriteAllText(tempPath)
+            //         write the new contents into a dot-prefixed
+            //         sibling temp in the source's directory —
+            //         same directory means same volume, which is
+            //         what makes File.Replace atomic on the OS
+            //         layer.
+            //   3. File.Replace(tempPath, sourceFsPath, backupPath, ignoreMetadataErrors: true)
+            //         OS-atomic swap. The original .cs either
+            //         fully becomes tempPath's content or stays
+            //         exactly as it was. The backup parameter
+            //         must be non-null (File.Replace throws
+            //         ArgumentException otherwise), and all three
+            //         path arguments must be absolute filesystem
+            //         paths — mixing Unity asset-relative source/
+            //         destination with the absolute Library/
+            //         backup throws DirectoryNotFoundException.
+            //         Reusing backupPath here is safe: Replace
+            //         *overwrites* that file with the pre-swap
+            //         source content, but step-1 wrote identical
+            //         bytes a moment earlier, so the overwrite
+            //         is content-equivalent and the user's
+            //         recovery copy stays valid throughout.
             //
             // Failure handling: if step 2 throws, the original is
             // untouched and we delete the partial temp. If step 3
             // throws, File.Replace's contract preserves the
-            // destination, the pre-step-1 backup we made is still
+            // destination, the step-1 Library/ backup is still
             // valid, and we delete the temp.
             //
             // Temp file naming: dot-prefix + random suffix in the
@@ -186,17 +209,30 @@ namespace RoslynRepl.Editor.Patches
             // importer to skip it (same convention as `.DS_Store`,
             // `.git`, etc.) so we don't trigger a stray .meta during
             // the brief window the file exists.
-            string backupPath = found.SourcePath + ".bak";
+            // PR-review followup on #44: File.Replace fails with
+            // DirectoryNotFoundException when source/destination are
+            // Unity asset-relative ("Assets/Foo.cs", "Packages/...")
+            // and the backup path is absolute (Library/...). Resolve
+            // the source to an absolute filesystem path once and
+            // route every File API through that — File.Copy /
+            // File.WriteAllText / File.Replace all want the same
+            // absolute form. AssetDatabase.ImportAsset further down
+            // still takes the project-relative path (that's the
+            // form Unity's asset API actually accepts).
+            string sourceFsPath = Path.GetFullPath(found.SourcePath);
+
+            string backupPath;
             try
             {
-                File.Copy(found.SourcePath, backupPath, overwrite: true);
+                backupPath = AllocateBackupPath(found.SourcePath);
+                File.Copy(sourceFsPath, backupPath, overwrite: true);
             }
             catch (Exception ex) { return Fail($"Could not write backup: {ex.Message}"); }
 
             string tempPath;
             {
-                string dir = Path.GetDirectoryName(found.SourcePath) ?? string.Empty;
-                string baseName = Path.GetFileName(found.SourcePath);
+                string dir = Path.GetDirectoryName(sourceFsPath) ?? string.Empty;
+                string baseName = Path.GetFileName(sourceFsPath);
                 tempPath = Path.Combine(dir,
                     "." + baseName + "." + Guid.NewGuid().ToString("N").Substring(0, 8) + ".tmp");
             }
@@ -213,9 +249,20 @@ namespace RoslynRepl.Editor.Patches
 
             try
             {
+                // File.Replace requires a non-null backup path, and
+                // (per the same review) needs absolute paths
+                // throughout when the backup lives outside the
+                // source's directory. Library/ lives under the
+                // project root alongside Assets/, so the same-volume
+                // atomicity invariant holds. The step-1 Copy wrote
+                // identical bytes to backupPath a moment earlier,
+                // so Replace's overwrite of that file with the
+                // pre-swap source content is content-equivalent and
+                // the user's recovery copy stays valid before /
+                // during / after the swap.
                 File.Replace(
                     sourceFileName: tempPath,
-                    destinationFileName: found.SourcePath,
+                    destinationFileName: sourceFsPath,
                     destinationBackupFileName: backupPath,
                     ignoreMetadataErrors: true);
             }
@@ -233,7 +280,9 @@ namespace RoslynRepl.Editor.Patches
 
             // Tell Unity to re-import the asset so the editor picks
             // up the change without a manual focus + alt-tab. Best-
-            // effort — failures are non-fatal.
+            // effort — failures are non-fatal. AssetDatabase wants
+            // the project-relative path, not the absolute one we
+            // used for the File APIs above.
             try { AssetDatabase.ImportAsset(found.SourcePath, ImportAssetOptions.ForceUpdate); }
             catch { /* best-effort */ }
 
@@ -248,6 +297,43 @@ namespace RoslynRepl.Editor.Patches
         // ─── internals ─────────────────────────────────────────────
 
         private static WriteResult Fail(string msg) => new WriteResult { Success = false, Error = msg };
+
+        // Project-relative root for Apply-to-file backups. Library/
+        // is Unity's reserved derived-data folder — the asset importer
+        // skips it entirely, the stock .gitignore template excludes it,
+        // and on a clean reimport Unity is free to delete arbitrary
+        // contents under it (so callers should treat the backup as
+        // "good until the next Library wipe"). Same volume as
+        // Application.dataPath, so File.Copy from inside Assets/ stays
+        // a cheap intra-disk operation.
+        private const string BackupSubDir = "Library/RoslynRepl/Backups";
+
+        // Allocate a unique backup destination for the given source.
+        // Path shape:
+        //   <project>/Library/RoslynRepl/Backups/<yyyyMMdd_HHmmss_fff>_<baseName>.bak
+        //
+        // The millisecond suffix in the timestamp + the source's own
+        // base name keep the name unique even when two Apply-to-file
+        // calls land on the same file in quick succession. If the
+        // (vanishingly unlikely) collision still happens we fall back
+        // to appending a short GUID — File.Copy(overwrite: true)
+        // would otherwise quietly clobber a fresh backup with whatever
+        // the second Apply was about to write.
+        private static string AllocateBackupPath(string sourcePath)
+        {
+            string projectRoot = Path.GetDirectoryName(UnityEngine.Application.dataPath) ?? string.Empty;
+            string dir = Path.Combine(projectRoot, BackupSubDir);
+            Directory.CreateDirectory(dir);
+
+            string baseName = Path.GetFileName(sourcePath);
+            string ts = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff");
+            string candidate = Path.Combine(dir, $"{ts}_{baseName}.bak");
+            if (!File.Exists(candidate)) return candidate;
+
+            // Collision in the same millisecond — extend with a guid.
+            return Path.Combine(dir,
+                $"{ts}_{Guid.NewGuid().ToString("N").Substring(0, 8)}_{baseName}.bak");
+        }
 
         // Best-effort cleanup of orphaned temp files. Leaving a
         // dot-prefixed temp around is cosmetic (Unity ignores it,
