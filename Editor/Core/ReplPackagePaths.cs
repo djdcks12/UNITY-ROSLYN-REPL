@@ -51,7 +51,7 @@ namespace RoslynRepl.Editor.Core
         // otherwise spam the console with the same nudge per Run.
         private static bool _warnedAboutFolderMismatch;
 
-        public static string PackageRoot => ResolvePackageRoot();
+        public static string PackageRoot => ResolvePaths().AssetPath;
 
         public static string AssetPath(string relativePath)
             => NormalizePath($"{PackageRoot}/{TrimLeadingSlashes(relativePath)}");
@@ -64,50 +64,119 @@ namespace RoslynRepl.Editor.Core
             if (string.IsNullOrEmpty(path) || path.StartsWith("<", StringComparison.Ordinal))
                 return false;
 
-            // Match against the *resolved* PackageRoot (which carries
-            // Unity's actual folder name) rather than the literal
-            // PackageName. Without this, a legacy embedded checkout
-            // would resolve assets from the legacy folder via
-            // ResolvePackageRoot but fail to classify its bundled
-            // Roslyn DLLs as BundledByUs — setup diagnostics would
-            // surface them as OtherPackage and the verifier's
-            // "duplicate copy?" branch would lie about what's loaded.
-            var root = PackageRoot;
-            if (string.IsNullOrEmpty(root)) return false;
-
+            // PR-review followup: the prior shape used independent
+            // Contains("/Editor/Plugins/Roslyn/") + Contains("/" + root)
+            // which loosened the match in two ways —
+            //   (1) the two markers could land in unrelated parts of
+            //       the path, so a Roslyn DLL inside a *different*
+            //       package whose folder happened to start with a
+            //       similar prefix (`com.roslyn-repl-old`) would
+            //       still match a root of `com.roslyn-repl`, and
+            //   (2) only the AssetDatabase form (`assetPath`) was
+            //       considered, so OpenUPM installs whose
+            //       Assembly.Location reports
+            //       `Library/PackageCache/<id>@<ver>/Editor/...`
+            //       (never routed through assetPath) silently fell
+            //       out of the BundledByUs classification.
+            //
+            // The match now runs against a *combined* segment,
+            // `<root>/Editor/Plugins/Roslyn/`, anchored either with
+            // a leading `/` (for the asset-style root inside an
+            // absolute Assembly.Location) or as the start of the
+            // path (for the absolute filesystem root that
+            // PackageInfo.resolvedPath reports). Both root forms
+            // are tried so the embedded-dev case, the
+            // Library/PackageCache OpenUPM case, and any folder
+            // Unity resolves the package to via package.json all
+            // light up consistently.
+            var loc = ResolvePaths();
             var normalized = NormalizePath(path);
-            return ContainsOrdinalIgnoreCase(normalized, "/Editor/Plugins/Roslyn/")
-                   && ContainsOrdinalIgnoreCase(normalized, "/" + root);
+            const string segment = "/Editor/Plugins/Roslyn/";
+
+            if (!string.IsNullOrEmpty(loc.AssetPath))
+            {
+                var marker = "/" + loc.AssetPath + segment;
+                if (ContainsOrdinalIgnoreCase(normalized, marker))
+                    return true;
+            }
+
+            if (!string.IsNullOrEmpty(loc.ResolvedPath))
+            {
+                var marker = loc.ResolvedPath + segment;
+                if (normalized.StartsWith(marker, StringComparison.OrdinalIgnoreCase))
+                    return true;
+                // Defensive: an Assembly.Location string that came
+                // through a different OS canonicaliser than
+                // PackageInfo.resolvedPath might land at a different
+                // drive-letter or symlink-resolved prefix. The
+                // anchored "/" + marker form catches the case where
+                // the input path embeds the resolved-path tail
+                // somewhere past the start.
+                var anchored = "/" + marker;
+                if (ContainsOrdinalIgnoreCase(normalized, anchored))
+                    return true;
+            }
+
+            return false;
         }
 
-        private static string ResolvePackageRoot()
+        private struct PackageLocation
+        {
+            public string AssetPath;     // Packages/com.youngchan.roslyn-repl (AssetDatabase form)
+            public string ResolvedPath;  // /abs/proj/Packages/...   or  /abs/proj/Library/PackageCache/...@ver
+        }
+
+        // Single PackageInfo lookup that hands back both the
+        // AssetDatabase-form path (used by AssetPath / AssetDatabase
+        // APIs) and the absolute filesystem path Unity resolved the
+        // package to (used by IsBundledRoslynAssemblyPath to
+        // recognise the Library/PackageCache layout that OpenUPM
+        // installs land in). Both are needed because
+        // Assembly.Location is filesystem-only — it never reports
+        // the virtual `Packages/<id>/` mount point — while
+        // AssetDatabase.LoadAssetAtPath only accepts the
+        // AssetDatabase form.
+        private static PackageLocation ResolvePaths()
         {
             try
             {
                 var info = PackageInfo.FindForAssembly(Assembly.GetExecutingAssembly());
-                if (!string.IsNullOrEmpty(info?.assetPath))
+                if (info != null)
                 {
-                    var resolved = NormalizePath(info.assetPath);
-                    WarnIfFolderMismatch(resolved);
-                    return resolved;
+                    string asset = !string.IsNullOrEmpty(info.assetPath)
+                        ? NormalizePath(info.assetPath) : null;
+                    string resolved = !string.IsNullOrEmpty(info.resolvedPath)
+                        ? NormalizePath(info.resolvedPath) : null;
+                    if (asset != null) WarnIfFolderMismatch(asset);
+                    if (asset != null || resolved != null)
+                    {
+                        return new PackageLocation
+                        {
+                            AssetPath    = asset    ?? $"Packages/{PackageName}",
+                            ResolvedPath = resolved,
+                        };
+                    }
                 }
             }
             catch
             {
                 // Fall through to filesystem probe. PackageInfo can be
                 // unavailable while Unity is recovering from a domain
-                // reload — the fallback below just looks for the
-                // package.json directly.
+                // reload.
             }
 
             // Filesystem probe under the canonical folder name only.
             // Legacy `com.roslyn-repl/` checkouts go through the
             // PackageInfo branch above (Unity resolves them by
-            // package.json's name field, not folder name); the
-            // probe here is just for the rare case Unity's package
-            // manager hasn't initialised yet.
-            if (File.Exists($"Packages/{PackageName}/package.json"))
-                return $"Packages/{PackageName}";
+            // package.json's name field, not folder name).
+            string fallback = $"Packages/{PackageName}";
+            if (File.Exists($"{fallback}/package.json"))
+            {
+                string fsAbs;
+                try { fsAbs = NormalizePath(Path.GetFullPath(fallback)); }
+                catch { fsAbs = null; }
+                return new PackageLocation { AssetPath = fallback, ResolvedPath = fsAbs };
+            }
 
             // Last-resort default. If the folder really isn't at
             // Packages/com.youngchan.roslyn-repl every AssetPath
@@ -115,7 +184,7 @@ namespace RoslynRepl.Editor.Core
             // / DLLs and the user will get a clear "asset not found"
             // path in the Verify Setup dialog — better than silently
             // resolving to a stale legacy folder.
-            return $"Packages/{PackageName}";
+            return new PackageLocation { AssetPath = fallback, ResolvedPath = null };
         }
 
         // Soft nudge for embedded checkouts whose folder name doesn't
