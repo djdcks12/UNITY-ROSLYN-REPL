@@ -22,7 +22,11 @@ namespace RoslynRepl.Editor.UI.Find
     /// hand back hits whose <see cref="ReplFindHit.ScrollIntoView"/>
     /// brings the matching row into view on demand.
     /// </summary>
-    internal interface IReplFindable
+    // public because WatchPanelView / MethodPatchView are public
+    // classes that implement this interface — C# requires the
+    // interface to be at least as accessible as any class that
+    // declares it as an implemented contract.
+    public interface IReplFindable
     {
         /// <summary>Raised when this panel's user-visible content was
         /// rebuilt (Output got a new Run, Watch refreshed after a Run,

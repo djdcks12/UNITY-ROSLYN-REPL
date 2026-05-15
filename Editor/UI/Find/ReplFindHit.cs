@@ -15,7 +15,11 @@ namespace RoslynRepl.Editor.UI.Find
     /// underlying widget already shows visible selection state
     /// (a <c>MultiColumnTreeView</c> selection, for example).
     /// </summary>
-    internal sealed class ReplFindHit
+    // public because IReplFindable.CollectMatches signature exposes
+    // it through public WatchPanelView / MethodPatchView. The class
+    // is sealed so consumers can't subclass — it's pure data with
+    // callback fields, not an extension point.
+    public sealed class ReplFindHit
     {
         /// <summary>Short panel-of-origin label — "Output", "Watch",
         /// "Patches". Surfaces in the overlay tooltip / hover so the
