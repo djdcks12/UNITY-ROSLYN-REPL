@@ -1308,22 +1308,21 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             if (field == null) return;
             var text = field.value;
             if (string.IsNullOrEmpty(text)) return;
-            if (text.IndexOf(query, StringComparison.OrdinalIgnoreCase) < 0) return;
+            int hit = text.IndexOf(query, StringComparison.OrdinalIgnoreCase);
+            if (hit < 0) return;
 
-            // Keep the hit summary short — long Body / Params text
-            // would otherwise blow up the counter tooltip.
             string preview = text.Length <= 60 ? text : text.Substring(0, 59) + "…";
+            var capturedField = field;
+            var capturedHit = hit;
+            var capturedLen = query.Length;
             hits.Add(new ReplFindHit
             {
                 Source = "Patches",
                 Label = $"Patches > {fieldLabel}: {preview}",
                 ScrollIntoView = () =>
                 {
-                    // Flip to Patches mode so the field is visible.
-                    // Do not call field.Focus() — that would move
-                    // keyboard focus off the Find overlay input and
-                    // the user couldn't keep typing the query.
                     OnFocusRequested?.Invoke();
+                    NavigateInsideTextField(capturedField, capturedHit, capturedLen);
                 },
                 SetCurrent = null,
                 UnsetCurrent = null,
@@ -1335,45 +1334,79 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             if (body == null) return;
             var text = body.value;
             if (string.IsNullOrEmpty(text)) return;
-
-            // Count total occurrences for the hit label so the user
-            // sees "Body (3 matches)" even though we only emit one
-            // navigable hit. Per-occurrence hits would force a
-            // Focus()/SelectRange() pair to be meaningful, and that
-            // costs the Find overlay its keyboard focus — exactly
-            // the problem the previous version of this code hit.
-            int count = 0;
+            // Per-occurrence hits — Next / Prev steps through each
+            // match in the body so the user can walk the entire
+            // patch for a query. Each hit captures its own start
+            // index; ScrollIntoView fires Focus()+SelectRange() to
+            // scroll the body editor's internal scroll view to the
+            // match and paint Unity's native selection rectangle,
+            // then immediately refocuses the Find overlay input via
+            // ReplFindHighlight.RequestRefocusInput so the user
+            // keeps typing the query without interruption.
             int idx = 0;
             int qlen = query.Length;
+            int count = 0;
             while (idx < text.Length)
             {
                 int h = text.IndexOf(query, idx, StringComparison.OrdinalIgnoreCase);
                 if (h < 0) break;
-                count++;
-                idx = h + qlen;
-                // Sanity cap so a single-char query on a huge body
-                // doesn't spin the loop forever for the counter.
-                if (count >= 999) { count = 999; break; }
-            }
-            if (count == 0) return;
-
-            string countLabel = count == 1 ? "1 match" : $"{count} matches";
-            hits.Add(new ReplFindHit
-            {
-                Source = "Patches",
-                Label = $"Patches > Body ({countLabel})",
-                ScrollIntoView = () =>
+                var capturedBody = body;
+                var capturedH = h;
+                int line = CountLines(text, h);
+                hits.Add(new ReplFindHit
                 {
-                    // Same focus-preserving rule as the form fields
-                    // above: never call body.Focus() from a Find
-                    // navigation. The hit just confirms a match
-                    // exists; the user clicks into the body to
-                    // navigate to the exact spot.
-                    OnFocusRequested?.Invoke();
-                },
-                SetCurrent = null,
-                UnsetCurrent = null,
-            });
+                    Source = "Patches",
+                    Label = $"Patches > Body (line {line})",
+                    ScrollIntoView = () =>
+                    {
+                        OnFocusRequested?.Invoke();
+                        NavigateInsideTextField(capturedBody, capturedH, qlen);
+                    },
+                    SetCurrent = null,
+                    UnsetCurrent = null,
+                });
+                idx = h + qlen;
+                count++;
+                // Sanity cap so a single-char query on a huge body
+                // doesn't churn out tens of thousands of hits — the
+                // user can refine the query if they really need to
+                // walk every occurrence past this point.
+                if (count >= 500) break;
+            }
+        }
+
+        // Focus the TextField just long enough to apply a
+        // SelectRange — that paints Unity's native selection
+        // rectangle and forces the field's internal scroll view to
+        // bring the matched range into view. Then immediately ask
+        // the Find overlay to take focus back so the user can
+        // continue typing the query. Without the refocus call the
+        // body / form field would keep keyboard focus and the
+        // overlay input would go dead.
+        private static void NavigateInsideTextField(TextField field, int matchStart, int matchLength)
+        {
+            try
+            {
+                field.Focus();
+                field.SelectRange(matchStart, matchStart + matchLength);
+            }
+            catch
+            {
+                // Focus / SelectRange may not be available on every
+                // Editor version. Skip silently — the user still
+                // sees the Patches pane flip on, and the counter
+                // confirms the hit exists.
+            }
+            ReplFindHighlight.RequestRefocusInput?.Invoke();
+        }
+
+        private static int CountLines(string text, int upToIndex)
+        {
+            int line = 1;
+            int max = System.Math.Min(upToIndex, text.Length);
+            for (int i = 0; i < max; i++)
+                if (text[i] == '\n') line++;
+            return line;
         }
 
         private static bool Contains(string haystack, string needle)

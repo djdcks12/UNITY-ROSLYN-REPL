@@ -24,6 +24,27 @@ namespace RoslynRepl.Editor.UI.Find
     /// </summary>
     public static class ReplFindHighlight
     {
+        /// <summary>
+        /// Hook the active <see cref="ReplFindOverlay"/> sets to its
+        /// input.Focus() while open and clears on close. Hits that
+        /// need to navigate keyboard focus to a <c>TextField</c>
+        /// (e.g. Patches body / Type / Method / Params, where the
+        /// underlying TextField needs <c>Focus()</c> for
+        /// <c>SelectRange()</c> to scroll the field's internal
+        /// scroll view to the match) call this immediately after
+        /// the focus-stealing pair so keyboard focus snaps back to
+        /// the Find overlay's input on the same frame — the user
+        /// keeps typing the query without interruption, and the
+        /// brief native-selection paint on the destination field is
+        /// the visible "go to here" cue.
+        ///
+        /// The static-delegate shape avoids threading the overlay
+        /// (or controller) through every <see cref="IReplFindable"/>
+        /// implementation, and the null-check makes the hook a
+        /// no-op when no overlay is open.
+        /// </summary>
+        public static Action RequestRefocusInput;
+
         // Rich-text wrappers. UI Toolkit's TextCore supports <color>
         // and <b>; <mark> isn't reliable across Editor versions. We
         // emit a bold orange-yellow run for every match — bright

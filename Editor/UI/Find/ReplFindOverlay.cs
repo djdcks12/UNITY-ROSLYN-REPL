@@ -62,13 +62,39 @@ namespace RoslynRepl.Editor.UI.Find
                 _input.SelectAll();
             }).StartingIn(0);
 
+            // Publish the input refocus hook so hits that briefly
+            // steal focus (Patches body / form fields call
+            // Focus() + SelectRange() to navigate the TextField's
+            // internal scroll view to the match) can pop focus
+            // back to the Find overlay on the same call stack.
+            // Without this the body editor would keep keyboard
+            // focus and the user couldn't continue typing.
+            ReplFindHighlight.RequestRefocusInput = RefocusInput;
+
             RefreshCounterAndButtons();
         }
 
         public void Hide()
         {
             _root.style.display = DisplayStyle.None;
+            // Drop the refocus hook so any stray ScrollIntoView fired
+            // after the overlay closed doesn't reach for a hidden
+            // input.
+            if (ReplFindHighlight.RequestRefocusInput == (Action)RefocusInput)
+                ReplFindHighlight.RequestRefocusInput = null;
             _controller.Close();
+        }
+
+        /// <summary>Re-focus the search input. Public so the static
+        /// <see cref="ReplFindHighlight.RequestRefocusInput"/> hook
+        /// can point at it without exposing private state.</summary>
+        public void RefocusInput()
+        {
+            if (_input == null) return;
+            // Don't steal SelectAll behaviour from the user — they
+            // may be mid-edit on the query. Plain Focus() preserves
+            // the caret position so typing resumes seamlessly.
+            try { _input.Focus(); } catch { /* shouldn't throw, defensive */ }
         }
 
         private void Build()
