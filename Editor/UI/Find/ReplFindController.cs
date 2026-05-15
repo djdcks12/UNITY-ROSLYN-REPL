@@ -97,6 +97,9 @@ namespace RoslynRepl.Editor.UI.Find
             _hits.Clear();
             _currentIndex = -1;
             IsActive = false;
+            // Clear the global highlight query so character-level
+            // rich-text wrapping on every Label / tree cell stops.
+            ReplFindHighlight.SetActiveQuery(null);
             StateChanged?.Invoke();
         }
 
@@ -139,6 +142,14 @@ namespace RoslynRepl.Editor.UI.Find
             // is the best we can do without a stable hit identity.
             int oldIndex = _currentIndex;
             UnsetCurrentHighlight();
+
+            // Push the query down to the global highlight machinery
+            // before walking sources — bind-cell closures in
+            // virtualized trees read this string on every cell bind,
+            // so the order matters: query first, then collect hits
+            // (each panel calls RefreshItems / re-decorates via the
+            // event the setter fires).
+            ReplFindHighlight.SetActiveQuery(IsActive ? _query : null);
 
             _hits.Clear();
             if (IsActive && !string.IsNullOrEmpty(_query))

@@ -483,6 +483,12 @@ return UnityEngine.Application.unityVersion;";
             if (_patchPaneHost != null)
             {
                 _patchView = new MethodPatchView(_patchPaneHost);
+                // The patches pane lives behind an Output/Patches
+                // mode tab; a Find hit that targets a Patches row
+                // would otherwise scroll a display:none element and
+                // do nothing visible. The callback flips the mode
+                // to Patches before ScrollIntoView fires.
+                _patchView.OnFocusRequested = () => SetPatchesModeActive(true);
             }
             // Apply the current mode (Output by default; OpenPatchMode
             // can flip to Patches before this returns by calling
@@ -1080,11 +1086,17 @@ return UnityEngine.Application.unityVersion;";
         private void AppendOutput(string text, string severity)
         {
             if (_outputContent == null) return;
-            var label = new Label(text);
+            var label = new Label();
             label.AddToClassList("rr-output-line");
             label.AddToClassList($"rr-output-line--{severity}");
             label.style.whiteSpace = WhiteSpace.Normal;
             _outputContent.Add(label);
+            // BindLabelText sets label.text via the Find overlay's
+            // Decorate (wraps matching characters in rich-text when
+            // a query is active) and subscribes the label to
+            // re-decorate on query change. Cleanup on detach is
+            // automatic.
+            RoslynRepl.Editor.UI.Find.ReplFindHighlight.BindLabelText(label, text);
             // Mirror the line into the Find findable so the Ctrl+F
             // overlay can match against captured log text (the
             // VisualElement scan can't see virtualized tree rows, so
@@ -1105,10 +1117,11 @@ return UnityEngine.Application.unityVersion;";
             }
 
             // Header above the tree
-            var header = new Label($"=> {root.Preview}");
+            var header = new Label();
             header.AddToClassList("rr-output-line");
             header.AddToClassList("rr-output-line--result");
             _outputContent.Add(header);
+            RoslynRepl.Editor.UI.Find.ReplFindHighlight.BindLabelText(header, $"=> {root.Preview}");
             _outputFindable?.TrackLogLine(header);
 
             var tv = BuildResultTree(root);
@@ -1152,6 +1165,11 @@ return UnityEngine.Application.unityVersion;";
             tv.userData = findIndex;
             tv.Rebuild();
             tv.ExpandRootItems();
+            // Find overlay: refresh visible rows whenever the
+            // active query changes so the bind-cell call re-runs
+            // with the new Decorate wrapping. Unsubscribed
+            // automatically when the tv is detached.
+            RoslynRepl.Editor.UI.Find.ReplFindHighlight.BindTreeRefresh(tv);
             return tv;
         }
 
@@ -1196,12 +1214,20 @@ return UnityEngine.Application.unityVersion;";
                 var lbl = new Label();
                 lbl.AddToClassList("rr-treecell");
                 if (!string.IsNullOrEmpty(extraClass)) lbl.AddToClassList(extraClass);
+                // Rich-text on so the Find overlay's character-level
+                // highlight wrapping shows up; without this the
+                // <color> / <b> tags would render as literal text.
+                lbl.enableRichText = true;
                 return lbl;
             };
             col.bindCell = (ve, idx) =>
             {
                 var node = tv.GetItemDataForIndex<ReplValueNode>(idx);
-                ((Label)ve).text = getter(node);
+                // Decorate routes through the Find overlay's active
+                // query when present, wrapping matching substrings
+                // in rich-text. When no query is active Decorate is
+                // a fast no-op pass-through.
+                ((Label)ve).text = RoslynRepl.Editor.UI.Find.ReplFindHighlight.Decorate(getter(node));
             };
             return col;
         }

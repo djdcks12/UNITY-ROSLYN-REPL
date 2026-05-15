@@ -685,21 +685,19 @@
     color: rgb(200, 180, 180);
 }
 
-/* Highlight shared by every panel for the row currently in focus
-   under the Find overlay. Subtle warm tint so it reads as
-   "selected" without fighting with the watch / patches built-in
-   row styling. */
+/* Current-hit accent — a thin warm left border on the row block
+   without the full-row background tint. The actual matching
+   characters get rich-text colouring via ReplFindHighlight, so the
+   row-level cue stays minimal — just enough to anchor the eye
+   after Next/Prev scrolls the row into view. */
 .rr-find-hit--current {
-    background-color: rgba(255, 196, 96, 0.22);
     border-left-width: 2px;
     border-left-color: rgb(255, 180, 60);
 }
 
-/* Output panel log lines (plain Labels, non-tree) reuse the
-   highlight via the same class — the border-left looks odd on a
-   single-line label so we drop the border there and lean on the
-   background tint alone. */
+/* Output panel log lines (plain Labels, non-tree) skip the border
+   too — colored match text inside the line carries the cue and a
+   side border on a single-line label reads as visual noise. */
 .rr-output-line.rr-find-hit--current {
-    background-color: rgba(255, 196, 96, 0.18);
     border-left-width: 0;
 }

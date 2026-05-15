@@ -226,8 +226,9 @@ namespace RoslynRepl.Editor.UI
             expandBtn.SetEnabled(canExpand);
             row.Add(expandBtn);
 
-            var expr = new Label(r.Expression);
+            var expr = new Label();
             expr.AddToClassList("rr-watch-cell-expr");
+            ReplFindHighlight.BindLabelText(expr, r.Expression);
             // Source descriptor: only present on global-search fallback
             // hits, where the value is otherwise ambiguous about which
             // owner it came from. Surfacing it on the expression label
@@ -241,8 +242,9 @@ namespace RoslynRepl.Editor.UI
             }
             row.Add(expr);
 
-            var value = new Label(r.Failed ? r.ErrorMessage ?? r.Preview : r.Preview);
+            var value = new Label();
             value.AddToClassList("rr-watch-cell-value");
+            ReplFindHighlight.BindLabelText(value, r.Failed ? r.ErrorMessage ?? r.Preview : r.Preview);
             string valueTooltip = r.Failed
                 ? r.ErrorMessage
                 : (r.TypeName + ": " + r.Preview);
@@ -251,8 +253,9 @@ namespace RoslynRepl.Editor.UI
             value.tooltip = valueTooltip;
             row.Add(value);
 
-            var typeLabel = new Label(r.Failed ? string.Empty : r.TypeName ?? string.Empty);
+            var typeLabel = new Label();
             typeLabel.AddToClassList("rr-watch-cell-type");
+            ReplFindHighlight.BindLabelText(typeLabel, r.Failed ? string.Empty : r.TypeName ?? string.Empty);
             row.Add(typeLabel);
 
             var removeBtn = new Button(() => WatchStore.Remove(r.Expression)) { text = "✕" };
@@ -347,6 +350,7 @@ namespace RoslynRepl.Editor.UI
             tv.userData = findIndex;
             tv.Rebuild();
             tv.ExpandRootItems();
+            ReplFindHighlight.BindTreeRefresh(tv);
             return tv;
         }
 
@@ -391,12 +395,17 @@ namespace RoslynRepl.Editor.UI
                 var lbl = new Label();
                 lbl.AddToClassList("rr-treecell");
                 if (!string.IsNullOrEmpty(extraClass)) lbl.AddToClassList(extraClass);
+                // Rich-text on so the Find overlay's character-level
+                // highlight tags actually render.
+                lbl.enableRichText = true;
                 return lbl;
             };
             col.bindCell = (ve, idx) =>
             {
                 var node = tv.GetItemDataForIndex<ReplValueNode>(idx);
-                ((Label)ve).text = getter(node);
+                // Decorate is a no-op pass-through when no Find
+                // query is active.
+                ((Label)ve).text = ReplFindHighlight.Decorate(getter(node));
             };
             return col;
         }

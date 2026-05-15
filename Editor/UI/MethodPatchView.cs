@@ -36,6 +36,18 @@ namespace RoslynRepl.Editor.UI
         /// at disposed VisualElements after any registry mutation.</summary>
         public event Action ContentRebuilt;
 
+        /// <summary>
+        /// Hook the host window sets to flip the Output / Patches
+        /// mode tab to Patches before a Find hit scrolls into view.
+        /// Patches lives behind an output-tab toggle — if the user
+        /// is in Output mode when they jump to a Patches hit,
+        /// scrolling a hidden VisualElement does nothing visible.
+        /// Calling this callback first makes sure the pane is on
+        /// screen, then ScrollIntoView lands somewhere the user
+        /// can actually see.
+        /// </summary>
+        public Action OnFocusRequested;
+
         private const string DefaultBody =
 @"// Write the patch body the same way you'd write the source —
 // `hp -= 10`, `Singleton.Instance.PrivateField`, `base.OnEnable()`
@@ -1131,7 +1143,8 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
                 var infoText = dormantAutoOff
                     ? $"{s.TargetTypeName}.{s.MethodName}({paramsDisplay})  (auto-off)"
                     : $"{s.TargetTypeName}.{s.MethodName}({paramsDisplay})";
-                var info = new Label(infoText);
+                var info = new Label();
+                ReplFindHighlight.BindLabelText(info, infoText);
                 info.style.flexGrow = 1;
                 info.style.color = new StyleColor(dormantAutoOff
                     ? new Color(0.65f, 0.65f, 0.65f)
@@ -1186,7 +1199,8 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
                 if (s.Status == PatchStatus.Failed && !string.IsNullOrEmpty(s.LastError))
                 {
                     var firstLine = s.LastError.Split('\n')[0];
-                    var errLabel = new Label("↳ " + firstLine);
+                    var errLabel = new Label();
+                    ReplFindHighlight.BindLabelText(errLabel, "↳ " + firstLine);
                     errLabel.style.color = new StyleColor(new Color(0.95f, 0.65f, 0.65f));
                     errLabel.style.fontSize = 10;
                     errLabel.style.unityFontStyleAndWeight = FontStyle.Italic;
@@ -1219,8 +1233,24 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
 
         public void CollectMatches(string query, List<ReplFindHit> hits)
         {
-            if (string.IsNullOrEmpty(query) || _rowBlocks.Count == 0) return;
+            if (string.IsNullOrEmpty(query)) return;
             var q = query;
+
+            // Form fields first — the user's mental model of "stuff
+            // in Patches" includes the in-progress patch they're
+            // editing (Type / Method / Params / Body), not just the
+            // committed rows in the active list. Without these the
+            // most common search target (text inside the body
+            // editor) was invisible to Ctrl+F.
+            AddFormFieldHit("Type",   _targetField, q, hits);
+            AddFormFieldHit("Method", _methodField, q, hits);
+            AddFormFieldHit("Params", _paramsField, q, hits);
+            AddBodyFieldHit(_bodyField, q, hits);
+
+            // Active list rows — match against the rendered display
+            // form (target.method(params)) plus any persisted
+            // LastError diagnostic.
+            if (_rowBlocks.Count == 0) return;
             var scroll = _activeListScroll;
             foreach (var spec in PatchRegistry.Specs)
             {
@@ -1241,6 +1271,11 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
                     Label = $"Patches > {spec.TargetTypeName}.{spec.MethodName}",
                     ScrollIntoView = () =>
                     {
+                        // Flip to Patches mode first — the pane is
+                        // display:none under Output mode and a
+                        // ScrollTo on a hidden element does
+                        // nothing.
+                        OnFocusRequested?.Invoke();
                         if (capturedBlock?.parent == null) return;
                         try { scroll?.ScrollTo(capturedBlock); }
                         catch { /* rebuilt mid-find */ }
@@ -1257,6 +1292,90 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
                     },
                 });
             }
+        }
+
+        private void AddFormFieldHit(string fieldLabel, TextField field, string query, List<ReplFindHit> hits)
+        {
+            if (field == null) return;
+            var text = field.value;
+            if (string.IsNullOrEmpty(text)) return;
+            int hit = text.IndexOf(query, StringComparison.OrdinalIgnoreCase);
+            if (hit < 0) return;
+            var capturedField = field;
+            var capturedHit = hit;
+            var capturedLen = query.Length;
+            hits.Add(new ReplFindHit
+            {
+                Source = "Patches",
+                Label = $"Patches > {fieldLabel}: {text}",
+                ScrollIntoView = () =>
+                {
+                    OnFocusRequested?.Invoke();
+                    try
+                    {
+                        capturedField.Focus();
+                        capturedField.SelectRange(capturedHit, capturedHit + capturedLen);
+                    }
+                    catch { /* Focus / SelectRange may not be supported on every Editor version — best effort */ }
+                },
+                SetCurrent = null,
+                UnsetCurrent = null,
+            });
+        }
+
+        private void AddBodyFieldHit(TextField body, string query, List<ReplFindHit> hits)
+        {
+            if (body == null) return;
+            var text = body.value;
+            if (string.IsNullOrEmpty(text)) return;
+            // Emit one hit per match in the body so Next/Prev steps
+            // through every occurrence individually — the body can
+            // be long enough that the user wants to walk hits one
+            // at a time. Single-line form fields above intentionally
+            // only emit one hit per field; a SelectRange on the
+            // first occurrence is enough for those.
+            int idx = 0;
+            int qlen = query.Length;
+            int preview = 0;
+            while (idx < text.Length)
+            {
+                int h = text.IndexOf(query, idx, StringComparison.OrdinalIgnoreCase);
+                if (h < 0) break;
+                var capturedBody = body;
+                var capturedH = h;
+                preview++;
+                int line = CountLines(text, h);
+                hits.Add(new ReplFindHit
+                {
+                    Source = "Patches",
+                    Label = $"Patches > Body (line {line})",
+                    ScrollIntoView = () =>
+                    {
+                        OnFocusRequested?.Invoke();
+                        try
+                        {
+                            capturedBody.Focus();
+                            capturedBody.SelectRange(capturedH, capturedH + qlen);
+                        }
+                        catch { /* best effort */ }
+                    },
+                    SetCurrent = null,
+                    UnsetCurrent = null,
+                });
+                idx = h + qlen;
+                // Sanity cap so a query that matches a single character
+                // doesn't produce 10k hits on a long body.
+                if (preview >= 500) break;
+            }
+        }
+
+        private static int CountLines(string text, int upToIndex)
+        {
+            int line = 1;
+            int max = System.Math.Min(upToIndex, text.Length);
+            for (int i = 0; i < max; i++)
+                if (text[i] == '\n') line++;
+            return line;
         }
 
         private static bool Contains(string haystack, string needle)
