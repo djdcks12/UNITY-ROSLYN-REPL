@@ -135,12 +135,6 @@ namespace RoslynRepl.Editor.UI.Find
 
         private void Recompute()
         {
-            // Remember which hit was current so we can try to keep the
-            // user near "the same place" across recomputes. The source
-            // panels build fresh ReplFindHit instances each pass, so a
-            // pointer comparison would always miss; index-based recall
-            // is the best we can do without a stable hit identity.
-            int oldIndex = _currentIndex;
             UnsetCurrentHighlight();
 
             // Push the query down to the global highlight machinery
@@ -169,22 +163,22 @@ namespace RoslynRepl.Editor.UI.Find
                 }
             }
 
-            if (_hits.Count == 0)
-            {
-                _currentIndex = -1;
-            }
-            else
-            {
-                // Clamp the old index into the new range. Anchoring
-                // at 0 on every recompute would jerk the focus back
-                // to the top each time the user typed a character; a
-                // clamp keeps them within reach of where they were.
-                _currentIndex = oldIndex < 0
-                    ? 0
-                    : System.Math.Min(oldIndex, _hits.Count - 1);
-                ApplyCurrent();
-            }
-
+            // Notepad++ / code-editor pattern: typing only updates the
+            // hit list + counter. Pressing Enter / F3 (Next) drives
+            // the actual navigation. Auto-applying the first hit on
+            // every keystroke caused the Patches body editor to
+            // grab Focus + SelectRange (the only way to scroll a
+            // TextField's internal scroll view to a match) per
+            // character typed, which flickered the focus rectangle
+            // between the search input and the body and looked like
+            // the search tab was turning blue.
+            //
+            // Resetting to -1 means the *first* Enter press goes to
+            // hit index 0 cleanly (MoveTo wraps -1 + 1 → 0). Index
+            // doesn't survive across queries — that's the cost of
+            // the simpler model, but a query refinement is usually
+            // followed by re-navigation anyway.
+            _currentIndex = -1;
             StateChanged?.Invoke();
         }
 

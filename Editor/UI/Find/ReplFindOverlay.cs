@@ -178,6 +178,15 @@ namespace RoslynRepl.Editor.UI.Find
                 _counter.text = "no matches";
                 _counter.AddToClassList("rr-find-counter--none");
             }
+            else if (cur < 0)
+            {
+                // User typed a query but hasn't pressed Enter yet —
+                // show the total count alone. Once they navigate,
+                // the counter switches to "{cur+1} / {total}". The
+                // hint reminds them Enter is the trigger.
+                _counter.text = total == 1 ? "1 match — Enter" : $"{total} matches — Enter";
+                _counter.RemoveFromClassList("rr-find-counter--none");
+            }
             else
             {
                 // Display the 1-based index so the counter reads like
