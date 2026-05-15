@@ -1242,6 +1242,15 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             // committed rows in the active list. Without these the
             // most common search target (text inside the body
             // editor) was invisible to Ctrl+F.
+            //
+            // Each field emits at most one hit. We deliberately do
+            // *not* call Focus()/SelectRange() on the TextField in
+            // ScrollIntoView: doing so moves keyboard focus to the
+            // field and the Find overlay input loses focus, so the
+            // user can't keep typing the query. The hit's job here
+            // is just to tell the user "yes, this query matches
+            // somewhere inside the field"; clicking into the field
+            // to navigate manually is on them.
             AddFormFieldHit("Type",   _targetField, q, hits);
             AddFormFieldHit("Method", _methodField, q, hits);
             AddFormFieldHit("Params", _paramsField, q, hits);
@@ -1299,24 +1308,22 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             if (field == null) return;
             var text = field.value;
             if (string.IsNullOrEmpty(text)) return;
-            int hit = text.IndexOf(query, StringComparison.OrdinalIgnoreCase);
-            if (hit < 0) return;
-            var capturedField = field;
-            var capturedHit = hit;
-            var capturedLen = query.Length;
+            if (text.IndexOf(query, StringComparison.OrdinalIgnoreCase) < 0) return;
+
+            // Keep the hit summary short — long Body / Params text
+            // would otherwise blow up the counter tooltip.
+            string preview = text.Length <= 60 ? text : text.Substring(0, 59) + "…";
             hits.Add(new ReplFindHit
             {
                 Source = "Patches",
-                Label = $"Patches > {fieldLabel}: {text}",
+                Label = $"Patches > {fieldLabel}: {preview}",
                 ScrollIntoView = () =>
                 {
+                    // Flip to Patches mode so the field is visible.
+                    // Do not call field.Focus() — that would move
+                    // keyboard focus off the Find overlay input and
+                    // the user couldn't keep typing the query.
                     OnFocusRequested?.Invoke();
-                    try
-                    {
-                        capturedField.Focus();
-                        capturedField.SelectRange(capturedHit, capturedHit + capturedLen);
-                    }
-                    catch { /* Focus / SelectRange may not be supported on every Editor version — best effort */ }
                 },
                 SetCurrent = null,
                 UnsetCurrent = null,
@@ -1328,54 +1335,45 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             if (body == null) return;
             var text = body.value;
             if (string.IsNullOrEmpty(text)) return;
-            // Emit one hit per match in the body so Next/Prev steps
-            // through every occurrence individually — the body can
-            // be long enough that the user wants to walk hits one
-            // at a time. Single-line form fields above intentionally
-            // only emit one hit per field; a SelectRange on the
-            // first occurrence is enough for those.
+
+            // Count total occurrences for the hit label so the user
+            // sees "Body (3 matches)" even though we only emit one
+            // navigable hit. Per-occurrence hits would force a
+            // Focus()/SelectRange() pair to be meaningful, and that
+            // costs the Find overlay its keyboard focus — exactly
+            // the problem the previous version of this code hit.
+            int count = 0;
             int idx = 0;
             int qlen = query.Length;
-            int preview = 0;
             while (idx < text.Length)
             {
                 int h = text.IndexOf(query, idx, StringComparison.OrdinalIgnoreCase);
                 if (h < 0) break;
-                var capturedBody = body;
-                var capturedH = h;
-                preview++;
-                int line = CountLines(text, h);
-                hits.Add(new ReplFindHit
-                {
-                    Source = "Patches",
-                    Label = $"Patches > Body (line {line})",
-                    ScrollIntoView = () =>
-                    {
-                        OnFocusRequested?.Invoke();
-                        try
-                        {
-                            capturedBody.Focus();
-                            capturedBody.SelectRange(capturedH, capturedH + qlen);
-                        }
-                        catch { /* best effort */ }
-                    },
-                    SetCurrent = null,
-                    UnsetCurrent = null,
-                });
+                count++;
                 idx = h + qlen;
-                // Sanity cap so a query that matches a single character
-                // doesn't produce 10k hits on a long body.
-                if (preview >= 500) break;
+                // Sanity cap so a single-char query on a huge body
+                // doesn't spin the loop forever for the counter.
+                if (count >= 999) { count = 999; break; }
             }
-        }
+            if (count == 0) return;
 
-        private static int CountLines(string text, int upToIndex)
-        {
-            int line = 1;
-            int max = System.Math.Min(upToIndex, text.Length);
-            for (int i = 0; i < max; i++)
-                if (text[i] == '\n') line++;
-            return line;
+            string countLabel = count == 1 ? "1 match" : $"{count} matches";
+            hits.Add(new ReplFindHit
+            {
+                Source = "Patches",
+                Label = $"Patches > Body ({countLabel})",
+                ScrollIntoView = () =>
+                {
+                    // Same focus-preserving rule as the form fields
+                    // above: never call body.Focus() from a Find
+                    // navigation. The hit just confirms a match
+                    // exists; the user clicks into the body to
+                    // navigate to the exact spot.
+                    OnFocusRequested?.Invoke();
+                },
+                SetCurrent = null,
+                UnsetCurrent = null,
+            });
         }
 
         private static bool Contains(string haystack, string needle)
