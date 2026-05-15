@@ -627,3 +627,79 @@
     border-top-width: 1px;
     border-top-color: rgb(28, 28, 28);
 }
+
+/* ─── Find overlay (Ctrl+F) ──────────────────────────────────── */
+
+.rr-find-bar {
+    flex-direction: row;
+    align-items: center;
+    height: 26px;
+    padding-left: 8px;
+    padding-right: 6px;
+    background-color: rgb(40, 40, 40);
+    border-bottom-width: 1px;
+    border-bottom-color: rgb(24, 24, 24);
+}
+
+.rr-find-icon {
+    color: rgb(170, 170, 170);
+    -unity-font-style: bold;
+    margin-right: 6px;
+    font-size: 12px;
+}
+
+.rr-find-input {
+    flex-grow: 1;
+    min-width: 120px;
+    max-width: 320px;
+    margin-right: 8px;
+}
+
+.rr-find-counter {
+    color: rgb(170, 200, 170);
+    font-size: 10px;
+    -unity-font-style: bold;
+    min-width: 60px;
+    -unity-text-align: middle-right;
+    margin-right: 8px;
+}
+
+.rr-find-counter--none {
+    color: rgb(200, 130, 130);
+    -unity-font-style: italic;
+}
+
+.rr-find-nav {
+    min-width: 22px;
+    height: 20px;
+    margin-left: 1px;
+    margin-right: 1px;
+    -unity-font-style: bold;
+    padding: 0 6px;
+}
+
+.rr-find-close {
+    min-width: 22px;
+    height: 20px;
+    margin-left: 6px;
+    color: rgb(200, 180, 180);
+}
+
+/* Highlight shared by every panel for the row currently in focus
+   under the Find overlay. Subtle warm tint so it reads as
+   "selected" without fighting with the watch / patches built-in
+   row styling. */
+.rr-find-hit--current {
+    background-color: rgba(255, 196, 96, 0.22);
+    border-left-width: 2px;
+    border-left-color: rgb(255, 180, 60);
+}
+
+/* Output panel log lines (plain Labels, non-tree) reuse the
+   highlight via the same class — the border-left looks odd on a
+   single-line label so we drop the border there and lean on the
+   background tint alone. */
+.rr-output-line.rr-find-hit--current {
+    background-color: rgba(255, 196, 96, 0.18);
+    border-left-width: 0;
+}

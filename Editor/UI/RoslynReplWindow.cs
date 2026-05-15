@@ -5,6 +5,7 @@ using UnityEngine;
 using UnityEngine.UIElements;
 using RoslynRepl.Editor.Core;
 using RoslynRepl.Editor.Diagnostics;
+using RoslynRepl.Editor.UI.Find;
 
 namespace RoslynRepl.Editor.UI
 {
@@ -112,6 +113,13 @@ return UnityEngine.Application.unityVersion;";
         private ObjectBrowserView _browser;
         private WatchPanelView _watch;
         private MethodPatchView _patchView;
+        // Ctrl+F overlay: search bar that scans Output / Watch /
+        // Patches by name + preview. Owned by this window; the
+        // controller mediates between the overlay UI and the three
+        // pane-side IReplFindable implementations.
+        private ReplFindController _findController;
+        private ReplFindOverlay _findOverlay;
+        private OutputFindable _outputFindable;
         private VisualElement _outputScrollHost;       // wraps the ScrollView
         private VisualElement _patchPaneHost;
         private Label _outputTab;
@@ -506,6 +514,27 @@ return UnityEngine.Application.unityVersion;";
                 _watch = new WatchPanelView(watchHost);
             }
 
+            // Ctrl+F find overlay. The output findable lives for the
+            // entire window lifetime — every AppendOutput /
+            // AppendResult / ClearOutput mirrors into it. The watch
+            // + patch views implement IReplFindable themselves so
+            // they can scroll-and-highlight rows from their own
+            // internal handles. The overlay sits above the toolbar,
+            // hidden until Ctrl+F.
+            _findController?.UnregisterAllSources();
+            _findOverlay?.Dispose();
+            _findController = new ReplFindController();
+            _outputFindable = new OutputFindable(_outputScroll);
+            _findController.RegisterSource(_outputFindable);
+            if (_watch != null)     _findController.RegisterSource(_watch);
+            if (_patchView != null) _findController.RegisterSource(_patchView);
+            _findOverlay = new ReplFindOverlay(_findController);
+            // Insert the bar at index 0 of the .rr-root so it shows
+            // above the existing toolbar. The bar is display:none by
+            // default; Ctrl+F flips it to flex.
+            var rootContainer = root.Q<VisualElement>(className: "rr-root") ?? root;
+            rootContainer.Insert(0, _findOverlay.Root);
+
             // Code editor: restore from session and persist on change.
             // Phase 4 lifts the bare TextField into a composite view that
             // owns the gutter + caret indicator.
@@ -605,6 +634,11 @@ return UnityEngine.Application.unityVersion;";
             _watch = null;
             _patchView?.Dispose();
             _patchView = null;
+            _findOverlay?.Dispose();
+            _findOverlay = null;
+            _findController?.UnregisterAllSources();
+            _findController = null;
+            _outputFindable = null;
         }
 
         private void UpdatePatchBadge()
@@ -734,6 +768,22 @@ return UnityEngine.Application.unityVersion;";
             {
                 Run();
                 evt.StopPropagation();
+                return;
+            }
+
+            // Ctrl+F: open the Find overlay and put the caret in its
+            // input. Bound here on TrickleDown so it fires before
+            // the code editor / watch input fields swallow the key.
+            // Cmd+F on macOS goes through evt.commandKey; cover both.
+            bool isFindShortcut =
+                (evt.ctrlKey || evt.commandKey)
+                && !evt.altKey
+                && evt.keyCode == KeyCode.F;
+            if (isFindShortcut)
+            {
+                _findOverlay?.Show();
+                evt.StopPropagation();
+                evt.PreventDefault();
             }
         }
 
@@ -870,6 +920,10 @@ return UnityEngine.Application.unityVersion;";
             if (_outputSummary != null) _outputSummary.text = "Browsed";
             _watch?.Refresh();
             ScrollOutputToBottom();
+            // Same commit-point signal as RenderResult — let the
+            // overlay refresh hits now that the Browse-inspect tree
+            // is appended.
+            _outputFindable?.RaiseRebuilt();
         }
 
         private void OpenMethodPickerForType(Type type)
@@ -955,6 +1009,13 @@ return UnityEngine.Application.unityVersion;";
 
             UpdateStatusLabels(result);
             ScrollOutputToBottom();
+            // Signal the Find overlay (if open) that the visible
+            // Output content has fully committed for this Run. Each
+            // AppendOutput already mirrored into the findable, but
+            // raising the event once at the end lets the overlay
+            // recompute hits in one pass instead of N times per
+            // log line.
+            _outputFindable?.RaiseRebuilt();
         }
 
         private void UpdateStatusLabels(ReplResult result)
@@ -979,6 +1040,12 @@ return UnityEngine.Application.unityVersion;";
         {
             if (_outputContent != null) _outputContent.Clear();
             if (_outputSummary != null) _outputSummary.text = string.Empty;
+            // Drop the findable's mirror in sync. RaiseRebuilt fires
+            // an empty match set so the overlay (if open) updates
+            // its 0 / 0 counter instead of holding stale hits whose
+            // VisualElements are now detached.
+            _outputFindable?.Clear();
+            _outputFindable?.RaiseRebuilt();
         }
 
         // Called by ResetProjectData so the visible Output panel matches
@@ -1018,6 +1085,11 @@ return UnityEngine.Application.unityVersion;";
             label.AddToClassList($"rr-output-line--{severity}");
             label.style.whiteSpace = WhiteSpace.Normal;
             _outputContent.Add(label);
+            // Mirror the line into the Find findable so the Ctrl+F
+            // overlay can match against captured log text (the
+            // VisualElement scan can't see virtualized tree rows, so
+            // we use an explicit mirror everywhere for consistency).
+            _outputFindable?.TrackLogLine(label);
         }
 
         private void AppendResult(ReplValueNode root)
@@ -1037,10 +1109,16 @@ return UnityEngine.Application.unityVersion;";
             header.AddToClassList("rr-output-line");
             header.AddToClassList("rr-output-line--result");
             _outputContent.Add(header);
+            _outputFindable?.TrackLogLine(header);
 
             var tv = BuildResultTree(root);
             tv.AddToClassList("rr-result-tree");
             _outputContent.Add(tv);
+            // Hand the tree + its OutputTreeIndex (stashed on
+            // tv.userData by BuildResultTree) to the findable so
+            // Find can walk virtualized rows by id without
+            // re-traversing the data per keystroke.
+            _outputFindable?.TrackResultTree(tv, tv.userData as RoslynRepl.Editor.UI.Find.OutputTreeIndex);
         }
 
         private static MultiColumnTreeView BuildResultTree(ReplValueNode root)
@@ -1060,12 +1138,18 @@ return UnityEngine.Application.unityVersion;";
             tv.columns.Add(MakeColumn("value", "Value", 320, n => n?.Preview  ?? string.Empty, "rr-treecell--value", tv));
 
             // --- data ---
+            // Build the OutputTreeIndex in lockstep with the item
+            // data so the Find overlay (Ctrl+F) can navigate to
+            // virtualized rows by id without re-walking the tree on
+            // every keystroke. Indices live on tv.userData.
             int nextId = 0;
+            var findIndex = new RoslynRepl.Editor.UI.Find.OutputTreeIndex();
             var rootItems = new List<TreeViewItemData<ReplValueNode>>
             {
-                ToItemData(root, ref nextId)
+                ToItemData(root, ref nextId, parentRef: null, findIndex)
             };
             tv.SetRootItems(rootItems);
+            tv.userData = findIndex;
             tv.Rebuild();
             tv.ExpandRootItems();
             return tv;
@@ -1122,15 +1206,27 @@ return UnityEngine.Application.unityVersion;";
             return col;
         }
 
-        private static TreeViewItemData<ReplValueNode> ToItemData(ReplValueNode node, ref int nextId)
+        private static TreeViewItemData<ReplValueNode> ToItemData(
+            ReplValueNode node,
+            ref int nextId,
+            RoslynRepl.Editor.UI.Find.NodeRef parentRef,
+            RoslynRepl.Editor.UI.Find.OutputTreeIndex findIndex)
         {
+            int id = nextId++;
+            var nref = new RoslynRepl.Editor.UI.Find.NodeRef
+            {
+                Node = node,
+                Id = id,
+                Parent = parentRef,
+            };
+            findIndex.Refs.Add(nref);
             var children = new List<TreeViewItemData<ReplValueNode>>();
             if (node.Children != null)
             {
                 foreach (var c in node.Children)
-                    children.Add(ToItemData(c, ref nextId));
+                    children.Add(ToItemData(c, ref nextId, nref, findIndex));
             }
-            return new TreeViewItemData<ReplValueNode>(nextId++, node, children);
+            return new TreeViewItemData<ReplValueNode>(id, node, children);
         }
 
         private void ScrollOutputToBottom()

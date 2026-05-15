@@ -1,8 +1,10 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
 using UnityEngine.UIElements;
 using RoslynRepl.Editor.Patches;
+using RoslynRepl.Editor.UI.Find;
 
 namespace RoslynRepl.Editor.UI
 {
@@ -20,8 +22,20 @@ namespace RoslynRepl.Editor.UI
     ///     / `__call` helpers when the rewriter picks the wrong
     ///     overload.
     /// </summary>
-    public class MethodPatchView
+    public class MethodPatchView : IReplFindable
     {
+        // Per-spec block references populated by RebuildActiveList.
+        // Used by the Ctrl+F overlay to scroll to + highlight matching
+        // patch rows without re-querying the visual tree.
+        private readonly Dictionary<string, VisualElement> _rowBlocks = new();
+        private ScrollView _activeListScroll;
+
+        /// <summary>Raised after the active patches list rebuilds. The
+        /// Find overlay subscribes so it can re-collect hits against
+        /// the fresh row blocks; without it the hit list would point
+        /// at disposed VisualElements after any registry mutation.</summary>
+        public event Action ContentRebuilt;
+
         private const string DefaultBody =
 @"// Write the patch body the same way you'd write the source —
 // `hp -= 10`, `Singleton.Instance.PrivateField`, `base.OnEnable()`
@@ -386,11 +400,12 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             // max-height share so a long list doesn't push the body
             // editor offscreen. flex-shrink=0 so the column layout
             // doesn't squeeze it to zero when the body is large.
-            var listScroll = new ScrollView(ScrollViewMode.Vertical);
-            listScroll.style.flexShrink = 0;
-            listScroll.style.minHeight = 80;
-            listScroll.style.maxHeight = 160;
-            listScroll.style.backgroundColor = new StyleColor(new Color(0.14f, 0.14f, 0.14f));
+            _activeListScroll = new ScrollView(ScrollViewMode.Vertical);
+            _activeListScroll.style.flexShrink = 0;
+            _activeListScroll.style.minHeight = 80;
+            _activeListScroll.style.maxHeight = 160;
+            _activeListScroll.style.backgroundColor = new StyleColor(new Color(0.14f, 0.14f, 0.14f));
+            var listScroll = _activeListScroll;
 
             _activeListContainer = new VisualElement();
             listScroll.Add(_activeListContainer);
@@ -1049,6 +1064,7 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
         {
             if (_activeListContainer == null) return;
             _activeListContainer.Clear();
+            _rowBlocks.Clear();
 
             var specs = PatchRegistry.Specs.ToList();
             if (specs.Count == 0)
@@ -1059,6 +1075,7 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
                 empty.style.paddingTop = 6;
                 empty.style.paddingBottom = 6;
                 _activeListContainer.Add(empty);
+                ContentRebuilt?.Invoke();
                 return;
             }
 
@@ -1184,7 +1201,66 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
                 }
 
                 _activeListContainer.Add(block);
+                // Keep a per-spec reference so the Ctrl+F overlay can
+                // resolve hits back to the block visual without
+                // re-querying the tree. Keyed by spec.Key — duplicate
+                // keys can't happen because PatchRegistry indexes by
+                // the same triple.
+                if (!string.IsNullOrEmpty(s.Key))
+                    _rowBlocks[s.Key] = block;
+            }
+
+            // Tell the Find overlay the visible patches list has
+            // committed for this rebuild.
+            ContentRebuilt?.Invoke();
+        }
+
+        // ─── Find overlay (Ctrl+F) ──────────────────────────────
+
+        public void CollectMatches(string query, List<ReplFindHit> hits)
+        {
+            if (string.IsNullOrEmpty(query) || _rowBlocks.Count == 0) return;
+            var q = query;
+            var scroll = _activeListScroll;
+            foreach (var spec in PatchRegistry.Specs)
+            {
+                if (spec == null || string.IsNullOrEmpty(spec.Key)) continue;
+                if (!_rowBlocks.TryGetValue(spec.Key, out var block) || block == null) continue;
+
+                var paramsDisplay = string.Join(", ", MethodPatchSpec.SplitParamTypes(spec.ParameterTypes ?? string.Empty));
+                if (!Contains(spec.TargetTypeName, q)
+                    && !Contains(spec.MethodName, q)
+                    && !Contains(paramsDisplay, q)
+                    && !Contains(spec.LastError, q))
+                    continue;
+
+                var capturedBlock = block;
+                hits.Add(new ReplFindHit
+                {
+                    Source = "Patches",
+                    Label = $"Patches > {spec.TargetTypeName}.{spec.MethodName}",
+                    ScrollIntoView = () =>
+                    {
+                        if (capturedBlock?.parent == null) return;
+                        try { scroll?.ScrollTo(capturedBlock); }
+                        catch { /* rebuilt mid-find */ }
+                    },
+                    SetCurrent = () =>
+                    {
+                        if (capturedBlock?.parent != null)
+                            capturedBlock.AddToClassList("rr-find-hit--current");
+                    },
+                    UnsetCurrent = () =>
+                    {
+                        if (capturedBlock?.parent != null)
+                            capturedBlock.RemoveFromClassList("rr-find-hit--current");
+                    },
+                });
             }
         }
+
+        private static bool Contains(string haystack, string needle)
+            => !string.IsNullOrEmpty(haystack)
+               && haystack.IndexOf(needle, StringComparison.OrdinalIgnoreCase) >= 0;
     }
 }

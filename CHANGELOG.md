@@ -4,6 +4,14 @@ All notable changes to this package will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added (Ctrl+F find overlay across Output / Watch / Patches)
+- Press **Ctrl+F** (Cmd+F on macOS) anywhere in the REPL window to open a search bar above the toolbar. The bar scans the **Output** panel (log lines + result trees), the **Watch** panel (row expressions / previews / types + the embedded tree for currently-expanded rows), and the **Patches** list (target type + method + parameter list + last error) for case-insensitive matches against names and previews. Enter / **F3** jump to the next hit, **Shift+Enter** / **Shift+F3** go back, **Esc** closes; an `N / M` counter shows where you are in the hit list.
+- Each hit auto-scrolls its row into view and applies a warm-orange selection cue. For result-tree hits the overlay also expands every ancestor row first so the deep match is actually visible, then uses the `MultiColumnTreeView` selection to mark the current row — the same visual the panel uses for click-selection.
+- The overlay hit list refreshes automatically when any of the three panels rebuilds (a Run finishes, the Watch evaluator refreshes, the patch registry mutates) so the navigation never points at a disposed `VisualElement`. The current index is clamped into the new hit range rather than reset to 0, so typing one more character into the query doesn't jerk you back to the top of the results.
+- Implementation lives under `Editor/UI/Find/`: a `ReplFindController` for state, a `ReplFindOverlay` for the bar UI, a small `IReplFindable` interface implemented by `OutputFindable`, `WatchPanelView`, and `MethodPatchView`. Tree result panels stash a side-table `OutputTreeIndex` on `MultiColumnTreeView.userData` so the overlay can navigate to virtualized rows by id without re-walking the data on every keystroke.
+
 ## [0.7.3] - 2026-05-12
 
 ### Changed (Korean README rewritten in natural prose)
