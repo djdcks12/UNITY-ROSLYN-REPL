@@ -613,12 +613,12 @@ namespace RoslynRepl.Editor.Core
             result.Value = value;
             result.Preview = ValueFormatter.Format(value);
             result.TypeName = value == null ? "null" : TypeFormatter.Short(value.GetType());
-            result.Tree = BuildTree(value);
+            result.Tree = BuildTree(value, result.Expression);
             result.Failed = false;
             result.ErrorMessage = null;
         }
 
-        private static ReplValueNode BuildTree(object value)
+        private static ReplValueNode BuildTree(object value, string rootExpression)
         {
             try
             {
@@ -639,10 +639,20 @@ namespace RoslynRepl.Editor.Core
                 // exposes. Output panel still walks properties because
                 // a user-driven `return X;` is a one-shot inspection,
                 // not a per-Run loop.
+                // Watch sub-trees rooted at the user's own
+                // expression so #61's row-action paths grow from the
+                // accessor the user typed ("Time.frameCount.foo")
+                // rather than the Output-flow default `_`. Bracket-
+                // wrapping the rootExpression keeps operator
+                // precedence sane when later children splice on
+                // `.field` or `[idx]`.
+                string rootPath = string.IsNullOrWhiteSpace(rootExpression)
+                    ? null
+                    : "(" + rootExpression.Trim() + ")";
                 return SimpleObjectSerializer.ToTree(value, new SimpleObjectSerializer.Options
                 {
                     IncludeProperties = false,
-                });
+                }, rootPath);
             }
             catch (Exception ex)
             {

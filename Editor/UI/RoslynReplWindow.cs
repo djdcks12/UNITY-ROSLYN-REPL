@@ -873,6 +873,144 @@ return UnityEngine.Application.unityVersion;";
         // the future) updates in lockstep.
         private void ClearUnderscore() => ReplEngine.ResetLastResult();
 
+        // Issue #61: build the right-click menu for an Output tree
+        // row. Walks up the click target to find the bound
+        // ReplValueNode (stashed on each cell's userData by MakeColumn's
+        // bindCell), then offers Add Watch / Copy Path / Copy Value /
+        // Inspect This / Set as `_`. The actions reuse the same
+        // helpers double-click / `_` badge re-inspect drive so the
+        // menu can't drift from existing surfaces.
+        private void BuildOutputNodeContextMenu(ContextualMenuPopulateEvent evt)
+        {
+            var node = ResolveOutputContextNode(evt.target as VisualElement);
+            if (node == null) return;
+
+            bool hasPath = !string.IsNullOrEmpty(node.ExpressionPath);
+            bool hasValue = node.Value != null
+                            && !(node.Value is UnityEngine.Object uo && uo == null);
+
+            evt.menu.AppendAction("Add Watch",
+                _ => AddOutputNodeWatch(node),
+                hasPath ? DropdownMenuAction.Status.Normal : DropdownMenuAction.Status.Disabled);
+
+            evt.menu.AppendAction("Copy Path",
+                _ => CopyOutputNodePath(node),
+                hasPath ? DropdownMenuAction.Status.Normal : DropdownMenuAction.Status.Disabled);
+
+            evt.menu.AppendAction("Copy Value",
+                _ => CopyOutputNodeValue(node),
+                // Preview is the user-visible 1-line summary and is
+                // always populated, so Copy Value can always offer
+                // *something* — even for placeholder rows it surfaces
+                // the truncation / error text, which is still useful.
+                !string.IsNullOrEmpty(node.Preview)
+                    ? DropdownMenuAction.Status.Normal
+                    : DropdownMenuAction.Status.Disabled);
+
+            evt.menu.AppendSeparator();
+
+            evt.menu.AppendAction("Inspect This",
+                _ => InspectOutputNode(node),
+                hasValue ? DropdownMenuAction.Status.Normal : DropdownMenuAction.Status.Disabled);
+
+            evt.menu.AppendAction("Set as `_`",
+                _ => SetOutputNodeAsUnderscore(node),
+                hasValue ? DropdownMenuAction.Status.Normal : DropdownMenuAction.Status.Disabled);
+        }
+
+        // Walk up from the cell the user clicked, looking for a
+        // VisualElement whose userData holds the ReplValueNode the
+        // cell's bindCell stamped on it. MultiColumnTreeView's
+        // pointer event tree lands evt.target on the inner-most leaf
+        // (a TextElement inside the cell Label), so a simple cast
+        // won't work — we walk the parent chain until we hit the
+        // Label that MakeColumn produced.
+        private static ReplValueNode ResolveOutputContextNode(VisualElement target)
+        {
+            var cur = target;
+            while (cur != null)
+            {
+                if (cur.userData is ReplValueNode n) return n;
+                cur = cur.parent;
+            }
+            return null;
+        }
+
+        private void AddOutputNodeWatch(ReplValueNode node)
+        {
+            if (node == null) return;
+            var path = node.ExpressionPath;
+            if (string.IsNullOrEmpty(path))
+            {
+                AppendOutput("(can't add watch — node has no safe expression path)", "warning");
+                return;
+            }
+            // WatchStore dedupes internally, so re-clicking the same
+            // row is a silent no-op rather than a stack of identical
+            // rows. The Add fires WatchStore.Changed which the panel
+            // already listens to, so the new row appears without
+            // an explicit Refresh from here.
+            RoslynRepl.Editor.Core.WatchStore.Add(path);
+            AppendOutput($"👁 Added watch: {path}", "info");
+        }
+
+        private void CopyOutputNodePath(ReplValueNode node)
+        {
+            if (node == null) return;
+            var path = node.ExpressionPath;
+            if (string.IsNullOrEmpty(path))
+            {
+                AppendOutput("(can't copy path — node has no safe expression path)", "warning");
+                return;
+            }
+            EditorGUIUtility.systemCopyBuffer = path;
+            AppendOutput($"📋 Copied path: {path}", "info");
+        }
+
+        private void CopyOutputNodeValue(ReplValueNode node)
+        {
+            if (node == null) return;
+            var text = node.Preview ?? string.Empty;
+            EditorGUIUtility.systemCopyBuffer = text;
+            // Mention the path when available so a glance at Output
+            // confirms which row produced the copied text — multiple
+            // Copy Value clicks against the same tree are easy to
+            // confuse otherwise.
+            if (!string.IsNullOrEmpty(node.ExpressionPath))
+                AppendOutput($"📋 Copied value from {node.ExpressionPath}", "info");
+            else
+                AppendOutput("📋 Copied value", "info");
+        }
+
+        private void InspectOutputNode(ReplValueNode node)
+        {
+            if (node?.Value == null) return;
+            var value = node.Value;
+            if (value is UnityEngine.Object uo && uo == null) return;
+
+            ClearOutput();
+            var label = !string.IsNullOrEmpty(node.ExpressionPath) ? node.ExpressionPath : node.Name;
+            AppendOutput($"▼ Inspect {label}: {value.GetType().Name}", "info");
+            ReplEngine.SetLastResult(value);
+            AppendOutput("→ available as `_` in Code and Watch. Try: return _;", "info");
+            AppendResult(SimpleObjectSerializer.ToTree(value, BuildOutputTreeOptions()));
+            if (_durationLabel != null) _durationLabel.text = string.Empty;
+            if (_outputSummary != null) _outputSummary.text = "Inspect";
+            _watch?.Refresh();
+            ScrollOutputToBottom();
+            _outputFindable?.RaiseRebuilt();
+        }
+
+        private void SetOutputNodeAsUnderscore(ReplValueNode node)
+        {
+            if (node?.Value == null) return;
+            var value = node.Value;
+            if (value is UnityEngine.Object uo && uo == null) return;
+            ReplEngine.SetLastResult(value);
+            _watch?.Refresh();
+            if (_outputSummary != null) _outputSummary.text = "Bound `_`";
+        }
+
         public void SetPatchesModeActive(bool active)
         {
             _patchesModeActive = active;
@@ -1560,7 +1698,7 @@ return UnityEditor.AssetDatabase.FindAssets(""t:{type.Name}"")
             _outputFindable?.TrackResultTree(tv, tv.userData as RoslynRepl.Editor.UI.Find.OutputTreeIndex);
         }
 
-        private static MultiColumnTreeView BuildResultTree(ReplValueNode root)
+        private MultiColumnTreeView BuildResultTree(ReplValueNode root)
         {
             var tv = new MultiColumnTreeView();
             tv.fixedItemHeight = 22;
@@ -1621,7 +1759,7 @@ return UnityEditor.AssetDatabase.FindAssets(""t:{type.Name}"")
             return count;
         }
 
-        private static Column MakeColumn(
+        private Column MakeColumn(
             string name, string title, float width,
             System.Func<ReplValueNode, string> getter,
             string extraClass,
@@ -1644,6 +1782,14 @@ return UnityEditor.AssetDatabase.FindAssets(""t:{type.Name}"")
                 // highlight wrapping shows up; without this the
                 // <color> / <b> tags would render as literal text.
                 lbl.enableRichText = true;
+                // Issue #61: every cell carries the row's context
+                // menu. Each manipulator reads the cell's userData
+                // (set in bindCell on every recycle) for the bound
+                // ReplValueNode, so right-clicking any of the three
+                // columns produces the same menu against the same
+                // row. Pooled once at makeCell time rather than
+                // re-attached per bind.
+                lbl.AddManipulator(new ContextualMenuManipulator(BuildOutputNodeContextMenu));
                 return lbl;
             };
             col.bindCell = (ve, idx) =>
@@ -1654,6 +1800,10 @@ return UnityEditor.AssetDatabase.FindAssets(""t:{type.Name}"")
                 // in rich-text. When no query is active Decorate is
                 // a fast no-op pass-through.
                 ((Label)ve).text = RoslynRepl.Editor.UI.Find.ReplFindHighlight.Decorate(getter(node));
+                // Stash the bound node on the cell so the shared
+                // context-menu manipulator can find it without
+                // re-querying the tree view by visual index.
+                ve.userData = node;
             };
             return col;
         }

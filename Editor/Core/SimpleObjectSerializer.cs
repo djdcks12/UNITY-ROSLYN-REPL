@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Reflection;
 using UnityEngine;
@@ -37,7 +38,7 @@ namespace RoslynRepl.Editor.Core
             public int NodeCount;
         }
 
-        public static ReplValueNode ToTree(object value, Options options = null)
+        public static ReplValueNode ToTree(object value, Options options = null, string rootPath = "_")
         {
             options ??= new Options();
             var state = new BuildState
@@ -46,15 +47,24 @@ namespace RoslynRepl.Editor.Core
                 Visited = new HashSet<object>(ReferenceEqualityComparer.Instance),
                 NodeCount = 0,
             };
-            return BuildNode("(result)", value, depth: 0, state);
+            // rootPath defaults to "_" because every UI-driven ToTree
+            // call site assigns the value to ReplEngine.LastResult on
+            // the same beat (Run / Browse / Reinspect), so `_` resolves
+            // to the same instance. WatchEvaluator overrides with the
+            // user's actual expression so its sub-tree paths grow off
+            // the watch row's accessor rather than a stale `_`.
+            return BuildNode("(result)", value, depth: 0, state, rootPath);
         }
 
         private static ReplValueNode BuildNode(
-            string name, object value, int depth, BuildState state)
+            string name, object value, int depth, BuildState state, string path)
         {
             state.NodeCount++;
             if (state.NodeCount > state.Options.MaxTotalNodes)
             {
+                // Placeholder — Value/ExpressionPath stay null so
+                // context menus disable Inspect / Set as `_` /
+                // Add Watch for the truncation marker.
                 return new ReplValueNode
                 {
                     Name = name,
@@ -71,7 +81,9 @@ namespace RoslynRepl.Editor.Core
                     Name = name,
                     TypeName = "null",
                     Preview = "null",
-                    IsExpandable = false
+                    IsExpandable = false,
+                    Value = null,
+                    ExpressionPath = path,
                 };
             }
 
@@ -80,12 +92,18 @@ namespace RoslynRepl.Editor.Core
 
             if (value is UnityEngine.Object uo && uo == null)
             {
+                // Destroyed Unity object — keep the path so the user
+                // can still copy a snippet that references the
+                // (now-broken) accessor, but Value stays null so
+                // Inspect / Set as `_` correctly grey out.
                 return new ReplValueNode
                 {
                     Name = name,
                     TypeName = typeName,
                     Preview = $"{typeName} (missing/destroyed)",
-                    IsExpandable = false
+                    IsExpandable = false,
+                    Value = null,
+                    ExpressionPath = path,
                 };
             }
 
@@ -96,7 +114,9 @@ namespace RoslynRepl.Editor.Core
                     Name = name,
                     TypeName = typeName,
                     Preview = ValueFormatter.Format(value),
-                    IsExpandable = false
+                    IsExpandable = false,
+                    Value = value,
+                    ExpressionPath = path,
                 };
             }
 
@@ -107,7 +127,9 @@ namespace RoslynRepl.Editor.Core
                     Name = name,
                     TypeName = typeName,
                     Preview = "[circular reference]",
-                    IsExpandable = false
+                    IsExpandable = false,
+                    Value = value,
+                    ExpressionPath = path,
                 };
             }
 
@@ -118,7 +140,9 @@ namespace RoslynRepl.Editor.Core
                     Name = name,
                     TypeName = typeName,
                     Preview = ValueFormatter.Format(value) + "  …(depth limit)",
-                    IsExpandable = false
+                    IsExpandable = false,
+                    Value = value,
+                    ExpressionPath = path,
                 };
             }
 
@@ -136,20 +160,22 @@ namespace RoslynRepl.Editor.Core
                     Name = name,
                     TypeName = typeName,
                     Preview = ValueFormatter.Format(value),
-                    IsExpandable = true
+                    IsExpandable = true,
+                    Value = value,
+                    ExpressionPath = path
                 };
 
                 if (value is IDictionary dict)
                 {
-                    node.Children = BuildDictChildren(dict, depth, state);
+                    node.Children = BuildDictChildren(dict, depth, state, path);
                 }
                 else if (value is IEnumerable enumerable && !(value is string))
                 {
-                    node.Children = BuildEnumerableChildren(enumerable, depth, state);
+                    node.Children = BuildEnumerableChildren(enumerable, depth, state, path);
                 }
                 else
                 {
-                    node.Children = BuildMemberChildren(value, type, depth, state);
+                    node.Children = BuildMemberChildren(value, type, depth, state, path);
                 }
 
                 if (node.Children.Count == 0)
@@ -164,7 +190,7 @@ namespace RoslynRepl.Editor.Core
         }
 
         private static List<ReplValueNode> BuildMemberChildren(
-            object obj, Type type, int depth, BuildState state)
+            object obj, Type type, int depth, BuildState state, string parentPath)
         {
             var children = new List<ReplValueNode>();
             var bf = BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly;
@@ -185,7 +211,15 @@ namespace RoslynRepl.Editor.Core
                     try { v = f.GetValue(obj); }
                     catch (Exception ex) { children.Add(ErrorNode(f.Name, ex)); continue; }
 
-                    children.Add(BuildNode(f.Name, v, depth + 1, state));
+                    // Field accessors are always safe to splice into
+                    // an expression — propagate path only when the
+                    // parent had one (parent==null = unsafe lineage,
+                    // e.g. inside a dict bucket whose key wasn't
+                    // expressible).
+                    string childPath = parentPath == null
+                        ? null
+                        : parentPath + "." + f.Name;
+                    children.Add(BuildNode(f.Name, v, depth + 1, state, childPath));
                     if (state.NodeCount > state.Options.MaxTotalNodes) return children;
                 }
             }
@@ -223,7 +257,10 @@ namespace RoslynRepl.Editor.Core
                     catch (Exception ex)
                     { children.Add(ErrorNode(p.Name, ex)); continue; }
 
-                    children.Add(BuildNode(p.Name, v, depth + 1, state));
+                    string childPath = parentPath == null
+                        ? null
+                        : parentPath + "." + p.Name;
+                    children.Add(BuildNode(p.Name, v, depth + 1, state, childPath));
                     if (state.NodeCount > state.Options.MaxTotalNodes) return children;
                 }
             }
@@ -232,7 +269,7 @@ namespace RoslynRepl.Editor.Core
         }
 
         private static List<ReplValueNode> BuildEnumerableChildren(
-            IEnumerable enumerable, int depth, BuildState state)
+            IEnumerable enumerable, int depth, BuildState state, string parentPath)
         {
             var children = new List<ReplValueNode>();
             int idx = 0;
@@ -251,7 +288,13 @@ namespace RoslynRepl.Editor.Core
                         });
                         break;
                     }
-                    children.Add(BuildNode($"[{idx}]", item, depth + 1, state));
+                    // Numeric indexer is always C#-safe: `parent[0]`,
+                    // `parent[1]`, …. Inherits parent's safe/unsafe
+                    // lineage like every other path-accumulating step.
+                    string childPath = parentPath == null
+                        ? null
+                        : parentPath + "[" + idx + "]";
+                    children.Add(BuildNode($"[{idx}]", item, depth + 1, state, childPath));
                     idx++;
                     if (state.NodeCount > state.Options.MaxTotalNodes) break;
                 }
@@ -264,7 +307,7 @@ namespace RoslynRepl.Editor.Core
         }
 
         private static List<ReplValueNode> BuildDictChildren(
-            IDictionary dict, int depth, BuildState state)
+            IDictionary dict, int depth, BuildState state, string parentPath)
         {
             var children = new List<ReplValueNode>();
             int idx = 0;
@@ -288,7 +331,18 @@ namespace RoslynRepl.Editor.Core
                         break;
                     }
                     var keyPreview = ValueFormatter.Format(e.Key);
-                    children.Add(BuildNode($"[{keyPreview}]", e.Value, depth + 1, state));
+                    // Try to express the key as C# source so an
+                    // Add-Watch on this entry produces a path that
+                    // evaluates back to the same bucket. Non-
+                    // expressible keys (custom struct keys, control
+                    // chars in strings, flag-enum combinations)
+                    // surface as a null child path — Add Watch will
+                    // grey out for those rows.
+                    string encodedKey = TryEncodeDictKeyAsCSharp(e.Key);
+                    string childPath = (parentPath == null || encodedKey == null)
+                        ? null
+                        : parentPath + "[" + encodedKey + "]";
+                    children.Add(BuildNode($"[{keyPreview}]", e.Value, depth + 1, state, childPath));
                     idx++;
                     if (state.NodeCount > state.Options.MaxTotalNodes) break;
                 }
@@ -306,7 +360,72 @@ namespace RoslynRepl.Editor.Core
             TypeName = "<error>",
             Preview = $"[error: {ex.GetBaseException().Message}]",
             IsExpandable = false
+            // Value + ExpressionPath stay null — error nodes don't
+            // have a usable value, and re-asking for the same path
+            // would just re-throw the same exception.
         };
+
+        // Render a dictionary key as a C# source-text expression. The
+        // result is spliced into a path like `parent[<key>]`, so we
+        // only accept forms that would *compile* against a typical
+        // REPL context. Anything outside that returns null and the
+        // caller marks the row's ExpressionPath unsafe.
+        //
+        // - Numeric, bool, string, char, enum (single value only).
+        // - Strings: regular literal, backslash + quote escaped;
+        //   control chars reject so embedded \n / \t etc. don't
+        //   silently become wrong source. Unicode glyphs pass
+        //   through.
+        // - Enums: render type as `Namespace.Type.Value`, mapping
+        //   nested-type `+` separators to `.`. Flag combinations
+        //   (`"A, B"`-style) reject.
+        // - Reference types and unknown structs: null.
+        private static string TryEncodeDictKeyAsCSharp(object key)
+        {
+            if (key == null) return null;
+            switch (key)
+            {
+                case bool b:    return b ? "true" : "false";
+                case sbyte i:   return i.ToString(CultureInfo.InvariantCulture);
+                case byte i:    return i.ToString(CultureInfo.InvariantCulture);
+                case short i:   return i.ToString(CultureInfo.InvariantCulture);
+                case ushort i:  return i.ToString(CultureInfo.InvariantCulture);
+                case int i:     return i.ToString(CultureInfo.InvariantCulture);
+                case uint i:    return i.ToString(CultureInfo.InvariantCulture) + "u";
+                case long i:    return i.ToString(CultureInfo.InvariantCulture) + "L";
+                case ulong i:   return i.ToString(CultureInfo.InvariantCulture) + "uL";
+                case float f:   return f.ToString("R", CultureInfo.InvariantCulture) + "f";
+                case double d:  return d.ToString("R", CultureInfo.InvariantCulture);
+                case decimal m: return m.ToString(CultureInfo.InvariantCulture) + "m";
+                case char c:
+                    if (char.IsControl(c)) return null;
+                    if (c == '\'' || c == '\\') return "'\\" + c + "'";
+                    return "'" + c + "'";
+                case string s:
+                    foreach (var ch in s) if (char.IsControl(ch)) return null;
+                    return "\"" + s.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
+                case Enum e:
+                {
+                    var s = e.ToString();
+                    // Flag combinations land here as comma-separated
+                    // names — that won't compile in `dict[Flags.A,
+                    // B]` form without parens, and even with parens
+                    // the meaning is ambiguous, so reject.
+                    if (s.Contains(",")) return null;
+                    var t = e.GetType();
+                    // CSharpTypeName lives in the Patches layer; we
+                    // can't take a hard dep on it from Core. The
+                    // FullName + `+` → `.` substitution covers the
+                    // realistic cases (top-level + nested enums) and
+                    // matches the rendered form Patches would emit.
+                    var typeExpr = t.FullName?.Replace('+', '.');
+                    if (string.IsNullOrEmpty(typeExpr)) return null;
+                    return typeExpr + "." + s;
+                }
+                default:
+                    return null;
+            }
+        }
 
         // Types treated as atomic leaves — preview is the whole story, no expand.
         private static readonly HashSet<Type> _leafLikeTypes = new HashSet<Type>
