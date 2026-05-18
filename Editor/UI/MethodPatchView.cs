@@ -1432,24 +1432,38 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             }
         }
 
-        // Approximate line-pitch of the body's TextElement. Reads from
-        // the resolved style when available (so a custom skin scales
-        // the marker), falls back to 14px which is the editor default
-        // for monospace-ish TextFields. The "+ 2" gives the marker a
-        // touch of vertical breathing room so the highlight doesn't
-        // visually merge with the line below.
+        // Line-pitch of the body's TextElement. The most accurate
+        // source is MeasureTextSize on a single glyph — its y output
+        // is ascender + descender + line gap, which is exactly the
+        // distance between consecutive baselines and so what we want
+        // for marker.top stepping. Earlier we used `fontSize + 2`,
+        // which under-shot on a typical 12px Roboto skin (~16px real
+        // line height) and the marker walked progressively higher
+        // than the actual glyph on every successive line. Falls back
+        // to fontSize × 1.35 (Unity's default line-height multiplier)
+        // and then to a hardcoded 16 when nothing else is available.
         private float EstimateBodyLineHeight()
         {
-            float fs = 0f;
             try
             {
                 var te = _bodyField?.Q<TextElement>();
-                if (te != null) fs = te.resolvedStyle.fontSize;
-                if (fs <= 0f && _bodyField != null) fs = _bodyField.resolvedStyle.fontSize;
+                if (te != null)
+                {
+                    var probe = te.MeasureTextSize(
+                        "A", 0f, VisualElement.MeasureMode.Undefined,
+                        0f, VisualElement.MeasureMode.Undefined);
+                    if (probe.y > 0f) return probe.y;
+                    float fs = te.resolvedStyle.fontSize;
+                    if (fs > 0f) return fs * 1.35f;
+                }
+                if (_bodyField != null)
+                {
+                    float fs = _bodyField.resolvedStyle.fontSize;
+                    if (fs > 0f) return fs * 1.35f;
+                }
             }
-            catch { /* fall through to default */ }
-            if (fs <= 0f) fs = 12f;
-            return fs + 2f;
+            catch { /* fall through */ }
+            return 16f;
         }
 
         // Drop the parent ScrollView to the match line. Uses
@@ -1470,17 +1484,30 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             {
                 if (scroll?.contentContainer == null || _bodyField == null) return;
                 float lineHeight = EstimateBodyLineHeight();
-                // Project (0, lineTop) in the body field's local
-                // coordinates into the scroll container's coord space
-                // — that's the same space scrollOffset is measured
-                // in, so we can hand the resulting y straight to the
-                // ScrollView without further math.
+                // Project (0, contentTop + lineTop) into the scroll
+                // container's coord space. Using te's contentRect.y
+                // when available accounts for the body's top padding
+                // — that's the same offset ShowBodyMarker applies,
+                // so the centring math agrees with where the marker
+                // ends up on screen.
                 Vector2 anchor;
                 try
                 {
-                    anchor = _bodyField.ChangeCoordinatesTo(
-                        scroll.contentContainer,
-                        new Vector2(0f, capturedLine * lineHeight));
+                    var te = _bodyField.Q<TextElement>();
+                    if (te != null)
+                    {
+                        var content = te.contentRect;
+                        anchor = te.ChangeCoordinatesTo(
+                            scroll.contentContainer,
+                            new Vector2(0f, content.y + capturedLine * lineHeight));
+                    }
+                    else
+                    {
+                        var bodyContent = _bodyField.contentRect;
+                        anchor = _bodyField.ChangeCoordinatesTo(
+                            scroll.contentContainer,
+                            new Vector2(0f, bodyContent.y + capturedLine * lineHeight));
+                    }
                 }
                 catch
                 {
@@ -1545,9 +1572,23 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
                     var matchSize  = te.MeasureTextSize(
                         matchSpan, 0f, VisualElement.MeasureMode.Undefined,
                         0f, VisualElement.MeasureMode.Undefined);
+                    // contentRect tells us where text drawing
+                    // actually starts inside the TextElement — its
+                    // (x,y) is the top-left of the padding-inset
+                    // area, which is where the first glyph sits.
+                    // Without this the marker landed flush against
+                    // the TextElement's border-box origin, ignoring
+                    // any padding the editor skin painted between
+                    // the border and the text. The offset was small
+                    // (a few px) but visible — especially on lines
+                    // with no leading whitespace, where the gap
+                    // between the marker's left edge and the actual
+                    // glyph wasn't masked by indent.
+                    var content = te.contentRect;
                     origin = te.ChangeCoordinatesTo(
                         markerParent,
-                        new Vector2(prefixSize.x, lineIndex * lineHeight));
+                        new Vector2(content.x + prefixSize.x,
+                                    content.y + lineIndex * lineHeight));
                     matchWidth = matchSize.x;
                     usePerSpan = matchWidth > 0.5f;
                 }
@@ -1566,9 +1607,10 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
                 // when precise glyph metrics aren't available.
                 try
                 {
+                    var bodyContent = _bodyField.contentRect;
                     origin = _bodyField.ChangeCoordinatesTo(
                         markerParent,
-                        new Vector2(0f, lineIndex * lineHeight));
+                        new Vector2(0f, bodyContent.y + lineIndex * lineHeight));
                 }
                 catch
                 {

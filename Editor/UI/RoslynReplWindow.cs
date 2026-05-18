@@ -793,24 +793,23 @@ return UnityEngine.Application.unityVersion;";
                 return;
             }
 
-            // While the Find overlay is open, navigation keys steer
-            // search regardless of where focus actually sits. Without
-            // this hook the first Next/Prev moves keyboard focus into
-            // the Patches body / code editor, and the user's next
-            // Enter would insert a newline instead of advancing the
-            // search. Notepad++ / VS Code both treat the find bar as
-            // an "active mode" that owns Enter / F3 until dismissed;
-            // matching that contract is what users will expect.
-            //
-            // Esc here mirrors the overlay's own Esc handler so a
-            // close from the body editor (or any other panel) still
-            // works.
+            // While the Find overlay is open, dedicated search
+            // shortcuts steer navigation from anywhere in the window:
+            //   F3 / Shift+F3 → Next / Prev
+            //   Esc            → close
+            // Enter is *deliberately* not in this list. The Find
+            // input has its own Enter handler (overlay
+            // OnInputKeyDown), but at the window level we leave Enter
+            // alone so that typing into the Patches body, the code
+            // editor, the Watch input, or any other multi-line /
+            // commit-on-Enter field still does what the user
+            // expects. F3 fills the "advance Find regardless of
+            // focus" role without colliding with text entry.
             if (_findController != null && _findController.IsActive)
             {
-                bool isEnter = (evt.keyCode == KeyCode.Return || evt.keyCode == KeyCode.KeypadEnter)
-                               && !evt.ctrlKey && !evt.commandKey && !evt.altKey;
-                bool isF3 = evt.keyCode == KeyCode.F3 && !evt.ctrlKey && !evt.commandKey && !evt.altKey;
-                if (isEnter || isF3)
+                bool isF3 = evt.keyCode == KeyCode.F3
+                            && !evt.ctrlKey && !evt.commandKey && !evt.altKey;
+                if (isF3)
                 {
                     if (evt.shiftKey) _findController.Prev();
                     else _findController.Next();

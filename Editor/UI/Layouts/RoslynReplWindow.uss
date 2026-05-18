@@ -708,10 +708,16 @@
    sets top / left / width / height per-hit. Semi-transparent so the
    underlying glyphs stay readable. The rounded corners make the
    strip feel like a marker pen swipe rather than a hard selection
-   rectangle. */
+   rectangle.
+
+   No left/right border. An earlier version had a 2px warm-orange
+   border-left for visual punch, but UI Toolkit draws border outside
+   the box so the marker's visible left edge sat 2px to the left of
+   the computed origin — invisible on lines with leading indent
+   (the 2px was masked by the indent) but obvious on the first line
+   where there's no indent to hide it. The accent reads fine from
+   the background fill alone. */
 .rr-find-body-marker {
     background-color: rgba(255, 215, 60, 0.45);
     border-radius: 2px;
-    border-left-width: 2px;
-    border-left-color: rgb(255, 180, 60);
 }
