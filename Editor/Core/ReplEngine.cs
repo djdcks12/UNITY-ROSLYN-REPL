@@ -52,7 +52,7 @@ namespace RoslynRepl.Editor.Core
         public static event Action<object> LastResultChanged;
 
         /// <summary>Clears the carry-over <c>_</c> value.</summary>
-        public static void ResetLastResult() => AssignLastResult(null);
+        public static void ResetLastResult() => AssignLastResult(null, force: false);
 
         /// <summary>
         /// Replaces the carry-over <c>_</c> value from editor UI flows that
@@ -61,22 +61,50 @@ namespace RoslynRepl.Editor.Core
         /// a snippet return would, so follow-up snippets and watches should
         /// see the same object through <c>_</c>.
         /// </summary>
-        public static void SetLastResult(object value) => AssignLastResult(value);
+        public static void SetLastResult(object value) => AssignLastResult(value, force: true);
 
         // Single chokepoint for every LastResult mutation — ResetLastResult,
         // SetLastResult, and the in-Execute success path all route through
-        // here so LastResultChanged fires exactly once per real transition
-        // and we never have one path that updates the field but skips the
-        // event. ReferenceEquals is intentional: value-type equality on an
-        // arbitrary `object` is expensive and would also defeat the
-        // intent — two distinct instances that happen to be Equals should
-        // still count as a change since follow-up snippets get a different
-        // identity through `_`.
-        private static void AssignLastResult(object value)
+        // here so LastResultChanged fires consistently and we never have one
+        // path that updates the field but skips the event.
+        //
+        // force flag:
+        //   false (Reset) — skip the notify when the field is already at
+        //     the target value. ResetLastResult on an already-null engine
+        //     is a true no-op so subscribers don't see spurious null→null
+        //     transitions.
+        //   true (Set / successful Execute) — notify even when the new
+        //     value's reference equals the current one. Same-reference
+        //     assignments happen in real workflows: `_.name = "Hero";
+        //     return _;` returns the same GameObject, but its visible
+        //     state (badge text, watch preview) changed. Skipping the
+        //     event here left the toolbar badge frozen on the prior name.
+        //
+        // Subscribers are invoked through GetInvocationList() with a
+        // per-handler try/catch so a UI subscriber that throws — a badge
+        // refresh hitting a disposed VisualElement, an event handler
+        // calling into a torn-down panel — can't propagate up through
+        // Execute's outer catch and convert a successful snippet into a
+        // ReplResult.RuntimeError. The carry-over field still updates;
+        // the failure is logged so the diagnostic isn't silent.
+        private static void AssignLastResult(object value, bool force)
         {
-            if (ReferenceEquals(LastResult, value)) return;
+            if (!force && ReferenceEquals(LastResult, value)) return;
             LastResult = value;
-            LastResultChanged?.Invoke(value);
+
+            var ev = LastResultChanged;
+            if (ev == null) return;
+            foreach (var d in ev.GetInvocationList())
+            {
+                try { ((Action<object>)d).Invoke(value); }
+                catch (Exception ex)
+                {
+                    UnityEngine.Debug.LogWarning(
+                        "[Roslyn REPL] LastResultChanged subscriber " +
+                        $"{(d.Target?.GetType().Name ?? "(static)")}.{d.Method.Name} threw: " +
+                        $"{ex.GetType().Name}: {ex.Message}");
+                }
+            }
         }
 
         /// <summary>
@@ -219,7 +247,7 @@ namespace RoslynRepl.Editor.Core
                 // instead of the user's actual previous value.
                 if (value != null && options.UpdateLastResult)
                 {
-                    AssignLastResult(value);
+                    AssignLastResult(value, force: true);
                 }
                 return ReplResult.Success(value, FormatValue(value), ClassifyLogs(capture.End()), sw.Elapsed);
             }

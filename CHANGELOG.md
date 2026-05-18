@@ -13,7 +13,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Object Browser inspect now emits an inline **`→ now available as \`_\``** info line right above the rendered tree. Without that the user had to notice the toolbar badge separately to realise their next snippet / watch can reach the value through `_`; the inline mention makes the carry-over discoverable from the same glance as the inspection itself.
 
 ### Changed (`ReplEngine` carry-over plumbing)
-- `ReplEngine.LastResult` mutations now route through a single private `AssignLastResult` chokepoint (`SetLastResult`, `ResetLastResult`, and the in-Execute success path all funnel through it). The new public `LastResultChanged` event fires from there exactly once per real transition — `ReferenceEquals` guards against firing on no-op reassigns. Subscribers (the toolbar badge today, any future surfaces) don't need to poll and can't see an updated field without the matching event.
+- `ReplEngine.LastResult` mutations now route through a single private `AssignLastResult` chokepoint (`SetLastResult`, `ResetLastResult`, and the in-Execute success path all funnel through it). The new public `LastResultChanged` event fires from there with a `force` flag so explicit assignment (Set / successful Execute) notifies subscribers even when the new reference equals the current one — same-reference reassigns happen naturally when a snippet mutates and returns the same object (`_.name = "Hero"; return _;`) and the badge would otherwise freeze on the prior name. Reset keeps the `ReferenceEquals` short-circuit so a no-op `ResetLastResult()` on an already-null engine doesn't churn the UI.
+- Subscribers are invoked through `GetInvocationList()` with a per-handler `try / catch`. A misbehaving UI surface that throws from `LastResultChanged` (a torn-down panel, a stale VisualElement) can no longer propagate up through `Execute`'s outer catch and convert a successful snippet into a `ReplResult.RuntimeError`. The carry-over field still updates and remaining subscribers still fire; the failure surfaces as a single `Debug.LogWarning` so the diagnostic isn't silent.
+
+### Changed (`_` discoverability)
+- Badge tooltip now spells out how to use the carry-over (`Use \`_\` directly in Code or Watch: return _;  _.someField`) so a newer user who's never seen the wrapper static doesn't have to guess what "available" means.
+- Object Browser inspect's inline mention upgrades from `→ now available as \`_\`` to `→ available as \`_\` in Code and Watch. Try: return _;` — one concrete invocation removes the "available where?" ambiguity.
 
 ## [0.7.4] - 2026-05-18
 

@@ -488,7 +488,10 @@ return UnityEngine.Application.unityVersion;";
                 _underscoreBadge.tooltip =
                     "Current `_` target.\n" +
                     "Click to re-inspect the value in Output.\n" +
-                    "✕ clears the carry-over so the next snippet sees `_` as null.";
+                    "✕ clears the carry-over so the next snippet sees `_` as null.\n\n" +
+                    "Use `_` directly in Code or Watch:\n" +
+                    "    return _;\n" +
+                    "    _.someField";
             }
             if (_underscoreClearBtn != null)
             {
@@ -1093,7 +1096,13 @@ return UnityEngine.Application.unityVersion;";
             // `_`; emitting it inline next to the rendered tree
             // makes the carry-over discoverable from the same
             // glance as the inspection itself.
-            AppendOutput("→ now available as `_`", "info");
+            //
+            // The "Try: return _;" hint addresses the second leg of
+            // the discoverability gap — a newer user might still not
+            // realise "available as `_`" means they can literally
+            // type `_` into the Code editor or a Watch expression.
+            // One concrete example removes the guesswork.
+            AppendOutput("→ available as `_` in Code and Watch. Try: return _;", "info");
             AppendResult(SimpleObjectSerializer.ToTree(value, BuildOutputTreeOptions()));
             if (_durationLabel != null) _durationLabel.text = string.Empty;
             if (_outputSummary != null) _outputSummary.text = "Browsed";
