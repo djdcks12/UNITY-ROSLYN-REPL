@@ -5,6 +5,7 @@ using UnityEditor;
 using UnityEditor.UIElements;
 using UnityEngine.UIElements;
 using RoslynRepl.Editor.Core;
+using RoslynRepl.Editor.Patches;
 
 namespace RoslynRepl.Editor.UI
 {
@@ -322,8 +323,17 @@ namespace RoslynRepl.Editor.UI
             evt.menu.AppendAction("Copy Type Name",
                 _ => OnRowAction?.Invoke(entry, BrowserRowAction.CopyTypeName));
 
+            // Copy Inspect Snippet generates source code, so it only
+            // makes sense when the row's type can actually be
+            // rendered as C# (closed types, nested via `.`, generics
+            // expanded). Open generics, generic parameters, and rows
+            // without any Type at all surface as Disabled so the
+            // menu doesn't promise a snippet it can't produce.
+            var snippetType = entry.Value?.GetType() ?? entry.DeclaredType;
+            bool canSnippet = snippetType != null && CSharpTypeName.IsRenderable(snippetType);
             evt.menu.AppendAction("Copy Inspect Snippet",
-                _ => OnRowAction?.Invoke(entry, BrowserRowAction.CopyInspectSnippet));
+                _ => OnRowAction?.Invoke(entry, BrowserRowAction.CopyInspectSnippet),
+                canSnippet ? DropdownMenuAction.Status.Normal : DropdownMenuAction.Status.Disabled);
         }
 
         private void BindRow(VisualElement ve, int index)

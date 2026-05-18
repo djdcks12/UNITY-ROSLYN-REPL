@@ -5,6 +5,7 @@ using UnityEngine;
 using UnityEngine.UIElements;
 using RoslynRepl.Editor.Core;
 using RoslynRepl.Editor.Diagnostics;
+using RoslynRepl.Editor.Patches;
 using RoslynRepl.Editor.UI.Find;
 
 namespace RoslynRepl.Editor.UI
@@ -1173,6 +1174,13 @@ return UnityEngine.Application.unityVersion;";
         // / watch, leave Output alone. The toolbar badge picks the
         // change up through LastResultChanged so the user still gets
         // a visible confirmation without the Output panel scrolling.
+        //
+        // Watch refresh: the action's main use-case is "pin this
+        // object so my `_.foo` watches track it from now on", so a
+        // Watch panel left holding evaluations against the *previous*
+        // `_` is the worst-case stale-data trap. Same _watch.Refresh
+        // commit point that RenderBrowserInspect uses pulls the
+        // expressions through the new value immediately.
         private void SetBrowserEntryAsUnderscore(InstanceEntry entry)
         {
             if (entry == null) return;
@@ -1184,6 +1192,7 @@ return UnityEngine.Application.unityVersion;";
                 return;
             }
             ReplEngine.SetLastResult(value);
+            _watch?.Refresh();
             if (_outputSummary != null) _outputSummary.text = "Bound `_`";
         }
 
@@ -1194,8 +1203,22 @@ return UnityEngine.Application.unityVersion;";
             // declared type is an abstract base and the row was
             // surfaced for a concrete subclass); fall back to
             // DeclaredType and finally to the display TypeName.
+            //
+            // Render through CSharpTypeName so nested types come out
+            // as `Outer.Inner` instead of the reflection `Outer+Inner`
+            // form, and closed generics resolve to `List<int>` rather
+            // than the assembly-qualified backtick syntax. Falls back
+            // to the display TypeName when the type isn't renderable
+            // (open generic parameters etc.) — that's a display string
+            // and not guaranteed valid C#, but it's the best we can
+            // offer when the type itself can't be expressed as source.
             var type = entry.Value?.GetType() ?? entry.DeclaredType;
-            var name = type?.FullName ?? entry.TypeName;
+            string name = null;
+            if (type != null && CSharpTypeName.IsRenderable(type))
+            {
+                name = CSharpTypeName.Render(type);
+            }
+            if (string.IsNullOrEmpty(name)) name = entry.TypeName;
             if (string.IsNullOrEmpty(name))
             {
                 AppendOutput("(can't copy type — no type information available)", "warning");
@@ -1221,31 +1244,70 @@ return UnityEngine.Application.unityVersion;";
         // Build a small C# snippet that re-locates the instance.
         // Category drives the shape: MonoBehaviour rows use the
         // scene-wide search (FindFirstObjectByType), ScriptableObject
-        // rows fall back to AssetDatabase, singletons get a comment-
-        // only template since we can't infer the accessor name. The
-        // snippets are intentionally minimal — one line per common
-        // case so the user can paste, tweak, and Run.
+        // rows use the row's actual asset path (the previous
+        // type-wide FindAssets("t:T") would land on whichever asset
+        // came first in the search — wrong row for projects with
+        // multiple SOs of the same type), singletons get a comment-
+        // only template since we can't infer the accessor name.
+        //
+        // Type expressions go through CSharpTypeName so nested /
+        // generic types come out as valid C# source — the reflection
+        // FullName form (Outer+Inner, generic backticks, assembly-
+        // qualified arguments) doesn't compile when pasted. Bail
+        // with a null result when no real Type is available or the
+        // type isn't renderable as source; the menu surface gates
+        // this action behind the same check so a user can't ask for
+        // a snippet that would fail to copy.
         private static string BuildBrowserInspectSnippet(InstanceEntry entry)
         {
             var type = entry.Value?.GetType() ?? entry.DeclaredType;
-            var typeName = type?.FullName ?? entry.TypeName;
-            if (string.IsNullOrEmpty(typeName)) return null;
+            if (type == null) return null;
+            if (!CSharpTypeName.IsRenderable(type)) return null;
+            string typeExpr = CSharpTypeName.Render(type);
 
             switch (entry.Category)
             {
                 case InstanceCategory.MonoBehaviour:
-                    return $"return UnityEngine.Object.FindFirstObjectByType<{typeName}>();";
+                    return $"return UnityEngine.Object.FindFirstObjectByType<{typeExpr}>();";
+
                 case InstanceCategory.ScriptableObject:
-                    // ScriptableObject assets live on disk — surface
-                    // the AssetDatabase equivalent so the user
-                    // doesn't have to remember the GUID dance. Short
-                    // name on the t: filter keeps the search cheap
-                    // even when the asset's full namespace is long.
-                    var shortName = type?.Name ?? typeName;
+                    // Path-based snippet when the row's live value is
+                    // an on-disk asset. Sub-asset entries (e.g. a
+                    // baked material packed inside an FBX) live at
+                    // the same path as their main asset, so
+                    // LoadAssetAtPath would return the wrong object;
+                    // filter by name through LoadAllAssetsAtPath
+                    // instead. The type-wide template is only used
+                    // when there's no path at all (a ScriptableObject
+                    // created in-memory via CreateInstance and
+                    // surfaced through a singleton-like accessor).
+                    if (entry.Value is UnityEngine.Object soAsset && soAsset != null)
+                    {
+                        var assetPath = UnityEditor.AssetDatabase.GetAssetPath(soAsset);
+                        if (!string.IsNullOrEmpty(assetPath))
+                        {
+                            string verbatimPath = EscapeVerbatimStringLiteral(assetPath);
+                            if (UnityEditor.AssetDatabase.IsMainAsset(soAsset))
+                            {
+                                return $"return UnityEditor.AssetDatabase.LoadAssetAtPath<{typeExpr}>(@\"{verbatimPath}\");";
+                            }
+                            string verbatimName = EscapeVerbatimStringLiteral(soAsset.name ?? string.Empty);
+                            return
+$@"return UnityEditor.AssetDatabase.LoadAllAssetsAtPath(@""{verbatimPath}"")
+    .OfType<{typeExpr}>()
+    .FirstOrDefault(a => a.name == @""{verbatimName}"");";
+                        }
+                    }
+                    // No path — fall back to the type-wide template
+                    // with a comment flagging the imprecision so the
+                    // user knows the snippet may not pick the same
+                    // row when multiple in-memory instances exist.
                     return
-$@"return UnityEditor.AssetDatabase.FindAssets(""t:{shortName}"")
-    .Select(g => UnityEditor.AssetDatabase.LoadAssetAtPath<{typeName}>(UnityEditor.AssetDatabase.GUIDToAssetPath(g)))
+$@"// {typeExpr} has no asset path — this template returns the first match by type.
+return UnityEditor.AssetDatabase.FindAssets(""t:{type.Name}"")
+    .Select(g => UnityEditor.AssetDatabase.LoadAssetAtPath<{typeExpr}>(UnityEditor.AssetDatabase.GUIDToAssetPath(g)))
     .FirstOrDefault();";
+
                 case InstanceCategory.Singleton:
                     // Locator scans for static accessors at scan
                     // time; we don't carry the accessor name through
@@ -1253,11 +1315,21 @@ $@"return UnityEditor.AssetDatabase.FindAssets(""t:{shortName}"")
                     // with a clear TODO rather than a wrong default
                     // (e.g. assuming `.Instance` when the project
                     // uses `.I` / `.Singleton` / a property name).
-                    return $"// {typeName} — replace with your project's accessor (e.g. {type?.Name}.Instance)\nreturn null;";
+                    return $"// {typeExpr} — replace with your project's accessor (e.g. {type.Name}.Instance)\nreturn null;";
+
                 default:
-                    return $"return UnityEngine.Object.FindFirstObjectByType<{typeName}>();";
+                    return $"return UnityEngine.Object.FindFirstObjectByType<{typeExpr}>();";
             }
         }
+
+        // Escape for a C# verbatim string literal (@"..."): only the
+        // double-quote needs to be doubled. Backslashes / forward
+        // slashes / dots pass through unchanged, which is exactly
+        // what we want for asset paths (Unity always uses '/' even on
+        // Windows, but a defensive escape keeps the snippet robust
+        // against future format changes).
+        private static string EscapeVerbatimStringLiteral(string s)
+            => (s ?? string.Empty).Replace("\"", "\"\"");
 
         private void OpenMethodPickerForType(Type type)
         {
