@@ -1,8 +1,10 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
 using UnityEngine.UIElements;
 using RoslynRepl.Editor.Patches;
+using RoslynRepl.Editor.UI.Find;
 
 namespace RoslynRepl.Editor.UI
 {
@@ -20,8 +22,32 @@ namespace RoslynRepl.Editor.UI
     ///     / `__call` helpers when the rewriter picks the wrong
     ///     overload.
     /// </summary>
-    public class MethodPatchView
+    public class MethodPatchView : IReplFindable
     {
+        // Per-spec block references populated by RebuildActiveList.
+        // Used by the Ctrl+F overlay to scroll to + highlight matching
+        // patch rows without re-querying the visual tree.
+        private readonly Dictionary<string, VisualElement> _rowBlocks = new();
+        private ScrollView _activeListScroll;
+
+        /// <summary>Raised after the active patches list rebuilds. The
+        /// Find overlay subscribes so it can re-collect hits against
+        /// the fresh row blocks; without it the hit list would point
+        /// at disposed VisualElements after any registry mutation.</summary>
+        public event Action ContentRebuilt;
+
+        /// <summary>
+        /// Hook the host window sets to flip the Output / Patches
+        /// mode tab to Patches before a Find hit scrolls into view.
+        /// Patches lives behind an output-tab toggle — if the user
+        /// is in Output mode when they jump to a Patches hit,
+        /// scrolling a hidden VisualElement does nothing visible.
+        /// Calling this callback first makes sure the pane is on
+        /// screen, then ScrollIntoView lands somewhere the user
+        /// can actually see.
+        /// </summary>
+        public Action OnFocusRequested;
+
         private const string DefaultBody =
 @"// Write the patch body the same way you'd write the source —
 // `hp -= 10`, `Singleton.Instance.PrivateField`, `base.OnEnable()`
@@ -34,6 +60,18 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
         private TextField _methodField;
         private TextField _paramsField;
         private TextField _bodyField;
+        // Body editor's parent ScrollView and a yellow marker overlay
+        // that sits inside it. The marker is how the Find overlay
+        // points at a body match — Unity's native TextField selection
+        // only paints while the field has keyboard focus, so refocusing
+        // the search input to keep the user typing erased the visual
+        // cue. The overlay rectangle is independent of focus and
+        // scrolls with the body content (it's parented to the
+        // ScrollView's content container), so the user can see exactly
+        // which line / span the controller is currently on while still
+        // typing into the Find bar.
+        private ScrollView _bodyScroll;
+        private VisualElement _bodyMarker;
 
         // Diff section. _diffLines is the scrollable colored line
         // view, _diffSummary shows "+N -M" in the header, the two
@@ -212,10 +250,10 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             // scrolls *inside the editor* without the rest of the
             // view moving. flex-grow=1 on the ScrollView absorbs the
             // leftover pane height.
-            var bodyScroll = new ScrollView(ScrollViewMode.Vertical);
-            bodyScroll.style.flexGrow = 1;
-            bodyScroll.style.minHeight = 140;
-            bodyScroll.style.backgroundColor = new StyleColor(new Color(0.14f, 0.14f, 0.14f));
+            _bodyScroll = new ScrollView(ScrollViewMode.Vertical);
+            _bodyScroll.style.flexGrow = 1;
+            _bodyScroll.style.minHeight = 140;
+            _bodyScroll.style.backgroundColor = new StyleColor(new Color(0.14f, 0.14f, 0.14f));
 
             _bodyField = new TextField { multiline = true, value = DefaultBody };
             _bodyField.style.whiteSpace = WhiteSpace.Normal;
@@ -225,8 +263,22 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             // platforms cap unbounded TextField height at zero, so
             // give it a sane minimum.
             _bodyField.style.minHeight = 200;
-            bodyScroll.Add(_bodyField);
-            _host.Add(bodyScroll);
+            _bodyScroll.Add(_bodyField);
+
+            // Find-overlay marker. Lives inside the ScrollView's
+            // content container so it scrolls together with the body
+            // text. picking:Ignore so it never eats clicks meant for
+            // the editor underneath. The marker is positioned per-hit
+            // by ShowBodyMarker() and toggled visible only while a
+            // body hit is the current Find selection.
+            _bodyMarker = new VisualElement();
+            _bodyMarker.AddToClassList("rr-find-body-marker");
+            _bodyMarker.style.position = Position.Absolute;
+            _bodyMarker.style.display = DisplayStyle.None;
+            _bodyMarker.pickingMode = PickingMode.Ignore;
+            _bodyScroll.contentContainer.Add(_bodyMarker);
+
+            _host.Add(_bodyScroll);
 
             // Actions + status. Single row, doesn't scroll.
             var actionRow = new VisualElement();
@@ -338,10 +390,36 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             // settles. Pause + reassign on each change so the
             // eventual diff runs against the final form state, not
             // a stale snapshot from the start of the burst.
-            _bodyField.RegisterValueChangedCallback(_ => ScheduleDiffRefresh());
-            _targetField.RegisterValueChangedCallback(_ => ScheduleDiffRefresh());
-            _methodField.RegisterValueChangedCallback(_ => ScheduleDiffRefresh());
-            _paramsField.RegisterValueChangedCallback(_ => ScheduleDiffRefresh());
+            _bodyField.RegisterValueChangedCallback(_ =>
+            {
+                ScheduleDiffRefresh();
+                // Body content changed — any captured match indices in
+                // the Find overlay's hit list are now stale (the user
+                // could have inserted text above a previously-found
+                // match, shifting every later index). Raise
+                // ContentRebuilt so the Find controller recomputes
+                // against the fresh body string. Without this, typing
+                // into the body while the Find bar is open kept the
+                // old hit positions and the marker would drift off
+                // the match — the user had to re-type the query to
+                // unstick it.
+                ContentRebuilt?.Invoke();
+            });
+            _targetField.RegisterValueChangedCallback(_ =>
+            {
+                ScheduleDiffRefresh();
+                ContentRebuilt?.Invoke();
+            });
+            _methodField.RegisterValueChangedCallback(_ =>
+            {
+                ScheduleDiffRefresh();
+                ContentRebuilt?.Invoke();
+            });
+            _paramsField.RegisterValueChangedCallback(_ =>
+            {
+                ScheduleDiffRefresh();
+                ContentRebuilt?.Invoke();
+            });
 
             // Auto-reapply toggle. Same setting as the Tools menu
             // item, exposed inline here so users browsing the
@@ -386,11 +464,12 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             // max-height share so a long list doesn't push the body
             // editor offscreen. flex-shrink=0 so the column layout
             // doesn't squeeze it to zero when the body is large.
-            var listScroll = new ScrollView(ScrollViewMode.Vertical);
-            listScroll.style.flexShrink = 0;
-            listScroll.style.minHeight = 80;
-            listScroll.style.maxHeight = 160;
-            listScroll.style.backgroundColor = new StyleColor(new Color(0.14f, 0.14f, 0.14f));
+            _activeListScroll = new ScrollView(ScrollViewMode.Vertical);
+            _activeListScroll.style.flexShrink = 0;
+            _activeListScroll.style.minHeight = 80;
+            _activeListScroll.style.maxHeight = 160;
+            _activeListScroll.style.backgroundColor = new StyleColor(new Color(0.14f, 0.14f, 0.14f));
+            var listScroll = _activeListScroll;
 
             _activeListContainer = new VisualElement();
             listScroll.Add(_activeListContainer);
@@ -1049,6 +1128,7 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
         {
             if (_activeListContainer == null) return;
             _activeListContainer.Clear();
+            _rowBlocks.Clear();
 
             var specs = PatchRegistry.Specs.ToList();
             if (specs.Count == 0)
@@ -1059,6 +1139,7 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
                 empty.style.paddingTop = 6;
                 empty.style.paddingBottom = 6;
                 _activeListContainer.Add(empty);
+                ContentRebuilt?.Invoke();
                 return;
             }
 
@@ -1114,7 +1195,8 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
                 var infoText = dormantAutoOff
                     ? $"{s.TargetTypeName}.{s.MethodName}({paramsDisplay})  (auto-off)"
                     : $"{s.TargetTypeName}.{s.MethodName}({paramsDisplay})";
-                var info = new Label(infoText);
+                var info = new Label();
+                ReplFindHighlight.BindLabelText(info, infoText);
                 info.style.flexGrow = 1;
                 info.style.color = new StyleColor(dormantAutoOff
                     ? new Color(0.65f, 0.65f, 0.65f)
@@ -1169,7 +1251,8 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
                 if (s.Status == PatchStatus.Failed && !string.IsNullOrEmpty(s.LastError))
                 {
                     var firstLine = s.LastError.Split('\n')[0];
-                    var errLabel = new Label("↳ " + firstLine);
+                    var errLabel = new Label();
+                    ReplFindHighlight.BindLabelText(errLabel, "↳ " + firstLine);
                     errLabel.style.color = new StyleColor(new Color(0.95f, 0.65f, 0.65f));
                     errLabel.style.fontSize = 10;
                     errLabel.style.unityFontStyleAndWeight = FontStyle.Italic;
@@ -1184,7 +1267,420 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
                 }
 
                 _activeListContainer.Add(block);
+                // Keep a per-spec reference so the Ctrl+F overlay can
+                // resolve hits back to the block visual without
+                // re-querying the tree. Keyed by spec.Key — duplicate
+                // keys can't happen because PatchRegistry indexes by
+                // the same triple.
+                if (!string.IsNullOrEmpty(s.Key))
+                    _rowBlocks[s.Key] = block;
+            }
+
+            // Tell the Find overlay the visible patches list has
+            // committed for this rebuild.
+            ContentRebuilt?.Invoke();
+        }
+
+        // ─── Find overlay (Ctrl+F) ──────────────────────────────
+
+        public void CollectMatches(string query, List<ReplFindHit> hits)
+        {
+            if (string.IsNullOrEmpty(query)) return;
+            var q = query;
+
+            // Form fields first — the user's mental model of "stuff
+            // in Patches" includes the in-progress patch they're
+            // editing (Type / Method / Params / Body), not just the
+            // committed rows in the active list. Without these the
+            // most common search target (text inside the body
+            // editor) was invisible to Ctrl+F.
+            //
+            // None of the field hits call Focus() / SelectRange() on
+            // the TextField — that would steal the keyboard from the
+            // Find input mid-search. Form-field hits instead paint a
+            // CSS accent border on the matching field, and the body
+            // editor gets a dedicated yellow marker rectangle that
+            // tracks the active hit without touching focus.
+            AddFormFieldHit("Type",   _targetField, q, hits);
+            AddFormFieldHit("Method", _methodField, q, hits);
+            AddFormFieldHit("Params", _paramsField, q, hits);
+            AddBodyFieldHit(_bodyField, q, hits);
+
+            // Active list rows — match against the rendered display
+            // form (target.method(params)) plus any persisted
+            // LastError diagnostic.
+            if (_rowBlocks.Count == 0) return;
+            var scroll = _activeListScroll;
+            foreach (var spec in PatchRegistry.Specs)
+            {
+                if (spec == null || string.IsNullOrEmpty(spec.Key)) continue;
+                if (!_rowBlocks.TryGetValue(spec.Key, out var block) || block == null) continue;
+
+                var paramsDisplay = string.Join(", ", MethodPatchSpec.SplitParamTypes(spec.ParameterTypes ?? string.Empty));
+                if (!Contains(spec.TargetTypeName, q)
+                    && !Contains(spec.MethodName, q)
+                    && !Contains(paramsDisplay, q)
+                    && !Contains(spec.LastError, q))
+                    continue;
+
+                var capturedBlock = block;
+                hits.Add(new ReplFindHit
+                {
+                    Source = "Patches",
+                    Label = $"Patches > {spec.TargetTypeName}.{spec.MethodName}",
+                    ScrollIntoView = () =>
+                    {
+                        // Flip to Patches mode first — the pane is
+                        // display:none under Output mode and a
+                        // ScrollTo on a hidden element does
+                        // nothing.
+                        OnFocusRequested?.Invoke();
+                        if (capturedBlock?.parent == null) return;
+                        try { scroll?.ScrollTo(capturedBlock); }
+                        catch { /* rebuilt mid-find */ }
+                    },
+                    SetCurrent = () =>
+                    {
+                        if (capturedBlock?.parent != null)
+                            capturedBlock.AddToClassList("rr-find-hit--current");
+                    },
+                    UnsetCurrent = () =>
+                    {
+                        if (capturedBlock?.parent != null)
+                            capturedBlock.RemoveFromClassList("rr-find-hit--current");
+                    },
+                });
             }
         }
+
+        private void AddFormFieldHit(string fieldLabel, TextField field, string query, List<ReplFindHit> hits)
+        {
+            if (field == null) return;
+            var text = field.value;
+            if (string.IsNullOrEmpty(text)) return;
+            int hit = text.IndexOf(query, StringComparison.OrdinalIgnoreCase);
+            if (hit < 0) return;
+
+            string preview = text.Length <= 60 ? text : text.Substring(0, 59) + "…";
+            var capturedField = field;
+            hits.Add(new ReplFindHit
+            {
+                Source = "Patches",
+                Label = $"Patches > {fieldLabel}: {preview}",
+                // Form fields (Type / Method / Params) live in the
+                // header strip, always on screen. No need to scroll;
+                // calling Focus() here would steal the keyboard from
+                // the Find input. Just flip to the Patches tab so the
+                // pane is visible, then SetCurrent paints the row.
+                ScrollIntoView = () =>
+                {
+                    OnFocusRequested?.Invoke();
+                },
+                SetCurrent = () =>
+                {
+                    capturedField.AddToClassList("rr-find-hit--current");
+                },
+                UnsetCurrent = () =>
+                {
+                    capturedField.RemoveFromClassList("rr-find-hit--current");
+                },
+            });
+        }
+
+        private void AddBodyFieldHit(TextField body, string query, List<ReplFindHit> hits)
+        {
+            if (body == null) return;
+            var text = body.value;
+            if (string.IsNullOrEmpty(text)) return;
+            // Per-occurrence hits — Next / Prev steps through each
+            // match in the body so the user can walk the entire
+            // patch for a query. Each hit captures its own start
+            // index; ScrollIntoView scrolls the body's parent
+            // ScrollView directly (no Focus call, no SelectRange,
+            // no keyboard-focus theft) and SetCurrent paints a
+            // yellow marker rectangle over the match line so the
+            // user can see exactly where the controller landed
+            // while still typing into the Find bar.
+            int idx = 0;
+            int qlen = query.Length;
+            int count = 0;
+            while (idx < text.Length)
+            {
+                int h = text.IndexOf(query, idx, StringComparison.OrdinalIgnoreCase);
+                if (h < 0) break;
+                var capturedH = h;
+                int line = CountLines(text, h);
+                hits.Add(new ReplFindHit
+                {
+                    Source = "Patches",
+                    Label = $"Patches > Body (line {line})",
+                    ScrollIntoView = () =>
+                    {
+                        OnFocusRequested?.Invoke();
+                        ScrollBodyToMatch(capturedH);
+                    },
+                    SetCurrent = () => ShowBodyMarker(capturedH, qlen),
+                    UnsetCurrent = HideBodyMarker,
+                });
+                idx = h + qlen;
+                count++;
+                // Sanity cap so a single-char query on a huge body
+                // doesn't churn out tens of thousands of hits — the
+                // user can refine the query if they really need to
+                // walk every occurrence past this point.
+                if (count >= 500) break;
+            }
+        }
+
+        // Line-pitch of the body's TextElement. The most accurate
+        // source is MeasureTextSize on a single glyph — its y output
+        // is ascender + descender + line gap, which is exactly the
+        // distance between consecutive baselines and so what we want
+        // for marker.top stepping. Earlier we used `fontSize + 2`,
+        // which under-shot on a typical 12px Roboto skin (~16px real
+        // line height) and the marker walked progressively higher
+        // than the actual glyph on every successive line. Falls back
+        // to fontSize × 1.35 (Unity's default line-height multiplier)
+        // and then to a hardcoded 16 when nothing else is available.
+        private float EstimateBodyLineHeight()
+        {
+            try
+            {
+                var te = _bodyField?.Q<TextElement>();
+                if (te != null)
+                {
+                    var probe = te.MeasureTextSize(
+                        "A", 0f, VisualElement.MeasureMode.Undefined,
+                        0f, VisualElement.MeasureMode.Undefined);
+                    if (probe.y > 0f) return probe.y;
+                    float fs = te.resolvedStyle.fontSize;
+                    if (fs > 0f) return fs * 1.35f;
+                }
+                if (_bodyField != null)
+                {
+                    float fs = _bodyField.resolvedStyle.fontSize;
+                    if (fs > 0f) return fs * 1.35f;
+                }
+            }
+            catch { /* fall through */ }
+            return 16f;
+        }
+
+        // Drop the parent ScrollView to the match line. Uses
+        // scrollOffset rather than ScrollTo because ScrollTo wants a
+        // VisualElement target and we're computing the target rect
+        // ourselves from the text. Schedule.Execute defers the
+        // assignment one frame so the contentContainer's layout has
+        // settled before we read its viewport height — without that
+        // delay the first navigation after a panel switch lands at
+        // (0,0) because contentViewport.layout is still NaN.
+        private void ScrollBodyToMatch(int matchStart)
+        {
+            if (_bodyScroll == null || _bodyField == null) return;
+            int capturedLine = LineIndexOf(_bodyField.value ?? string.Empty, matchStart);
+
+            var scroll = _bodyScroll;
+            scroll.schedule.Execute(() =>
+            {
+                if (scroll?.contentContainer == null || _bodyField == null) return;
+                float lineHeight = EstimateBodyLineHeight();
+                // Project (0, contentTop + lineTop) into the scroll
+                // container's coord space. Using te's contentRect.y
+                // when available accounts for the body's top padding
+                // — that's the same offset ShowBodyMarker applies,
+                // so the centring math agrees with where the marker
+                // ends up on screen.
+                Vector2 anchor;
+                try
+                {
+                    var te = _bodyField.Q<TextElement>();
+                    if (te != null)
+                    {
+                        var content = te.contentRect;
+                        anchor = te.ChangeCoordinatesTo(
+                            scroll.contentContainer,
+                            new Vector2(0f, content.y + capturedLine * lineHeight));
+                    }
+                    else
+                    {
+                        var bodyContent = _bodyField.contentRect;
+                        anchor = _bodyField.ChangeCoordinatesTo(
+                            scroll.contentContainer,
+                            new Vector2(0f, bodyContent.y + capturedLine * lineHeight));
+                    }
+                }
+                catch
+                {
+                    anchor = new Vector2(0f, capturedLine * lineHeight);
+                }
+                float viewportH = 0f;
+                try { viewportH = scroll.contentViewport.layout.height; } catch { /* layout not ready */ }
+                // Center the match in the viewport when possible;
+                // when the viewport hasn't laid out yet just jump to
+                // the line top so the user at least lands on the right
+                // page.
+                float desired = viewportH > 0f
+                    ? anchor.y - viewportH * 0.4f
+                    : anchor.y;
+                if (desired < 0f) desired = 0f;
+                scroll.scrollOffset = new Vector2(scroll.scrollOffset.x, desired);
+            }).StartingIn(0);
+        }
+
+        // Paint the yellow marker over the match. The position is
+        // computed by asking the TextElement to translate "(line
+        // prefix width, line top)" in *its own* local coordinates
+        // into the marker parent's (the ScrollView content container)
+        // coordinates via ChangeCoordinatesTo. That handles
+        // everything — the body field's offset inside the
+        // contentContainer, the TextElement's offset inside the body
+        // field, any padding / borders added by the editor skin —
+        // in one step. Earlier versions added `_bodyField.layout.y`
+        // and `te.layout.x` by hand and missed the body field's
+        // own `.x`, which is why the marker landed a few pixels to
+        // the left of the actual glyph.
+        private void ShowBodyMarker(int matchStart, int matchLength)
+        {
+            if (_bodyMarker?.parent == null || _bodyField == null) return;
+            var markerParent = _bodyMarker.parent;
+            var text = _bodyField.value ?? string.Empty;
+            if (matchStart < 0 || matchStart >= text.Length) { HideBodyMarker(); return; }
+            int safeLen = System.Math.Min(matchLength, text.Length - matchStart);
+            if (safeLen <= 0) { HideBodyMarker(); return; }
+
+            int lineStart = text.LastIndexOf('\n', System.Math.Max(0, matchStart - 1)) + 1;
+            int lineIndex = LineIndexOf(text, matchStart);
+            string linePrefix = text.Substring(lineStart, matchStart - lineStart);
+            string matchSpan  = text.Substring(matchStart, safeLen);
+
+            float lineHeight = EstimateBodyLineHeight();
+
+            Vector2 origin = Vector2.zero;
+            float matchWidth = 0f;
+            bool usePerSpan = false;
+
+            TextElement te = null;
+            try { te = _bodyField.Q<TextElement>(); } catch { /* not available */ }
+
+            if (te != null)
+            {
+                try
+                {
+                    // Measure prefix + match through a
+                    // sentinel-wrapped probe so leading / trailing
+                    // whitespace contributes its real width.
+                    // TextElement.MeasureTextSize trims edge
+                    // whitespace, which made an indented line
+                    // (e.g. "    if (x)") measure as if the four
+                    // leading spaces were zero pixels wide — the
+                    // marker started at column 0 and only covered
+                    // the first half of the match before running
+                    // out of width.
+                    float prefixX = MeasureSpanWidth(te, linePrefix);
+                    float matchPx = MeasureSpanWidth(te, matchSpan);
+                    var content = te.contentRect;
+                    origin = te.ChangeCoordinatesTo(
+                        markerParent,
+                        new Vector2(content.x + prefixX,
+                                    content.y + lineIndex * lineHeight));
+                    matchWidth = matchPx;
+                    usePerSpan = matchWidth > 0.5f;
+                }
+                catch
+                {
+                    // Coordinate conversion or measurement failed.
+                    // Fall through to the full-line strip path.
+                    usePerSpan = false;
+                }
+            }
+
+            if (!usePerSpan)
+            {
+                // Full-line strip — anchor at column 0 of the body
+                // field. Still gives a visible row-level cue even
+                // when precise glyph metrics aren't available.
+                try
+                {
+                    var bodyContent = _bodyField.contentRect;
+                    origin = _bodyField.ChangeCoordinatesTo(
+                        markerParent,
+                        new Vector2(0f, bodyContent.y + lineIndex * lineHeight));
+                }
+                catch
+                {
+                    origin = new Vector2(0f, lineIndex * lineHeight);
+                }
+            }
+
+            _bodyMarker.style.top = origin.y;
+            _bodyMarker.style.height = lineHeight;
+            if (usePerSpan)
+            {
+                _bodyMarker.style.left = origin.x;
+                _bodyMarker.style.width = matchWidth;
+                _bodyMarker.style.right = StyleKeyword.Auto;
+            }
+            else
+            {
+                _bodyMarker.style.left = origin.x;
+                _bodyMarker.style.right = 0;
+                _bodyMarker.style.width = StyleKeyword.Auto;
+            }
+            _bodyMarker.style.display = DisplayStyle.Flex;
+        }
+
+        private static int LineIndexOf(string text, int charIndex)
+        {
+            int line = 0;
+            int max = System.Math.Min(charIndex, text?.Length ?? 0);
+            for (int i = 0; i < max; i++)
+                if (text[i] == '\n') line++;
+            return line;
+        }
+
+        // TextElement.MeasureTextSize collapses leading and trailing
+        // whitespace — measuring "    if" as if the four spaces were
+        // zero pixels wide. For the body marker that meant the
+        // marker started at column 0 on an indented line and only
+        // covered half the match before running out of width. Wrap
+        // the span with a visible sentinel on each side and subtract
+        // out the sentinels' width: the spaces between the
+        // sentinels now sit in the *interior* of the measured
+        // string, where the trim doesn't apply. "X" is wide enough
+        // not to vanish under any kerning quirks.
+        private static float MeasureSpanWidth(TextElement te, string span)
+        {
+            if (te == null || string.IsNullOrEmpty(span)) return 0f;
+            const string Sentinel = "X";
+            var withSpan = te.MeasureTextSize(
+                Sentinel + span + Sentinel,
+                0f, VisualElement.MeasureMode.Undefined,
+                0f, VisualElement.MeasureMode.Undefined);
+            var baseline = te.MeasureTextSize(
+                Sentinel + Sentinel,
+                0f, VisualElement.MeasureMode.Undefined,
+                0f, VisualElement.MeasureMode.Undefined);
+            float w = withSpan.x - baseline.x;
+            return w > 0f ? w : 0f;
+        }
+
+        private void HideBodyMarker()
+        {
+            if (_bodyMarker == null) return;
+            _bodyMarker.style.display = DisplayStyle.None;
+        }
+
+        private static int CountLines(string text, int upToIndex)
+        {
+            int line = 1;
+            int max = System.Math.Min(upToIndex, text.Length);
+            for (int i = 0; i < max; i++)
+                if (text[i] == '\n') line++;
+            return line;
+        }
+
+        private static bool Contains(string haystack, string needle)
+            => !string.IsNullOrEmpty(haystack)
+               && haystack.IndexOf(needle, StringComparison.OrdinalIgnoreCase) >= 0;
     }
 }
