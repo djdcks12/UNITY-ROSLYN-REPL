@@ -39,6 +39,21 @@ namespace RoslynRepl.Editor.UI.Find
 
         public void Dispose()
         {
+            // Run the same static-state cleanup Hide() does *before*
+            // detaching event handlers. Without this, a CreateGUI
+            // rebuild / window close while the overlay was open left
+            // ReplFindHighlight.ActiveQuery and RequestRefocusInput
+            // pointing at the now-disposed instance:
+            //   - the next CreateGUI's BindLabelText would honour
+            //     the stale ActiveQuery and paint matches against a
+            //     bar that isn't on screen
+            //   - the static delegate kept a managed reference to
+            //     this overlay (and through it, the window root),
+            //     blocking GC of the disposed instance
+            // Hide() is safe on an already-hidden bar — it only
+            // touches our own root + the static hooks + the
+            // controller's Close, all of which are null-tolerant.
+            Hide();
             if (_controller != null) _controller.StateChanged -= RefreshCounterAndButtons;
         }
 

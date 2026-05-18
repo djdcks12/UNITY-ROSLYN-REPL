@@ -81,6 +81,20 @@ namespace RoslynRepl.Editor.UI.Find
         /// is no active query or no match — that keeps callers free
         /// to use <see cref="Decorate"/> as a no-op default in
         /// bind-cell paths.
+        ///
+        /// User text (REPL log / value previews / watch expressions)
+        /// may itself contain markup-like text such as
+        /// <c>&lt;b&gt;Error&lt;/b&gt;</c> or generic-syntax dumps
+        /// like <c>List&lt;int&gt;</c>. Labels render with
+        /// <c>enableRichText=true</c> (the UI Toolkit default), so
+        /// splicing highlight tags around arbitrary substrings risks
+        /// closing a tag the user wrote and corrupting the rendered
+        /// markup — searching for "b" inside "&lt;b&gt;Error&lt;/b&gt;"
+        /// would produce a string the text engine couldn't parse.
+        /// Wrap each *user* segment in
+        /// <c>&lt;noparse&gt;…&lt;/noparse&gt;</c> so the engine
+        /// treats every character inside it as literal, and only the
+        /// highlight tags around the match run remain active markup.
         /// </summary>
         public static string Decorate(string text)
         {
@@ -89,7 +103,7 @@ namespace RoslynRepl.Editor.UI.Find
             int firstHit = text.IndexOf(query, StringComparison.OrdinalIgnoreCase);
             if (firstHit < 0) return text;
 
-            var sb = new StringBuilder(text.Length + 32);
+            var sb = new StringBuilder(text.Length + 64);
             int idx = 0;
             int qlen = query.Length;
             while (idx < text.Length)
@@ -97,16 +111,28 @@ namespace RoslynRepl.Editor.UI.Find
                 int hit = text.IndexOf(query, idx, StringComparison.OrdinalIgnoreCase);
                 if (hit < 0)
                 {
-                    sb.Append(text, idx, text.Length - idx);
+                    AppendNoparse(sb, text, idx, text.Length - idx);
                     break;
                 }
-                if (hit > idx) sb.Append(text, idx, hit - idx);
+                if (hit > idx) AppendNoparse(sb, text, idx, hit - idx);
                 sb.Append(OpenTag);
-                sb.Append(text, hit, qlen);
+                AppendNoparse(sb, text, hit, qlen);
                 sb.Append(CloseTag);
                 idx = hit + qlen;
             }
             return sb.ToString();
+        }
+
+        // Emit text[start..start+length] wrapped in <noparse>...
+        // </noparse> so the rich-text engine renders every character
+        // as a literal. Zero-length spans are skipped to avoid empty
+        // noparse pairs in the output.
+        private static void AppendNoparse(StringBuilder sb, string text, int start, int length)
+        {
+            if (length <= 0) return;
+            sb.Append("<noparse>");
+            sb.Append(text, start, length);
+            sb.Append("</noparse>");
         }
 
         /// <summary>
