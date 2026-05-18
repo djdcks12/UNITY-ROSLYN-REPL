@@ -60,6 +60,18 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
         private TextField _methodField;
         private TextField _paramsField;
         private TextField _bodyField;
+        // Body editor's parent ScrollView and a yellow marker overlay
+        // that sits inside it. The marker is how the Find overlay
+        // points at a body match — Unity's native TextField selection
+        // only paints while the field has keyboard focus, so refocusing
+        // the search input to keep the user typing erased the visual
+        // cue. The overlay rectangle is independent of focus and
+        // scrolls with the body content (it's parented to the
+        // ScrollView's content container), so the user can see exactly
+        // which line / span the controller is currently on while still
+        // typing into the Find bar.
+        private ScrollView _bodyScroll;
+        private VisualElement _bodyMarker;
 
         // Diff section. _diffLines is the scrollable colored line
         // view, _diffSummary shows "+N -M" in the header, the two
@@ -238,10 +250,10 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             // scrolls *inside the editor* without the rest of the
             // view moving. flex-grow=1 on the ScrollView absorbs the
             // leftover pane height.
-            var bodyScroll = new ScrollView(ScrollViewMode.Vertical);
-            bodyScroll.style.flexGrow = 1;
-            bodyScroll.style.minHeight = 140;
-            bodyScroll.style.backgroundColor = new StyleColor(new Color(0.14f, 0.14f, 0.14f));
+            _bodyScroll = new ScrollView(ScrollViewMode.Vertical);
+            _bodyScroll.style.flexGrow = 1;
+            _bodyScroll.style.minHeight = 140;
+            _bodyScroll.style.backgroundColor = new StyleColor(new Color(0.14f, 0.14f, 0.14f));
 
             _bodyField = new TextField { multiline = true, value = DefaultBody };
             _bodyField.style.whiteSpace = WhiteSpace.Normal;
@@ -251,8 +263,22 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             // platforms cap unbounded TextField height at zero, so
             // give it a sane minimum.
             _bodyField.style.minHeight = 200;
-            bodyScroll.Add(_bodyField);
-            _host.Add(bodyScroll);
+            _bodyScroll.Add(_bodyField);
+
+            // Find-overlay marker. Lives inside the ScrollView's
+            // content container so it scrolls together with the body
+            // text. picking:Ignore so it never eats clicks meant for
+            // the editor underneath. The marker is positioned per-hit
+            // by ShowBodyMarker() and toggled visible only while a
+            // body hit is the current Find selection.
+            _bodyMarker = new VisualElement();
+            _bodyMarker.AddToClassList("rr-find-body-marker");
+            _bodyMarker.style.position = Position.Absolute;
+            _bodyMarker.style.display = DisplayStyle.None;
+            _bodyMarker.pickingMode = PickingMode.Ignore;
+            _bodyScroll.contentContainer.Add(_bodyMarker);
+
+            _host.Add(_bodyScroll);
 
             // Actions + status. Single row, doesn't scroll.
             var actionRow = new VisualElement();
@@ -1243,14 +1269,12 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             // most common search target (text inside the body
             // editor) was invisible to Ctrl+F.
             //
-            // Each field emits at most one hit. We deliberately do
-            // *not* call Focus()/SelectRange() on the TextField in
-            // ScrollIntoView: doing so moves keyboard focus to the
-            // field and the Find overlay input loses focus, so the
-            // user can't keep typing the query. The hit's job here
-            // is just to tell the user "yes, this query matches
-            // somewhere inside the field"; clicking into the field
-            // to navigate manually is on them.
+            // None of the field hits call Focus() / SelectRange() on
+            // the TextField — that would steal the keyboard from the
+            // Find input mid-search. Form-field hits instead paint a
+            // CSS accent border on the matching field, and the body
+            // editor gets a dedicated yellow marker rectangle that
+            // tracks the active hit without touching focus.
             AddFormFieldHit("Type",   _targetField, q, hits);
             AddFormFieldHit("Method", _methodField, q, hits);
             AddFormFieldHit("Params", _paramsField, q, hits);
@@ -1313,19 +1337,27 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
 
             string preview = text.Length <= 60 ? text : text.Substring(0, 59) + "…";
             var capturedField = field;
-            var capturedHit = hit;
-            var capturedLen = query.Length;
             hits.Add(new ReplFindHit
             {
                 Source = "Patches",
                 Label = $"Patches > {fieldLabel}: {preview}",
+                // Form fields (Type / Method / Params) live in the
+                // header strip, always on screen. No need to scroll;
+                // calling Focus() here would steal the keyboard from
+                // the Find input. Just flip to the Patches tab so the
+                // pane is visible, then SetCurrent paints the row.
                 ScrollIntoView = () =>
                 {
                     OnFocusRequested?.Invoke();
-                    NavigateInsideTextField(capturedField, capturedHit, capturedLen);
                 },
-                SetCurrent = null,
-                UnsetCurrent = null,
+                SetCurrent = () =>
+                {
+                    capturedField.AddToClassList("rr-find-hit--current");
+                },
+                UnsetCurrent = () =>
+                {
+                    capturedField.RemoveFromClassList("rr-find-hit--current");
+                },
             });
         }
 
@@ -1337,12 +1369,12 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             // Per-occurrence hits — Next / Prev steps through each
             // match in the body so the user can walk the entire
             // patch for a query. Each hit captures its own start
-            // index; ScrollIntoView fires Focus()+SelectRange() to
-            // scroll the body editor's internal scroll view to the
-            // match and paint Unity's native selection rectangle,
-            // then immediately refocuses the Find overlay input via
-            // ReplFindHighlight.RequestRefocusInput so the user
-            // keeps typing the query without interruption.
+            // index; ScrollIntoView scrolls the body's parent
+            // ScrollView directly (no Focus call, no SelectRange,
+            // no keyboard-focus theft) and SetCurrent paints a
+            // yellow marker rectangle over the match line so the
+            // user can see exactly where the controller landed
+            // while still typing into the Find bar.
             int idx = 0;
             int qlen = query.Length;
             int count = 0;
@@ -1350,7 +1382,6 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             {
                 int h = text.IndexOf(query, idx, StringComparison.OrdinalIgnoreCase);
                 if (h < 0) break;
-                var capturedBody = body;
                 var capturedH = h;
                 int line = CountLines(text, h);
                 hits.Add(new ReplFindHit
@@ -1360,10 +1391,10 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
                     ScrollIntoView = () =>
                     {
                         OnFocusRequested?.Invoke();
-                        NavigateInsideTextField(capturedBody, capturedH, qlen);
+                        ScrollBodyToMatch(capturedH);
                     },
-                    SetCurrent = null,
-                    UnsetCurrent = null,
+                    SetCurrent = () => ShowBodyMarker(capturedH, qlen),
+                    UnsetCurrent = HideBodyMarker,
                 });
                 idx = h + qlen;
                 count++;
@@ -1375,29 +1406,139 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             }
         }
 
-        // Focus the TextField just long enough to apply a
-        // SelectRange — that paints Unity's native selection
-        // rectangle and forces the field's internal scroll view to
-        // bring the matched range into view. Then immediately ask
-        // the Find overlay to take focus back so the user can
-        // continue typing the query. Without the refocus call the
-        // body / form field would keep keyboard focus and the
-        // overlay input would go dead.
-        private static void NavigateInsideTextField(TextField field, int matchStart, int matchLength)
+        // Approximate line-pitch of the body's TextElement. Reads from
+        // the resolved style when available (so a custom skin scales
+        // the marker), falls back to 14px which is the editor default
+        // for monospace-ish TextFields. The "+ 2" gives the marker a
+        // touch of vertical breathing room so the highlight doesn't
+        // visually merge with the line below.
+        private float EstimateBodyLineHeight()
         {
+            float fs = 0f;
             try
             {
-                field.Focus();
-                field.SelectRange(matchStart, matchStart + matchLength);
+                var te = _bodyField?.Q<TextElement>();
+                if (te != null) fs = te.resolvedStyle.fontSize;
+                if (fs <= 0f && _bodyField != null) fs = _bodyField.resolvedStyle.fontSize;
             }
-            catch
+            catch { /* fall through to default */ }
+            if (fs <= 0f) fs = 12f;
+            return fs + 2f;
+        }
+
+        // Drop the parent ScrollView to the match line. Uses
+        // scrollOffset rather than ScrollTo because ScrollTo wants a
+        // VisualElement target and we're computing the target rect
+        // ourselves from the text. Schedule.Execute defers the
+        // assignment one frame so the contentContainer's layout has
+        // settled before we read its viewport height — without that
+        // delay the first navigation after a panel switch lands at
+        // (0,0) because contentViewport.layout is still NaN.
+        private void ScrollBodyToMatch(int matchStart)
+        {
+            if (_bodyScroll == null || _bodyField == null) return;
+            var text = _bodyField.value ?? string.Empty;
+            int line = 0;
+            int max = System.Math.Min(matchStart, text.Length);
+            for (int i = 0; i < max; i++)
+                if (text[i] == '\n') line++;
+
+            int capturedLine = line;
+            var scroll = _bodyScroll;
+            scroll.schedule.Execute(() =>
             {
-                // Focus / SelectRange may not be available on every
-                // Editor version. Skip silently — the user still
-                // sees the Patches pane flip on, and the counter
-                // confirms the hit exists.
+                if (scroll?.contentContainer == null) return;
+                float lineHeight = EstimateBodyLineHeight();
+                float bodyOffsetY = 0f;
+                try { bodyOffsetY = _bodyField.layout.y; } catch { /* layout not ready */ }
+                float targetY = bodyOffsetY + capturedLine * lineHeight;
+                float viewportH = 0f;
+                try { viewportH = scroll.contentViewport.layout.height; } catch { /* layout not ready */ }
+                // Center the match in the viewport when possible;
+                // when the viewport hasn't laid out yet just jump to
+                // the line top so the user at least lands on the right
+                // page.
+                float desired = viewportH > 0f
+                    ? targetY - viewportH * 0.4f
+                    : targetY;
+                if (desired < 0f) desired = 0f;
+                scroll.scrollOffset = new Vector2(scroll.scrollOffset.x, desired);
+            }).StartingIn(0);
+        }
+
+        // Paint the yellow marker over the match. We position relative
+        // to the ScrollView's content container (the marker's parent)
+        // and add _bodyField.layout.y so the marker tracks the body
+        // even if the editor isn't anchored at (0,0). The horizontal
+        // span uses TextElement.MeasureTextSize on the line prefix to
+        // get a column offset; if the API throws (older Editor build,
+        // unmeasurable glyph) the marker falls back to a full-line
+        // strip — less precise but still visible enough to confirm
+        // tracking.
+        private void ShowBodyMarker(int matchStart, int matchLength)
+        {
+            if (_bodyMarker == null || _bodyField == null) return;
+            var text = _bodyField.value ?? string.Empty;
+            if (matchStart < 0 || matchStart >= text.Length) { HideBodyMarker(); return; }
+            int safeLen = System.Math.Min(matchLength, text.Length - matchStart);
+            if (safeLen <= 0) { HideBodyMarker(); return; }
+
+            int lineStart = text.LastIndexOf('\n', System.Math.Max(0, matchStart - 1)) + 1;
+            int lineIndex = 0;
+            for (int i = 0; i < matchStart; i++)
+                if (text[i] == '\n') lineIndex++;
+            string linePrefix = text.Substring(lineStart, matchStart - lineStart);
+            string matchSpan  = text.Substring(matchStart, safeLen);
+
+            float lineHeight = EstimateBodyLineHeight();
+            float bodyOffsetY = 0f;
+            try { bodyOffsetY = _bodyField.layout.y; } catch { /* layout not ready */ }
+            float top = bodyOffsetY + lineIndex * lineHeight;
+
+            float left = 0f;
+            float width = 0f;
+            bool usePerSpan = false;
+            try
+            {
+                var te = _bodyField.Q<TextElement>();
+                if (te != null)
+                {
+                    var prefixSize = te.MeasureTextSize(linePrefix, 0, VisualElement.MeasureMode.Undefined, 0, VisualElement.MeasureMode.Undefined);
+                    var matchSize  = te.MeasureTextSize(matchSpan,  0, VisualElement.MeasureMode.Undefined, 0, VisualElement.MeasureMode.Undefined);
+                    // Add the TextElement's own offset inside the
+                    // body field (it usually has a couple of px of
+                    // padding) so the marker lands flush against the
+                    // glyph rather than at the field's outer edge.
+                    float teLeft = 0f;
+                    try { teLeft = te.layout.x; } catch { /* skip */ }
+                    left = teLeft + prefixSize.x;
+                    width = matchSize.x;
+                    usePerSpan = width > 0.5f;
+                }
             }
-            ReplFindHighlight.RequestRefocusInput?.Invoke();
+            catch { /* fall through to full-line strip */ }
+
+            _bodyMarker.style.top = top;
+            _bodyMarker.style.height = lineHeight;
+            if (usePerSpan)
+            {
+                _bodyMarker.style.left = left;
+                _bodyMarker.style.width = width;
+                _bodyMarker.style.right = StyleKeyword.Auto;
+            }
+            else
+            {
+                _bodyMarker.style.left = 0;
+                _bodyMarker.style.right = 0;
+                _bodyMarker.style.width = StyleKeyword.Auto;
+            }
+            _bodyMarker.style.display = DisplayStyle.Flex;
+        }
+
+        private void HideBodyMarker()
+        {
+            if (_bodyMarker == null) return;
+            _bodyMarker.style.display = DisplayStyle.None;
         }
 
         private static int CountLines(string text, int upToIndex)

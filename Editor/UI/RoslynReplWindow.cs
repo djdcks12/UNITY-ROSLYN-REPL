@@ -790,6 +790,41 @@ return UnityEngine.Application.unityVersion;";
                 _findOverlay?.Show();
                 evt.StopPropagation();
                 evt.PreventDefault();
+                return;
+            }
+
+            // While the Find overlay is open, navigation keys steer
+            // search regardless of where focus actually sits. Without
+            // this hook the first Next/Prev moves keyboard focus into
+            // the Patches body / code editor, and the user's next
+            // Enter would insert a newline instead of advancing the
+            // search. Notepad++ / VS Code both treat the find bar as
+            // an "active mode" that owns Enter / F3 until dismissed;
+            // matching that contract is what users will expect.
+            //
+            // Esc here mirrors the overlay's own Esc handler so a
+            // close from the body editor (or any other panel) still
+            // works.
+            if (_findController != null && _findController.IsActive)
+            {
+                bool isEnter = (evt.keyCode == KeyCode.Return || evt.keyCode == KeyCode.KeypadEnter)
+                               && !evt.ctrlKey && !evt.commandKey && !evt.altKey;
+                bool isF3 = evt.keyCode == KeyCode.F3 && !evt.ctrlKey && !evt.commandKey && !evt.altKey;
+                if (isEnter || isF3)
+                {
+                    if (evt.shiftKey) _findController.Prev();
+                    else _findController.Next();
+                    evt.StopPropagation();
+                    evt.PreventDefault();
+                    return;
+                }
+                if (evt.keyCode == KeyCode.Escape)
+                {
+                    _findOverlay?.Hide();
+                    evt.StopPropagation();
+                    evt.PreventDefault();
+                    return;
+                }
             }
         }
 

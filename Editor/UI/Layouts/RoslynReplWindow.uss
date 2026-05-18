@@ -701,3 +701,17 @@
 .rr-output-line.rr-find-hit--current {
     border-left-width: 0;
 }
+
+/* Yellow marker that the MethodPatchView paints over the body
+   editor for the current Find hit. Sits inside the body's parent
+   ScrollView's content container at absolute position; the C# code
+   sets top / left / width / height per-hit. Semi-transparent so the
+   underlying glyphs stay readable. The rounded corners make the
+   strip feel like a marker pen swipe rather than a hard selection
+   rectangle. */
+.rr-find-body-marker {
+    background-color: rgba(255, 215, 60, 0.45);
+    border-radius: 2px;
+    border-left-width: 2px;
+    border-left-color: rgb(255, 180, 60);
+}
