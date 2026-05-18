@@ -1566,30 +1566,24 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             {
                 try
                 {
-                    var prefixSize = te.MeasureTextSize(
-                        linePrefix, 0f, VisualElement.MeasureMode.Undefined,
-                        0f, VisualElement.MeasureMode.Undefined);
-                    var matchSize  = te.MeasureTextSize(
-                        matchSpan, 0f, VisualElement.MeasureMode.Undefined,
-                        0f, VisualElement.MeasureMode.Undefined);
-                    // contentRect tells us where text drawing
-                    // actually starts inside the TextElement — its
-                    // (x,y) is the top-left of the padding-inset
-                    // area, which is where the first glyph sits.
-                    // Without this the marker landed flush against
-                    // the TextElement's border-box origin, ignoring
-                    // any padding the editor skin painted between
-                    // the border and the text. The offset was small
-                    // (a few px) but visible — especially on lines
-                    // with no leading whitespace, where the gap
-                    // between the marker's left edge and the actual
-                    // glyph wasn't masked by indent.
+                    // Measure prefix + match through a
+                    // sentinel-wrapped probe so leading / trailing
+                    // whitespace contributes its real width.
+                    // TextElement.MeasureTextSize trims edge
+                    // whitespace, which made an indented line
+                    // (e.g. "    if (x)") measure as if the four
+                    // leading spaces were zero pixels wide — the
+                    // marker started at column 0 and only covered
+                    // the first half of the match before running
+                    // out of width.
+                    float prefixX = MeasureSpanWidth(te, linePrefix);
+                    float matchPx = MeasureSpanWidth(te, matchSpan);
                     var content = te.contentRect;
                     origin = te.ChangeCoordinatesTo(
                         markerParent,
-                        new Vector2(content.x + prefixSize.x,
+                        new Vector2(content.x + prefixX,
                                     content.y + lineIndex * lineHeight));
-                    matchWidth = matchSize.x;
+                    matchWidth = matchPx;
                     usePerSpan = matchWidth > 0.5f;
                 }
                 catch
@@ -1642,6 +1636,32 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             for (int i = 0; i < max; i++)
                 if (text[i] == '\n') line++;
             return line;
+        }
+
+        // TextElement.MeasureTextSize collapses leading and trailing
+        // whitespace — measuring "    if" as if the four spaces were
+        // zero pixels wide. For the body marker that meant the
+        // marker started at column 0 on an indented line and only
+        // covered half the match before running out of width. Wrap
+        // the span with a visible sentinel on each side and subtract
+        // out the sentinels' width: the spaces between the
+        // sentinels now sit in the *interior* of the measured
+        // string, where the trim doesn't apply. "X" is wide enough
+        // not to vanish under any kerning quirks.
+        private static float MeasureSpanWidth(TextElement te, string span)
+        {
+            if (te == null || string.IsNullOrEmpty(span)) return 0f;
+            const string Sentinel = "X";
+            var withSpan = te.MeasureTextSize(
+                Sentinel + span + Sentinel,
+                0f, VisualElement.MeasureMode.Undefined,
+                0f, VisualElement.MeasureMode.Undefined);
+            var baseline = te.MeasureTextSize(
+                Sentinel + Sentinel,
+                0f, VisualElement.MeasureMode.Undefined,
+                0f, VisualElement.MeasureMode.Undefined);
+            float w = withSpan.x - baseline.x;
+            return w > 0f ? w : 0f;
         }
 
         private void HideBodyMarker()
