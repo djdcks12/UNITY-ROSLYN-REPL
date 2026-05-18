@@ -543,6 +543,12 @@ return UnityEngine.Application.unityVersion;";
                 browserHost.Clear();
                 _browser = new ObjectBrowserView(browserHost);
                 _browser.OnInstanceChosen += OnBrowserInstanceChosen;
+                // Issue #60: right-click context menu actions on
+                // browser rows (Inspect / Set as `_` / Patch Method /
+                // copy helpers). Double-click stays on the existing
+                // mode-aware OnInstanceChosen path so muscle memory
+                // doesn't change.
+                _browser.OnRowAction += OnBrowserRowAction;
             }
 
             // Mount the watch panel below output. CreateGUI can fire
@@ -1042,40 +1048,63 @@ return UnityEngine.Application.unityVersion;";
         // depending on the lower pane's mode. Pull UI: in Patches
         // mode the click means "I want to patch a method on this
         // type's class" — open the method picker instead of the usual
-        // Output inspect. Output mode keeps the default
-        // render-as-`return X;` behavior.
+        // Double-click handler — preserves the mode-aware behaviour
+        // the panel had before #60: Patches mode opens the method
+        // picker, Output mode renders the inspect tree. Refactored
+        // to delegate to the same helpers the new context-menu
+        // actions call, so both entry points stay in lockstep.
         private void OnBrowserInstanceChosen(InstanceEntry entry)
         {
             if (entry == null) return;
-
-            object value = entry.Value;
-            if (value is UnityEngine.Object uo && uo == null) value = null;
-
             if (_patchesModeActive)
             {
-                if (value == null)
-                {
-                    // Without a live instance we can still pick a
-                    // method on the declared type — but DeclaredType
-                    // is only set for some entries (singletons read
-                    // from a static accessor). Fall back to
-                    // value's GetType() when present, otherwise show
-                    // a hint.
-                    if (entry.DeclaredType != null)
-                    {
-                        OpenMethodPickerForType(entry.DeclaredType);
-                    }
-                    else
-                    {
-                        AppendOutput("(can't open method picker — instance is null and no DeclaredType)", "warning");
-                    }
-                    return;
-                }
-                OpenMethodPickerForType(value.GetType());
-                return;
+                OpenBrowserPatchMethod(entry);
             }
+            else
+            {
+                RenderBrowserInspect(entry);
+            }
+        }
 
-            // Output mode — original behavior.
+        // Issue #60: dispatch for the row context-menu actions.
+        // Inspect / SetAsUnderscore / PatchMethod reuse the same
+        // helpers double-click drives so the menu can't drift away
+        // from the existing flows. Copy actions write to the
+        // clipboard and surface a confirmation in Output — enough of
+        // a breadcrumb that the user knows the click landed without
+        // having to switch focus to a paste target.
+        private void OnBrowserRowAction(InstanceEntry entry, ObjectBrowserView.BrowserRowAction action)
+        {
+            if (entry == null) return;
+            switch (action)
+            {
+                case ObjectBrowserView.BrowserRowAction.Inspect:
+                    RenderBrowserInspect(entry);
+                    break;
+                case ObjectBrowserView.BrowserRowAction.SetAsUnderscore:
+                    SetBrowserEntryAsUnderscore(entry);
+                    break;
+                case ObjectBrowserView.BrowserRowAction.PatchMethod:
+                    OpenBrowserPatchMethod(entry);
+                    break;
+                case ObjectBrowserView.BrowserRowAction.CopyTypeName:
+                    CopyBrowserEntryTypeName(entry);
+                    break;
+                case ObjectBrowserView.BrowserRowAction.CopyInspectSnippet:
+                    CopyBrowserInspectSnippet(entry);
+                    break;
+            }
+        }
+
+        // Shared inspect path — clear Output, breadcrumb, bind `_`,
+        // render the tree, refresh watches, scroll, raise the find
+        // overlay's rebuild signal. Same shape both double-click in
+        // Output mode and the Inspect context-menu action emit.
+        private void RenderBrowserInspect(InstanceEntry entry)
+        {
+            if (entry == null) return;
+            object value = entry.Value;
+            if (value is UnityEngine.Object uo && uo == null) value = null;
             if (_outputContent == null) return;
 
             ClearOutput();
@@ -1112,6 +1141,122 @@ return UnityEngine.Application.unityVersion;";
             // overlay refresh hits now that the Browse-inspect tree
             // is appended.
             _outputFindable?.RaiseRebuilt();
+        }
+
+        // Shared method-picker entry. Falls back to DeclaredType when
+        // Value is null (singleton accessors that read a static
+        // member but don't expose a live instance until the
+        // accessor is actually called).
+        private void OpenBrowserPatchMethod(InstanceEntry entry)
+        {
+            if (entry == null) return;
+            object value = entry.Value;
+            if (value is UnityEngine.Object uo && uo == null) value = null;
+
+            if (value == null)
+            {
+                if (entry.DeclaredType != null)
+                {
+                    OpenMethodPickerForType(entry.DeclaredType);
+                }
+                else
+                {
+                    AppendOutput("(can't open method picker — instance is null and no DeclaredType)", "warning");
+                }
+                return;
+            }
+            OpenMethodPickerForType(value.GetType());
+        }
+
+        // Set as `_` is Inspect-without-the-render: bind the carry
+        // over so `_` resolves to this instance in the next snippet
+        // / watch, leave Output alone. The toolbar badge picks the
+        // change up through LastResultChanged so the user still gets
+        // a visible confirmation without the Output panel scrolling.
+        private void SetBrowserEntryAsUnderscore(InstanceEntry entry)
+        {
+            if (entry == null) return;
+            object value = entry.Value;
+            if (value is UnityEngine.Object uo && uo == null) value = null;
+            if (value == null)
+            {
+                AppendOutput("(can't set `_` — instance is null or destroyed)", "warning");
+                return;
+            }
+            ReplEngine.SetLastResult(value);
+            if (_outputSummary != null) _outputSummary.text = "Bound `_`";
+        }
+
+        private void CopyBrowserEntryTypeName(InstanceEntry entry)
+        {
+            if (entry == null) return;
+            // Prefer the live runtime type (handles cases where the
+            // declared type is an abstract base and the row was
+            // surfaced for a concrete subclass); fall back to
+            // DeclaredType and finally to the display TypeName.
+            var type = entry.Value?.GetType() ?? entry.DeclaredType;
+            var name = type?.FullName ?? entry.TypeName;
+            if (string.IsNullOrEmpty(name))
+            {
+                AppendOutput("(can't copy type — no type information available)", "warning");
+                return;
+            }
+            EditorGUIUtility.systemCopyBuffer = name;
+            AppendOutput($"📋 Copied type name: {name}", "info");
+        }
+
+        private void CopyBrowserInspectSnippet(InstanceEntry entry)
+        {
+            if (entry == null) return;
+            var snippet = BuildBrowserInspectSnippet(entry);
+            if (string.IsNullOrEmpty(snippet))
+            {
+                AppendOutput("(can't build snippet — no type information available)", "warning");
+                return;
+            }
+            EditorGUIUtility.systemCopyBuffer = snippet;
+            AppendOutput("📋 Copied inspect snippet — paste into Code or a Watch row.", "info");
+        }
+
+        // Build a small C# snippet that re-locates the instance.
+        // Category drives the shape: MonoBehaviour rows use the
+        // scene-wide search (FindFirstObjectByType), ScriptableObject
+        // rows fall back to AssetDatabase, singletons get a comment-
+        // only template since we can't infer the accessor name. The
+        // snippets are intentionally minimal — one line per common
+        // case so the user can paste, tweak, and Run.
+        private static string BuildBrowserInspectSnippet(InstanceEntry entry)
+        {
+            var type = entry.Value?.GetType() ?? entry.DeclaredType;
+            var typeName = type?.FullName ?? entry.TypeName;
+            if (string.IsNullOrEmpty(typeName)) return null;
+
+            switch (entry.Category)
+            {
+                case InstanceCategory.MonoBehaviour:
+                    return $"return UnityEngine.Object.FindFirstObjectByType<{typeName}>();";
+                case InstanceCategory.ScriptableObject:
+                    // ScriptableObject assets live on disk — surface
+                    // the AssetDatabase equivalent so the user
+                    // doesn't have to remember the GUID dance. Short
+                    // name on the t: filter keeps the search cheap
+                    // even when the asset's full namespace is long.
+                    var shortName = type?.Name ?? typeName;
+                    return
+$@"return UnityEditor.AssetDatabase.FindAssets(""t:{shortName}"")
+    .Select(g => UnityEditor.AssetDatabase.LoadAssetAtPath<{typeName}>(UnityEditor.AssetDatabase.GUIDToAssetPath(g)))
+    .FirstOrDefault();";
+                case InstanceCategory.Singleton:
+                    // Locator scans for static accessors at scan
+                    // time; we don't carry the accessor name through
+                    // into the entry, so the snippet is a template
+                    // with a clear TODO rather than a wrong default
+                    // (e.g. assuming `.Instance` when the project
+                    // uses `.I` / `.Singleton` / a property name).
+                    return $"// {typeName} — replace with your project's accessor (e.g. {type?.Name}.Instance)\nreturn null;";
+                default:
+                    return $"return UnityEngine.Object.FindFirstObjectByType<{typeName}>();";
+            }
         }
 
         private void OpenMethodPickerForType(Type type)
