@@ -4,7 +4,7 @@ All notable changes to this package will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.7.4] - 2026-05-18
 
 ### Added (Ctrl+F find overlay across Output / Watch / Patches)
 - Press **Ctrl+F** (Cmd+F on macOS) anywhere in the REPL window to open a search bar above the toolbar. The bar scans:
