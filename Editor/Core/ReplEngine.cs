@@ -41,13 +41,31 @@ namespace RoslynRepl.Editor.Core
         public static object LastResult { get; private set; }
 
         /// <summary>
-        /// Raised after <see cref="LastResult"/> changes (either to a new
-        /// value or back to <c>null</c>). UI surfaces such as the toolbar
-        /// "Current <c>_</c>" badge subscribe so they re-render without
-        /// having to poll. Fires only on an actual transition — assigning
-        /// the same reference back is a no-op, so a busy Execute loop that
-        /// happens to return the same instance every time doesn't churn the
-        /// UI. The argument is the post-change value.
+        /// Raised after <see cref="LastResult"/> is assigned. UI surfaces
+        /// such as the toolbar "Current <c>_</c>" badge subscribe so they
+        /// re-render without having to poll.
+        ///
+        /// Fires on every explicit <see cref="SetLastResult"/> call and on
+        /// every successful Execute that produces a non-null value — even
+        /// when the new reference equals the prior one. Same-reference
+        /// reassignments happen naturally when a snippet mutates and
+        /// returns the same object (<c>_.name = "Hero"; return _;</c>);
+        /// the identity didn't change, but the visible state subscribers
+        /// render off the value did, so skipping the notify would freeze
+        /// the toolbar badge on the stale name. <see cref="ResetLastResult"/>
+        /// is the one path that short-circuits a redundant assignment —
+        /// resetting an already-null engine is a true no-op and shouldn't
+        /// churn subscribers.
+        ///
+        /// Subscriber exceptions are caught per-handler and surfaced as a
+        /// <see cref="UnityEngine.Debug.LogWarning"/>. A misbehaving UI
+        /// hook can't propagate up through Execute's outer catch and
+        /// convert a successful snippet into a runtime error; remaining
+        /// subscribers still fire, and <see cref="LastResult"/> still
+        /// updates regardless of the failure.
+        ///
+        /// The argument is the post-change value (<c>null</c> after a
+        /// reset).
         /// </summary>
         public static event Action<object> LastResultChanged;
 
