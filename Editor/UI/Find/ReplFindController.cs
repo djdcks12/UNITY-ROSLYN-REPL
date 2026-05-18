@@ -120,31 +120,81 @@ namespace RoslynRepl.Editor.UI.Find
         /// <summary>Force a recompute even if the query string is
         /// unchanged. Used by external callers (panel rebuilds, the
         /// Run pipeline) so the hit list doesn't drift away from the
-        /// underlying data.</summary>
+        /// underlying data. Preserves the current hit index across
+        /// the rebuild so the user doesn't lose their place mid-
+        /// search.</summary>
         public void Refresh()
         {
             if (!IsActive) return;
-            Recompute();
+            RecomputePreservingIndex();
         }
 
         private void OnSourceRebuilt()
         {
             if (!IsActive) return;
-            Recompute();
+            // Source-driven rebuilds (body edits, Run output, Watch
+            // store changes) shouldn't drop the user's current hit —
+            // resetting to -1 would erase the marker mid-edit and
+            // force a fresh Enter to recover. Preserve the index
+            // instead and re-apply (which repositions the marker if
+            // the surrounding text shifted).
+            RecomputePreservingIndex();
         }
 
         private void Recompute()
         {
+            CollectIntoHits();
+            // Notepad++ / code-editor pattern for *query* changes:
+            // typing only updates the hit list + counter. Pressing
+            // Enter / F3 (Next) drives the actual navigation. Auto-
+            // applying the first hit on every keystroke caused the
+            // Patches body editor to grab Focus + SelectRange per
+            // character typed, which flickered the focus rectangle
+            // between the search input and the body.
+            //
+            // Resetting to -1 means the *first* Enter press goes to
+            // hit index 0 cleanly (MoveTo wraps -1 + 1 → 0). Index
+            // doesn't survive across queries — that's the cost of
+            // the simpler model, but a query refinement is usually
+            // followed by re-navigation anyway.
+            _currentIndex = -1;
+            StateChanged?.Invoke();
+        }
+
+        // Source-driven rebuild — same hit collection as Recompute,
+        // but keeps the user anchored on whatever index they were on
+        // (clamped to the new list length) and re-fires ApplyCurrent
+        // so the marker/scroll lands at the equivalent position in
+        // the updated content. If the index no longer fits (hits
+        // shrank past it) we fall back to -1, same as a query reset.
+        private void RecomputePreservingIndex()
+        {
+            int preserve = _currentIndex;
+            CollectIntoHits();
+            if (preserve >= 0 && preserve < _hits.Count)
+            {
+                _currentIndex = preserve;
+                ApplyCurrent();
+            }
+            else
+            {
+                _currentIndex = -1;
+            }
+            StateChanged?.Invoke();
+        }
+
+        // Shared collection step for both Recompute and
+        // RecomputePreservingIndex. Order matters: drop the current
+        // highlight first (so a stale marker doesn't linger if the
+        // old current hit is gone from the new list), then push the
+        // query to the global highlight machinery before walking
+        // sources — bind-cell closures in virtualized trees read
+        // ActiveQuery on every cell bind, so it needs to be in place
+        // before the rebuild side-effects fire.
+        private void CollectIntoHits()
+        {
             UnsetCurrentHighlight();
-
-            // Push the query down to the global highlight machinery
-            // before walking sources — bind-cell closures in
-            // virtualized trees read this string on every cell bind,
-            // so the order matters: query first, then collect hits
-            // (each panel calls RefreshItems / re-decorates via the
-            // event the setter fires).
             ReplFindHighlight.SetActiveQuery(IsActive ? _query : null);
-
             _hits.Clear();
             if (IsActive && !string.IsNullOrEmpty(_query))
             {
@@ -162,24 +212,6 @@ namespace RoslynRepl.Editor.UI.Find
                     }
                 }
             }
-
-            // Notepad++ / code-editor pattern: typing only updates the
-            // hit list + counter. Pressing Enter / F3 (Next) drives
-            // the actual navigation. Auto-applying the first hit on
-            // every keystroke caused the Patches body editor to
-            // grab Focus + SelectRange (the only way to scroll a
-            // TextField's internal scroll view to a match) per
-            // character typed, which flickered the focus rectangle
-            // between the search input and the body and looked like
-            // the search tab was turning blue.
-            //
-            // Resetting to -1 means the *first* Enter press goes to
-            // hit index 0 cleanly (MoveTo wraps -1 + 1 → 0). Index
-            // doesn't survive across queries — that's the cost of
-            // the simpler model, but a query refinement is usually
-            // followed by re-navigation anyway.
-            _currentIndex = -1;
-            StateChanged?.Invoke();
         }
 
         private void MoveTo(int index)

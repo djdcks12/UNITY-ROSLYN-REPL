@@ -390,10 +390,36 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
             // settles. Pause + reassign on each change so the
             // eventual diff runs against the final form state, not
             // a stale snapshot from the start of the burst.
-            _bodyField.RegisterValueChangedCallback(_ => ScheduleDiffRefresh());
-            _targetField.RegisterValueChangedCallback(_ => ScheduleDiffRefresh());
-            _methodField.RegisterValueChangedCallback(_ => ScheduleDiffRefresh());
-            _paramsField.RegisterValueChangedCallback(_ => ScheduleDiffRefresh());
+            _bodyField.RegisterValueChangedCallback(_ =>
+            {
+                ScheduleDiffRefresh();
+                // Body content changed — any captured match indices in
+                // the Find overlay's hit list are now stale (the user
+                // could have inserted text above a previously-found
+                // match, shifting every later index). Raise
+                // ContentRebuilt so the Find controller recomputes
+                // against the fresh body string. Without this, typing
+                // into the body while the Find bar is open kept the
+                // old hit positions and the marker would drift off
+                // the match — the user had to re-type the query to
+                // unstick it.
+                ContentRebuilt?.Invoke();
+            });
+            _targetField.RegisterValueChangedCallback(_ =>
+            {
+                ScheduleDiffRefresh();
+                ContentRebuilt?.Invoke();
+            });
+            _methodField.RegisterValueChangedCallback(_ =>
+            {
+                ScheduleDiffRefresh();
+                ContentRebuilt?.Invoke();
+            });
+            _paramsField.RegisterValueChangedCallback(_ =>
+            {
+                ScheduleDiffRefresh();
+                ContentRebuilt?.Invoke();
+            });
 
             // Auto-reapply toggle. Same setting as the Tools menu
             // item, exposed inline here so users browsing the
@@ -1437,21 +1463,29 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
         private void ScrollBodyToMatch(int matchStart)
         {
             if (_bodyScroll == null || _bodyField == null) return;
-            var text = _bodyField.value ?? string.Empty;
-            int line = 0;
-            int max = System.Math.Min(matchStart, text.Length);
-            for (int i = 0; i < max; i++)
-                if (text[i] == '\n') line++;
+            int capturedLine = LineIndexOf(_bodyField.value ?? string.Empty, matchStart);
 
-            int capturedLine = line;
             var scroll = _bodyScroll;
             scroll.schedule.Execute(() =>
             {
-                if (scroll?.contentContainer == null) return;
+                if (scroll?.contentContainer == null || _bodyField == null) return;
                 float lineHeight = EstimateBodyLineHeight();
-                float bodyOffsetY = 0f;
-                try { bodyOffsetY = _bodyField.layout.y; } catch { /* layout not ready */ }
-                float targetY = bodyOffsetY + capturedLine * lineHeight;
+                // Project (0, lineTop) in the body field's local
+                // coordinates into the scroll container's coord space
+                // — that's the same space scrollOffset is measured
+                // in, so we can hand the resulting y straight to the
+                // ScrollView without further math.
+                Vector2 anchor;
+                try
+                {
+                    anchor = _bodyField.ChangeCoordinatesTo(
+                        scroll.contentContainer,
+                        new Vector2(0f, capturedLine * lineHeight));
+                }
+                catch
+                {
+                    anchor = new Vector2(0f, capturedLine * lineHeight);
+                }
                 float viewportH = 0f;
                 try { viewportH = scroll.contentViewport.layout.height; } catch { /* layout not ready */ }
                 // Center the match in the viewport when possible;
@@ -1459,80 +1493,113 @@ UnityEngine.Debug.Log(""[patched] "" + __instance.GetType().Name);";
                 // the line top so the user at least lands on the right
                 // page.
                 float desired = viewportH > 0f
-                    ? targetY - viewportH * 0.4f
-                    : targetY;
+                    ? anchor.y - viewportH * 0.4f
+                    : anchor.y;
                 if (desired < 0f) desired = 0f;
                 scroll.scrollOffset = new Vector2(scroll.scrollOffset.x, desired);
             }).StartingIn(0);
         }
 
-        // Paint the yellow marker over the match. We position relative
-        // to the ScrollView's content container (the marker's parent)
-        // and add _bodyField.layout.y so the marker tracks the body
-        // even if the editor isn't anchored at (0,0). The horizontal
-        // span uses TextElement.MeasureTextSize on the line prefix to
-        // get a column offset; if the API throws (older Editor build,
-        // unmeasurable glyph) the marker falls back to a full-line
-        // strip — less precise but still visible enough to confirm
-        // tracking.
+        // Paint the yellow marker over the match. The position is
+        // computed by asking the TextElement to translate "(line
+        // prefix width, line top)" in *its own* local coordinates
+        // into the marker parent's (the ScrollView content container)
+        // coordinates via ChangeCoordinatesTo. That handles
+        // everything — the body field's offset inside the
+        // contentContainer, the TextElement's offset inside the body
+        // field, any padding / borders added by the editor skin —
+        // in one step. Earlier versions added `_bodyField.layout.y`
+        // and `te.layout.x` by hand and missed the body field's
+        // own `.x`, which is why the marker landed a few pixels to
+        // the left of the actual glyph.
         private void ShowBodyMarker(int matchStart, int matchLength)
         {
-            if (_bodyMarker == null || _bodyField == null) return;
+            if (_bodyMarker?.parent == null || _bodyField == null) return;
+            var markerParent = _bodyMarker.parent;
             var text = _bodyField.value ?? string.Empty;
             if (matchStart < 0 || matchStart >= text.Length) { HideBodyMarker(); return; }
             int safeLen = System.Math.Min(matchLength, text.Length - matchStart);
             if (safeLen <= 0) { HideBodyMarker(); return; }
 
             int lineStart = text.LastIndexOf('\n', System.Math.Max(0, matchStart - 1)) + 1;
-            int lineIndex = 0;
-            for (int i = 0; i < matchStart; i++)
-                if (text[i] == '\n') lineIndex++;
+            int lineIndex = LineIndexOf(text, matchStart);
             string linePrefix = text.Substring(lineStart, matchStart - lineStart);
             string matchSpan  = text.Substring(matchStart, safeLen);
 
             float lineHeight = EstimateBodyLineHeight();
-            float bodyOffsetY = 0f;
-            try { bodyOffsetY = _bodyField.layout.y; } catch { /* layout not ready */ }
-            float top = bodyOffsetY + lineIndex * lineHeight;
 
-            float left = 0f;
-            float width = 0f;
+            Vector2 origin = Vector2.zero;
+            float matchWidth = 0f;
             bool usePerSpan = false;
-            try
+
+            TextElement te = null;
+            try { te = _bodyField.Q<TextElement>(); } catch { /* not available */ }
+
+            if (te != null)
             {
-                var te = _bodyField.Q<TextElement>();
-                if (te != null)
+                try
                 {
-                    var prefixSize = te.MeasureTextSize(linePrefix, 0, VisualElement.MeasureMode.Undefined, 0, VisualElement.MeasureMode.Undefined);
-                    var matchSize  = te.MeasureTextSize(matchSpan,  0, VisualElement.MeasureMode.Undefined, 0, VisualElement.MeasureMode.Undefined);
-                    // Add the TextElement's own offset inside the
-                    // body field (it usually has a couple of px of
-                    // padding) so the marker lands flush against the
-                    // glyph rather than at the field's outer edge.
-                    float teLeft = 0f;
-                    try { teLeft = te.layout.x; } catch { /* skip */ }
-                    left = teLeft + prefixSize.x;
-                    width = matchSize.x;
-                    usePerSpan = width > 0.5f;
+                    var prefixSize = te.MeasureTextSize(
+                        linePrefix, 0f, VisualElement.MeasureMode.Undefined,
+                        0f, VisualElement.MeasureMode.Undefined);
+                    var matchSize  = te.MeasureTextSize(
+                        matchSpan, 0f, VisualElement.MeasureMode.Undefined,
+                        0f, VisualElement.MeasureMode.Undefined);
+                    origin = te.ChangeCoordinatesTo(
+                        markerParent,
+                        new Vector2(prefixSize.x, lineIndex * lineHeight));
+                    matchWidth = matchSize.x;
+                    usePerSpan = matchWidth > 0.5f;
+                }
+                catch
+                {
+                    // Coordinate conversion or measurement failed.
+                    // Fall through to the full-line strip path.
+                    usePerSpan = false;
                 }
             }
-            catch { /* fall through to full-line strip */ }
 
-            _bodyMarker.style.top = top;
+            if (!usePerSpan)
+            {
+                // Full-line strip — anchor at column 0 of the body
+                // field. Still gives a visible row-level cue even
+                // when precise glyph metrics aren't available.
+                try
+                {
+                    origin = _bodyField.ChangeCoordinatesTo(
+                        markerParent,
+                        new Vector2(0f, lineIndex * lineHeight));
+                }
+                catch
+                {
+                    origin = new Vector2(0f, lineIndex * lineHeight);
+                }
+            }
+
+            _bodyMarker.style.top = origin.y;
             _bodyMarker.style.height = lineHeight;
             if (usePerSpan)
             {
-                _bodyMarker.style.left = left;
-                _bodyMarker.style.width = width;
+                _bodyMarker.style.left = origin.x;
+                _bodyMarker.style.width = matchWidth;
                 _bodyMarker.style.right = StyleKeyword.Auto;
             }
             else
             {
-                _bodyMarker.style.left = 0;
+                _bodyMarker.style.left = origin.x;
                 _bodyMarker.style.right = 0;
                 _bodyMarker.style.width = StyleKeyword.Auto;
             }
             _bodyMarker.style.display = DisplayStyle.Flex;
+        }
+
+        private static int LineIndexOf(string text, int charIndex)
+        {
+            int line = 0;
+            int max = System.Math.Min(charIndex, text?.Length ?? 0);
+            for (int i = 0; i < max; i++)
+                if (text[i] == '\n') line++;
+            return line;
         }
 
         private void HideBodyMarker()
