@@ -5,6 +5,7 @@ using UnityEngine;
 using UnityEngine.UIElements;
 using RoslynRepl.Editor.Core;
 using RoslynRepl.Editor.Diagnostics;
+using RoslynRepl.Editor.Patches;
 using RoslynRepl.Editor.UI.Find;
 
 namespace RoslynRepl.Editor.UI
@@ -543,6 +544,12 @@ return UnityEngine.Application.unityVersion;";
                 browserHost.Clear();
                 _browser = new ObjectBrowserView(browserHost);
                 _browser.OnInstanceChosen += OnBrowserInstanceChosen;
+                // Issue #60: right-click context menu actions on
+                // browser rows (Inspect / Set as `_` / Patch Method /
+                // copy helpers). Double-click stays on the existing
+                // mode-aware OnInstanceChosen path so muscle memory
+                // doesn't change.
+                _browser.OnRowAction += OnBrowserRowAction;
             }
 
             // Mount the watch panel below output. CreateGUI can fire
@@ -1042,40 +1049,63 @@ return UnityEngine.Application.unityVersion;";
         // depending on the lower pane's mode. Pull UI: in Patches
         // mode the click means "I want to patch a method on this
         // type's class" — open the method picker instead of the usual
-        // Output inspect. Output mode keeps the default
-        // render-as-`return X;` behavior.
+        // Double-click handler — preserves the mode-aware behaviour
+        // the panel had before #60: Patches mode opens the method
+        // picker, Output mode renders the inspect tree. Refactored
+        // to delegate to the same helpers the new context-menu
+        // actions call, so both entry points stay in lockstep.
         private void OnBrowserInstanceChosen(InstanceEntry entry)
         {
             if (entry == null) return;
-
-            object value = entry.Value;
-            if (value is UnityEngine.Object uo && uo == null) value = null;
-
             if (_patchesModeActive)
             {
-                if (value == null)
-                {
-                    // Without a live instance we can still pick a
-                    // method on the declared type — but DeclaredType
-                    // is only set for some entries (singletons read
-                    // from a static accessor). Fall back to
-                    // value's GetType() when present, otherwise show
-                    // a hint.
-                    if (entry.DeclaredType != null)
-                    {
-                        OpenMethodPickerForType(entry.DeclaredType);
-                    }
-                    else
-                    {
-                        AppendOutput("(can't open method picker — instance is null and no DeclaredType)", "warning");
-                    }
-                    return;
-                }
-                OpenMethodPickerForType(value.GetType());
-                return;
+                OpenBrowserPatchMethod(entry);
             }
+            else
+            {
+                RenderBrowserInspect(entry);
+            }
+        }
 
-            // Output mode — original behavior.
+        // Issue #60: dispatch for the row context-menu actions.
+        // Inspect / SetAsUnderscore / PatchMethod reuse the same
+        // helpers double-click drives so the menu can't drift away
+        // from the existing flows. Copy actions write to the
+        // clipboard and surface a confirmation in Output — enough of
+        // a breadcrumb that the user knows the click landed without
+        // having to switch focus to a paste target.
+        private void OnBrowserRowAction(InstanceEntry entry, ObjectBrowserView.BrowserRowAction action)
+        {
+            if (entry == null) return;
+            switch (action)
+            {
+                case ObjectBrowserView.BrowserRowAction.Inspect:
+                    RenderBrowserInspect(entry);
+                    break;
+                case ObjectBrowserView.BrowserRowAction.SetAsUnderscore:
+                    SetBrowserEntryAsUnderscore(entry);
+                    break;
+                case ObjectBrowserView.BrowserRowAction.PatchMethod:
+                    OpenBrowserPatchMethod(entry);
+                    break;
+                case ObjectBrowserView.BrowserRowAction.CopyTypeName:
+                    CopyBrowserEntryTypeName(entry);
+                    break;
+                case ObjectBrowserView.BrowserRowAction.CopyInspectSnippet:
+                    CopyBrowserInspectSnippet(entry);
+                    break;
+            }
+        }
+
+        // Shared inspect path — clear Output, breadcrumb, bind `_`,
+        // render the tree, refresh watches, scroll, raise the find
+        // overlay's rebuild signal. Same shape both double-click in
+        // Output mode and the Inspect context-menu action emit.
+        private void RenderBrowserInspect(InstanceEntry entry)
+        {
+            if (entry == null) return;
+            object value = entry.Value;
+            if (value is UnityEngine.Object uo && uo == null) value = null;
             if (_outputContent == null) return;
 
             ClearOutput();
@@ -1113,6 +1143,220 @@ return UnityEngine.Application.unityVersion;";
             // is appended.
             _outputFindable?.RaiseRebuilt();
         }
+
+        // Shared method-picker entry. Falls back to DeclaredType when
+        // Value is null (singleton accessors that read a static
+        // member but don't expose a live instance until the
+        // accessor is actually called).
+        private void OpenBrowserPatchMethod(InstanceEntry entry)
+        {
+            if (entry == null) return;
+            object value = entry.Value;
+            if (value is UnityEngine.Object uo && uo == null) value = null;
+
+            if (value == null)
+            {
+                if (entry.DeclaredType != null)
+                {
+                    OpenMethodPickerForType(entry.DeclaredType);
+                }
+                else
+                {
+                    AppendOutput("(can't open method picker — instance is null and no DeclaredType)", "warning");
+                }
+                return;
+            }
+            OpenMethodPickerForType(value.GetType());
+        }
+
+        // Set as `_` is Inspect-without-the-render: bind the carry
+        // over so `_` resolves to this instance in the next snippet
+        // / watch, leave Output alone. The toolbar badge picks the
+        // change up through LastResultChanged so the user still gets
+        // a visible confirmation without the Output panel scrolling.
+        //
+        // Watch refresh: the action's main use-case is "pin this
+        // object so my `_.foo` watches track it from now on", so a
+        // Watch panel left holding evaluations against the *previous*
+        // `_` is the worst-case stale-data trap. Same _watch.Refresh
+        // commit point that RenderBrowserInspect uses pulls the
+        // expressions through the new value immediately.
+        private void SetBrowserEntryAsUnderscore(InstanceEntry entry)
+        {
+            if (entry == null) return;
+            object value = entry.Value;
+            if (value is UnityEngine.Object uo && uo == null) value = null;
+            if (value == null)
+            {
+                AppendOutput("(can't set `_` — instance is null or destroyed)", "warning");
+                return;
+            }
+            ReplEngine.SetLastResult(value);
+            _watch?.Refresh();
+            if (_outputSummary != null) _outputSummary.text = "Bound `_`";
+        }
+
+        private void CopyBrowserEntryTypeName(InstanceEntry entry)
+        {
+            if (entry == null) return;
+            // Prefer the live runtime type (handles cases where the
+            // declared type is an abstract base and the row was
+            // surfaced for a concrete subclass); fall back to
+            // DeclaredType and finally to the display TypeName.
+            //
+            // Render through CSharpTypeName so nested types come out
+            // as `Outer.Inner` instead of the reflection `Outer+Inner`
+            // form, and closed generics resolve to `List<int>` rather
+            // than the assembly-qualified backtick syntax. Falls back
+            // to the display TypeName when the type isn't renderable
+            // (open generic parameters etc.) — that's a display string
+            // and not guaranteed valid C#, but it's the best we can
+            // offer when the type itself can't be expressed as source.
+            var type = entry.Value?.GetType() ?? entry.DeclaredType;
+            string name = null;
+            if (type != null && CSharpTypeName.IsRenderable(type))
+            {
+                name = CSharpTypeName.Render(type);
+            }
+            if (string.IsNullOrEmpty(name)) name = entry.TypeName;
+            if (string.IsNullOrEmpty(name))
+            {
+                AppendOutput("(can't copy type — no type information available)", "warning");
+                return;
+            }
+            EditorGUIUtility.systemCopyBuffer = name;
+            AppendOutput($"📋 Copied type name: {name}", "info");
+        }
+
+        private void CopyBrowserInspectSnippet(InstanceEntry entry)
+        {
+            if (entry == null) return;
+            var snippet = BuildBrowserInspectSnippet(entry);
+            if (string.IsNullOrEmpty(snippet))
+            {
+                AppendOutput("(can't build snippet — no type information available)", "warning");
+                return;
+            }
+            EditorGUIUtility.systemCopyBuffer = snippet;
+            AppendOutput("📋 Copied inspect snippet — paste into Code or a Watch row.", "info");
+        }
+
+        // Build a small C# snippet that re-locates the instance.
+        // Category drives the shape: MonoBehaviour rows use the
+        // scene-wide search (FindFirstObjectByType), ScriptableObject
+        // rows use the row's actual asset path (the previous
+        // type-wide FindAssets("t:T") would land on whichever asset
+        // came first in the search — wrong row for projects with
+        // multiple SOs of the same type), singletons get a comment-
+        // only template since we can't infer the accessor name.
+        //
+        // Type expressions go through CSharpTypeName so nested /
+        // generic types come out as valid C# source — the reflection
+        // FullName form (Outer+Inner, generic backticks, assembly-
+        // qualified arguments) doesn't compile when pasted. Bail
+        // with a null result when no real Type is available or the
+        // type isn't renderable as source; the menu surface gates
+        // this action behind the same check so a user can't ask for
+        // a snippet that would fail to copy.
+        private static string BuildBrowserInspectSnippet(InstanceEntry entry)
+        {
+            var type = entry.Value?.GetType() ?? entry.DeclaredType;
+            if (type == null) return null;
+            if (!CSharpTypeName.IsRenderable(type)) return null;
+            string typeExpr = CSharpTypeName.Render(type);
+
+            switch (entry.Category)
+            {
+                case InstanceCategory.MonoBehaviour:
+                    // Resolve by InstanceID when there's a live row
+                    // so the snippet returns the exact instance the
+                    // user right-clicked — not whichever same-type
+                    // component FindFirstObjectByType happens to
+                    // find first. Same precision the ScriptableObject
+                    // path-based snippet gives, and the only form
+                    // that survives "the row is on an inactive
+                    // GameObject" or "the row is a prefab asset's
+                    // component" (both invisible to a scene-wide
+                    // FindFirstObjectByType query).
+                    //
+                    // InstanceID is Editor-session-scoped: a domain
+                    // reload / Play Mode toggle rotates IDs, after
+                    // which the snippet stops resolving. The user
+                    // can right-click again for a fresh ID. We don't
+                    // annotate that in the snippet itself — the
+                    // surface is intentionally minimal so it pastes
+                    // cleanly into a Watch row.
+                    if (entry.Value is UnityEngine.Object mbObj && mbObj != null)
+                    {
+                        int iid = mbObj.GetInstanceID();
+                        return $"return UnityEditor.EditorUtility.InstanceIDToObject({iid}) as {typeExpr};";
+                    }
+                    // No live value to anchor on — fall back to the
+                    // scene-wide first-match template. Uncommon for
+                    // MB rows but possible when the row was surfaced
+                    // through DeclaredType only.
+                    return $"return UnityEngine.Object.FindFirstObjectByType<{typeExpr}>();";
+
+                case InstanceCategory.ScriptableObject:
+                    // Path-based snippet when the row's live value is
+                    // an on-disk asset. Sub-asset entries (e.g. a
+                    // baked material packed inside an FBX) live at
+                    // the same path as their main asset, so
+                    // LoadAssetAtPath would return the wrong object;
+                    // filter by name through LoadAllAssetsAtPath
+                    // instead. The type-wide template is only used
+                    // when there's no path at all (a ScriptableObject
+                    // created in-memory via CreateInstance and
+                    // surfaced through a singleton-like accessor).
+                    if (entry.Value is UnityEngine.Object soAsset && soAsset != null)
+                    {
+                        var assetPath = UnityEditor.AssetDatabase.GetAssetPath(soAsset);
+                        if (!string.IsNullOrEmpty(assetPath))
+                        {
+                            string verbatimPath = EscapeVerbatimStringLiteral(assetPath);
+                            if (UnityEditor.AssetDatabase.IsMainAsset(soAsset))
+                            {
+                                return $"return UnityEditor.AssetDatabase.LoadAssetAtPath<{typeExpr}>(@\"{verbatimPath}\");";
+                            }
+                            string verbatimName = EscapeVerbatimStringLiteral(soAsset.name ?? string.Empty);
+                            return
+$@"return UnityEditor.AssetDatabase.LoadAllAssetsAtPath(@""{verbatimPath}"")
+    .OfType<{typeExpr}>()
+    .FirstOrDefault(a => a.name == @""{verbatimName}"");";
+                        }
+                    }
+                    // No path — fall back to the type-wide template
+                    // with a comment flagging the imprecision so the
+                    // user knows the snippet may not pick the same
+                    // row when multiple in-memory instances exist.
+                    return
+$@"// {typeExpr} has no asset path — this template returns the first match by type.
+return UnityEditor.AssetDatabase.FindAssets(""t:{type.Name}"")
+    .Select(g => UnityEditor.AssetDatabase.LoadAssetAtPath<{typeExpr}>(UnityEditor.AssetDatabase.GUIDToAssetPath(g)))
+    .FirstOrDefault();";
+
+                case InstanceCategory.Singleton:
+                    // Locator scans for static accessors at scan
+                    // time; we don't carry the accessor name through
+                    // into the entry, so the snippet is a template
+                    // with a clear TODO rather than a wrong default
+                    // (e.g. assuming `.Instance` when the project
+                    // uses `.I` / `.Singleton` / a property name).
+                    return $"// {typeExpr} — replace with your project's accessor (e.g. {type.Name}.Instance)\nreturn null;";
+
+                default:
+                    return $"return UnityEngine.Object.FindFirstObjectByType<{typeExpr}>();";
+            }
+        }
+
+        // Escape for a C# verbatim string literal (@"..."): only the
+        // double-quote needs to be doubled. Backslashes / forward
+        // slashes / dots pass through unchanged, which is exactly
+        // what we want for asset paths (Unity always uses '/' even on
+        // Windows, but a defensive escape keeps the snippet robust
+        // against future format changes).
+        private static string EscapeVerbatimStringLiteral(string s)
+            => (s ?? string.Empty).Replace("\"", "\"\"");
 
         private void OpenMethodPickerForType(Type type)
         {
