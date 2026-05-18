@@ -4,6 +4,17 @@ All notable changes to this package will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added (Toolbar `_` carry-over badge)
+- New toolbar pill **`_ : Player (GameObject)`** surfaces the current `_` carry-over target so users can see at a glance whether the engine has a live value bound to `_` (the static the wrapper exposes inside snippets and Watch expressions). The badge appears whenever `ReplEngine.LastResult` is non-null and hides when it's null — Run that returns a non-null value, Object Browser inspect, and explicit `ReplEngine.SetLastResult` all light it up; an explicit Clear or `Reset Project Data` extinguishes it. Closes #59.
+- Clicking the badge **re-inspects** the live `_` value: clears Output and renders the same `SimpleObjectSerializer.ToTree` shape Browse-inspect emits, so the user can fold the tree open and read the object's fields without typing `return _;` themselves. The summary chip reads `Inspect _` while in this mode so it's distinguishable from a Run or Browse landing.
+- A small **✕** sits inside the same pill and drops the carry-over via `ReplEngine.ResetLastResult()`. The clear routes through the engine (not directly at the badge) so every subscriber — this UI, future panels, the engine's own follow-up paths — sees the transition through one event.
+- Object Browser inspect now emits an inline **`→ now available as \`_\``** info line right above the rendered tree. Without that the user had to notice the toolbar badge separately to realise their next snippet / watch can reach the value through `_`; the inline mention makes the carry-over discoverable from the same glance as the inspection itself.
+
+### Changed (`ReplEngine` carry-over plumbing)
+- `ReplEngine.LastResult` mutations now route through a single private `AssignLastResult` chokepoint (`SetLastResult`, `ResetLastResult`, and the in-Execute success path all funnel through it). The new public `LastResultChanged` event fires from there exactly once per real transition — `ReferenceEquals` guards against firing on no-op reassigns. Subscribers (the toolbar badge today, any future surfaces) don't need to poll and can't see an updated field without the matching event.
+
 ## [0.7.4] - 2026-05-18
 
 ### Added (Ctrl+F find overlay across Output / Watch / Patches)

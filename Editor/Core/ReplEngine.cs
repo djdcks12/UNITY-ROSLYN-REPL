@@ -40,8 +40,19 @@ namespace RoslynRepl.Editor.Core
         /// </summary>
         public static object LastResult { get; private set; }
 
+        /// <summary>
+        /// Raised after <see cref="LastResult"/> changes (either to a new
+        /// value or back to <c>null</c>). UI surfaces such as the toolbar
+        /// "Current <c>_</c>" badge subscribe so they re-render without
+        /// having to poll. Fires only on an actual transition — assigning
+        /// the same reference back is a no-op, so a busy Execute loop that
+        /// happens to return the same instance every time doesn't churn the
+        /// UI. The argument is the post-change value.
+        /// </summary>
+        public static event Action<object> LastResultChanged;
+
         /// <summary>Clears the carry-over <c>_</c> value.</summary>
-        public static void ResetLastResult() => LastResult = null;
+        public static void ResetLastResult() => AssignLastResult(null);
 
         /// <summary>
         /// Replaces the carry-over <c>_</c> value from editor UI flows that
@@ -50,7 +61,23 @@ namespace RoslynRepl.Editor.Core
         /// a snippet return would, so follow-up snippets and watches should
         /// see the same object through <c>_</c>.
         /// </summary>
-        public static void SetLastResult(object value) => LastResult = value;
+        public static void SetLastResult(object value) => AssignLastResult(value);
+
+        // Single chokepoint for every LastResult mutation — ResetLastResult,
+        // SetLastResult, and the in-Execute success path all route through
+        // here so LastResultChanged fires exactly once per real transition
+        // and we never have one path that updates the field but skips the
+        // event. ReferenceEquals is intentional: value-type equality on an
+        // arbitrary `object` is expensive and would also defeat the
+        // intent — two distinct instances that happen to be Equals should
+        // still count as a change since follow-up snippets get a different
+        // identity through `_`.
+        private static void AssignLastResult(object value)
+        {
+            if (ReferenceEquals(LastResult, value)) return;
+            LastResult = value;
+            LastResultChanged?.Invoke(value);
+        }
 
         /// <summary>
         /// Cancellation token for the snippet currently executing. Read inside
@@ -192,7 +219,7 @@ namespace RoslynRepl.Editor.Core
                 // instead of the user's actual previous value.
                 if (value != null && options.UpdateLastResult)
                 {
-                    LastResult = value;
+                    AssignLastResult(value);
                 }
                 return ReplResult.Success(value, FormatValue(value), ClassifyLogs(capture.End()), sw.Elapsed);
             }
