@@ -109,6 +109,14 @@ return UnityEngine.Application.unityVersion;";
         private Label _modeLabel;
         private Label _patchBadge;
         private Label _asmBadge;
+        // Issue #59: toolbar surface for the current `_` carry-over
+        // target. _underscoreHost is the row wrapper we toggle
+        // display on; _underscoreBadge is the click-to-reinspect
+        // label inside it; _underscoreClearBtn is the ✕ that drops
+        // the value via ReplEngine.ResetLastResult().
+        private VisualElement _underscoreHost;
+        private Label _underscoreBadge;
+        private Button _underscoreClearBtn;
         private Label _outputSummary;
         private ObjectBrowserView _browser;
         private WatchPanelView _watch;
@@ -459,6 +467,39 @@ return UnityEngine.Application.unityVersion;";
             }
             UpdateAsmBadge();
 
+            // Issue #59: keep the toolbar `_` badge in sync with the
+            // engine's carry-over value. Subscribe / re-subscribe in
+            // BindControls so a CreateGUI rebuild after a domain
+            // reload picks up the live state, and unhook first to
+            // avoid stacking handlers across rebuilds (same pattern
+            // as the patch-registry and assembly-count badges above).
+            _underscoreHost     = root.Q<VisualElement>("underscore-host");
+            _underscoreBadge    = root.Q<Label>("underscore-badge");
+            _underscoreClearBtn = root.Q<Button>("underscore-clear-btn");
+            ReplEngine.LastResultChanged -= OnLastResultChanged;
+            ReplEngine.LastResultChanged += OnLastResultChanged;
+            if (_underscoreBadge != null)
+            {
+                // Click the label to re-render the current `_` value
+                // back into Output as a fresh tree — same shape Browse
+                // emits — so the user can re-inspect without having to
+                // type `return _;` themselves.
+                _underscoreBadge.RegisterCallback<MouseDownEvent>(_ => ReinspectUnderscore());
+                _underscoreBadge.tooltip =
+                    "Current `_` target.\n" +
+                    "Click to re-inspect the value in Output.\n" +
+                    "✕ clears the carry-over so the next snippet sees `_` as null.\n\n" +
+                    "Use `_` directly in Code or Watch:\n" +
+                    "    return _;\n" +
+                    "    _.someField";
+            }
+            if (_underscoreClearBtn != null)
+            {
+                _underscoreClearBtn.clicked += ClearUnderscore;
+                _underscoreClearBtn.tooltip = "Clear the current `_` value.";
+            }
+            UpdateUnderscoreBadge();
+
             // Note: Output / Patches mode tabs in the lower pane
             // header. Clicking either label flips the visible host
             // between the existing output ScrollView and the patch UI.
@@ -632,6 +673,7 @@ return UnityEngine.Application.unityVersion;";
             RoslynRepl.Editor.Patches.PatchRegistry.Changed -= UpdatePatchBadge;
             RoslynRepl.Editor.Patches.PatchAutoReapply.SettingsChanged -= UpdatePatchBadge;
             RoslynRepl.Editor.Diagnostics.ReplDiagnostics.AssemblyCountChanged -= UpdateAsmBadge;
+            ReplEngine.LastResultChanged -= OnLastResultChanged;
             // Drop the watch panel's WatchStore subscription so this
             // window's instance doesn't keep refreshing in the
             // background after it's closed (or before it's rebuilt by
@@ -731,6 +773,98 @@ return UnityEngine.Application.unityVersion;";
 
             _asmBadge.style.display = DisplayStyle.Flex;
         }
+
+        // Issue #59: keep the toolbar `_` pill aligned with
+        // ReplEngine.LastResult. Wired in BindControls; fires every
+        // time the engine transitions LastResult (Execute, Browse-
+        // inspect, ResetLastResult, Reset Project Data). The
+        // argument isn't read directly — we re-format off the live
+        // LastResult so a races-with-rebuild scenario can't print a
+        // stale value.
+        private void OnLastResultChanged(object _) => UpdateUnderscoreBadge();
+
+        private void UpdateUnderscoreBadge()
+        {
+            if (_underscoreHost == null || _underscoreBadge == null) return;
+            var value = ReplEngine.LastResult;
+            if (value == null)
+            {
+                _underscoreHost.style.display = DisplayStyle.None;
+                return;
+            }
+            _underscoreBadge.text = FormatUnderscoreBadge(value);
+            _underscoreHost.style.display = DisplayStyle.Flex;
+        }
+
+        // "_ : Player (GameObject)" / "_ : 42 (Int32)" / "_ : (destroyed)".
+        // Cap the value preview at 24 chars so a long ToString() can't
+        // push the version label off the toolbar. UnityEngine.Object
+        // values use .name when present (matches how the Object
+        // Browser labels them); plain CLR objects use ToString().
+        // Type name is GetType().Name (unqualified) — full namespace
+        // chains would blow the budget on something like
+        // System.Collections.Generic.Dictionary`2.
+        private static string FormatUnderscoreBadge(object value)
+        {
+            if (value == null) return "_ : null";
+
+            string label;
+            string typeName;
+            if (value is UnityEngine.Object uo)
+            {
+                // Unity overloads `==` so a destroyed instance is
+                // == null. Touching .name on a destroyed object
+                // throws MissingReferenceException, so probe via
+                // the overloaded operator first.
+                if (uo == null) return "_ : (destroyed)";
+                try { label = uo.name; }
+                catch { return "_ : (destroyed)"; }
+                if (string.IsNullOrEmpty(label)) label = "(unnamed)";
+                typeName = value.GetType().Name;
+            }
+            else
+            {
+                try { label = value.ToString() ?? string.Empty; }
+                catch { label = "(ToString threw)"; }
+                typeName = value.GetType().Name;
+            }
+
+            // Single-line + length-cap. Newlines inside ToString()
+            // output would visibly break the toolbar row otherwise.
+            label = label.Replace('\n', ' ').Replace('\r', ' ');
+            if (label.Length > 24) label = label.Substring(0, 23) + "…";
+
+            return $"_ : {label} ({typeName})";
+        }
+
+        // Re-render the live `_` value into Output as a fresh tree.
+        // Mirrors the Browse-inspect shape (Clear + info breadcrumb +
+        // tree) so the user sees the same layout they'd get from
+        // double-clicking the source row. Skips when nothing is
+        // carried over — the badge is hidden in that case anyway,
+        // but a paranoid click via tooltip / keyboard could still
+        // land here.
+        private void ReinspectUnderscore()
+        {
+            var value = ReplEngine.LastResult;
+            if (value == null) return;
+            if (_outputContent == null) return;
+
+            ClearOutput();
+            AppendOutput($"▼ Inspect `_`: {value.GetType().Name}", "info");
+            AppendResult(SimpleObjectSerializer.ToTree(value, BuildOutputTreeOptions()));
+            if (_durationLabel != null) _durationLabel.text = string.Empty;
+            if (_outputSummary != null) _outputSummary.text = "Inspect `_`";
+            _watch?.Refresh();
+            ScrollOutputToBottom();
+            _outputFindable?.RaiseRebuilt();
+        }
+
+        // Drop the carry-over. Routes through ReplEngine.ResetLast
+        // Result so the LastResultChanged event fires and every
+        // subscriber (this badge plus anything else that registers in
+        // the future) updates in lockstep.
+        private void ClearUnderscore() => ReplEngine.ResetLastResult();
 
         public void SetPatchesModeActive(bool active)
         {
@@ -955,6 +1089,20 @@ return UnityEngine.Application.unityVersion;";
             }
 
             ReplEngine.SetLastResult(value);
+            // Issue #59 acceptance: surface that the inspected value
+            // is now bound to `_`. Without this the user has to
+            // notice the toolbar badge separately to realise their
+            // next snippet / watch can reference the value through
+            // `_`; emitting it inline next to the rendered tree
+            // makes the carry-over discoverable from the same
+            // glance as the inspection itself.
+            //
+            // The "Try: return _;" hint addresses the second leg of
+            // the discoverability gap — a newer user might still not
+            // realise "available as `_`" means they can literally
+            // type `_` into the Code editor or a Watch expression.
+            // One concrete example removes the guesswork.
+            AppendOutput("→ available as `_` in Code and Watch. Try: return _;", "info");
             AppendResult(SimpleObjectSerializer.ToTree(value, BuildOutputTreeOptions()));
             if (_durationLabel != null) _durationLabel.text = string.Empty;
             if (_outputSummary != null) _outputSummary.text = "Browsed";

@@ -150,6 +150,61 @@
     -unity-font-style: bold;
 }
 
+/* Issue #59: toolbar surface for the current `_` carry-over target.
+   The host is a row that bundles a click-to-reinspect label and a
+   tiny ✕ button that clears the value. Hidden via inline
+   `display:none` from C# whenever LastResult is null, so it doesn't
+   eat toolbar real estate when the user has nothing carried over.
+   Palette matches the patch / asm badge family — muted background,
+   bright foreground — so the three toolbar pills read as siblings
+   instead of competing visual styles. */
+.rr-underscore-host {
+    flex-direction: row;
+    align-items: center;
+    margin-left: 4px;
+    margin-right: 4px;
+    padding-left: 6px;
+    padding-right: 2px;
+    height: 16px;
+    background-color: rgba(120, 180, 255, 0.18);
+    border-top-left-radius: 8px;
+    border-top-right-radius: 8px;
+    border-bottom-left-radius: 8px;
+    border-bottom-right-radius: 8px;
+}
+
+.rr-underscore-badge {
+    color: rgb(130, 190, 255);
+    font-size: 10px;
+    -unity-font-style: bold;
+    -unity-text-align: middle-center;
+    margin-right: 2px;
+    cursor: link;
+}
+
+/* The clear button sits inside the same pill, sized down so the row
+   keeps the same 16px height. -unity-font-style:normal stops it
+   inheriting the badge's bold. */
+.rr-underscore-clear {
+    width: 14px;
+    height: 14px;
+    min-width: 14px;
+    min-height: 14px;
+    padding: 0;
+    margin: 0 0 0 2px;
+    background-color: rgba(0, 0, 0, 0);
+    border-width: 0;
+    color: rgb(160, 160, 160);
+    font-size: 9px;
+    -unity-font-style: normal;
+    -unity-text-align: middle-center;
+    cursor: link;
+}
+
+.rr-underscore-clear:hover {
+    color: rgb(230, 130, 130);
+}
+
 /* Issue #20: persistent banner under the Code header reminding the
    user that the only way to interrupt a snippet is for the snippet
    itself to observe `ct`. The first-Run dialog is the loud version;

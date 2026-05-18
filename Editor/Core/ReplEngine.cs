@@ -40,8 +40,37 @@ namespace RoslynRepl.Editor.Core
         /// </summary>
         public static object LastResult { get; private set; }
 
+        /// <summary>
+        /// Raised after <see cref="LastResult"/> is assigned. UI surfaces
+        /// such as the toolbar "Current <c>_</c>" badge subscribe so they
+        /// re-render without having to poll.
+        ///
+        /// Fires on every explicit <see cref="SetLastResult"/> call and on
+        /// every successful Execute that produces a non-null value — even
+        /// when the new reference equals the prior one. Same-reference
+        /// reassignments happen naturally when a snippet mutates and
+        /// returns the same object (<c>_.name = "Hero"; return _;</c>);
+        /// the identity didn't change, but the visible state subscribers
+        /// render off the value did, so skipping the notify would freeze
+        /// the toolbar badge on the stale name. <see cref="ResetLastResult"/>
+        /// is the one path that short-circuits a redundant assignment —
+        /// resetting an already-null engine is a true no-op and shouldn't
+        /// churn subscribers.
+        ///
+        /// Subscriber exceptions are caught per-handler and surfaced as a
+        /// <see cref="UnityEngine.Debug.LogWarning"/>. A misbehaving UI
+        /// hook can't propagate up through Execute's outer catch and
+        /// convert a successful snippet into a runtime error; remaining
+        /// subscribers still fire, and <see cref="LastResult"/> still
+        /// updates regardless of the failure.
+        ///
+        /// The argument is the post-change value (<c>null</c> after a
+        /// reset).
+        /// </summary>
+        public static event Action<object> LastResultChanged;
+
         /// <summary>Clears the carry-over <c>_</c> value.</summary>
-        public static void ResetLastResult() => LastResult = null;
+        public static void ResetLastResult() => AssignLastResult(null, force: false);
 
         /// <summary>
         /// Replaces the carry-over <c>_</c> value from editor UI flows that
@@ -50,7 +79,51 @@ namespace RoslynRepl.Editor.Core
         /// a snippet return would, so follow-up snippets and watches should
         /// see the same object through <c>_</c>.
         /// </summary>
-        public static void SetLastResult(object value) => LastResult = value;
+        public static void SetLastResult(object value) => AssignLastResult(value, force: true);
+
+        // Single chokepoint for every LastResult mutation — ResetLastResult,
+        // SetLastResult, and the in-Execute success path all route through
+        // here so LastResultChanged fires consistently and we never have one
+        // path that updates the field but skips the event.
+        //
+        // force flag:
+        //   false (Reset) — skip the notify when the field is already at
+        //     the target value. ResetLastResult on an already-null engine
+        //     is a true no-op so subscribers don't see spurious null→null
+        //     transitions.
+        //   true (Set / successful Execute) — notify even when the new
+        //     value's reference equals the current one. Same-reference
+        //     assignments happen in real workflows: `_.name = "Hero";
+        //     return _;` returns the same GameObject, but its visible
+        //     state (badge text, watch preview) changed. Skipping the
+        //     event here left the toolbar badge frozen on the prior name.
+        //
+        // Subscribers are invoked through GetInvocationList() with a
+        // per-handler try/catch so a UI subscriber that throws — a badge
+        // refresh hitting a disposed VisualElement, an event handler
+        // calling into a torn-down panel — can't propagate up through
+        // Execute's outer catch and convert a successful snippet into a
+        // ReplResult.RuntimeError. The carry-over field still updates;
+        // the failure is logged so the diagnostic isn't silent.
+        private static void AssignLastResult(object value, bool force)
+        {
+            if (!force && ReferenceEquals(LastResult, value)) return;
+            LastResult = value;
+
+            var ev = LastResultChanged;
+            if (ev == null) return;
+            foreach (var d in ev.GetInvocationList())
+            {
+                try { ((Action<object>)d).Invoke(value); }
+                catch (Exception ex)
+                {
+                    UnityEngine.Debug.LogWarning(
+                        "[Roslyn REPL] LastResultChanged subscriber " +
+                        $"{(d.Target?.GetType().Name ?? "(static)")}.{d.Method.Name} threw: " +
+                        $"{ex.GetType().Name}: {ex.Message}");
+                }
+            }
+        }
 
         /// <summary>
         /// Cancellation token for the snippet currently executing. Read inside
@@ -192,7 +265,7 @@ namespace RoslynRepl.Editor.Core
                 // instead of the user's actual previous value.
                 if (value != null && options.UpdateLastResult)
                 {
-                    LastResult = value;
+                    AssignLastResult(value, force: true);
                 }
                 return ReplResult.Success(value, FormatValue(value), ClassifyLogs(capture.End()), sw.Elapsed);
             }

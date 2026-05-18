@@ -9,6 +9,10 @@
             <ui:Label name="mode-label" text="EDIT" class="rr-badge rr-badge--edit" />
             <ui:Label name="patch-badge" text="" class="rr-patch-badge" style="display: none;" />
             <ui:Label name="asm-badge" text="" class="rr-asm-badge" style="display: none;" />
+            <ui:VisualElement name="underscore-host" class="rr-underscore-host" style="display: none;">
+                <ui:Label name="underscore-badge" text="" class="rr-underscore-badge" />
+                <ui:Button name="underscore-clear-btn" text="✕" class="rr-underscore-clear" />
+            </ui:VisualElement>
             <ui:Label name="version-label" text="v?" class="rr-version" />
             <uie:ToolbarButton name="snippets-btn" text="Snippets…" />
             <uie:ToolbarButton name="history-btn" text="History…" />
