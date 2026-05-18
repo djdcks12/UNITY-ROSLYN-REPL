@@ -1268,6 +1268,33 @@ return UnityEngine.Application.unityVersion;";
             switch (entry.Category)
             {
                 case InstanceCategory.MonoBehaviour:
+                    // Resolve by InstanceID when there's a live row
+                    // so the snippet returns the exact instance the
+                    // user right-clicked — not whichever same-type
+                    // component FindFirstObjectByType happens to
+                    // find first. Same precision the ScriptableObject
+                    // path-based snippet gives, and the only form
+                    // that survives "the row is on an inactive
+                    // GameObject" or "the row is a prefab asset's
+                    // component" (both invisible to a scene-wide
+                    // FindFirstObjectByType query).
+                    //
+                    // InstanceID is Editor-session-scoped: a domain
+                    // reload / Play Mode toggle rotates IDs, after
+                    // which the snippet stops resolving. The user
+                    // can right-click again for a fresh ID. We don't
+                    // annotate that in the snippet itself — the
+                    // surface is intentionally minimal so it pastes
+                    // cleanly into a Watch row.
+                    if (entry.Value is UnityEngine.Object mbObj && mbObj != null)
+                    {
+                        int iid = mbObj.GetInstanceID();
+                        return $"return UnityEditor.EditorUtility.InstanceIDToObject({iid}) as {typeExpr};";
+                    }
+                    // No live value to anchor on — fall back to the
+                    // scene-wide first-match template. Uncommon for
+                    // MB rows but possible when the row was surfaced
+                    // through DeclaredType only.
                     return $"return UnityEngine.Object.FindFirstObjectByType<{typeExpr}>();";
 
                 case InstanceCategory.ScriptableObject:
